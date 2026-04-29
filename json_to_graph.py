@@ -7,11 +7,11 @@ from rdflib.compare import isomorphic
 
 
 # Load complex.json
-with open('complex.json', 'r', encoding='utf-8') as f:
+with open('samples/complex.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
 
 # Write pretty-printed JSON for user review
-with open('complex_pretty.json', 'w', encoding='utf-8') as f:
+with open('samples/complex_pretty.json', 'w', encoding='utf-8') as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
 print("Wrote pretty-printed JSON to complex_pretty.json")
 

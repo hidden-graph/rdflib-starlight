@@ -9,9 +9,9 @@ from starlight.parsers.ttl_parser import StarlightTurtleParser
 
 
 # Use test.ttl as input and output to test_output.ttl
-sample_path = os.path.join(os.path.dirname(__file__), '../samples/ttl 1.2.ttl')
-output_path = os.path.join(os.path.dirname(__file__), '../samples/test_output.ttl')
-json_output_path = os.path.join(os.path.dirname(__file__), '../samples/test.json')
+sample_path = os.path.join(os.path.dirname(__file__), 'samples/ttl 1.2.ttl')
+output_path = os.path.join(os.path.dirname(__file__), 'samples/test_output.ttl')
+json_output_path = os.path.join(os.path.dirname(__file__), 'samples/test.json')
 
 TTL_1_2 = True  # set to False when parsing standard Turtle 1.1 files
 

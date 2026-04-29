@@ -13,7 +13,7 @@ from starlight.parsers.ttl_parser import StarlightTurtleParser
 #from starlight.model.triple import Triple
 
 def test_ttl_equivalence():
-    sample_path = os.path.join(os.path.dirname(__file__), '../samples/simple.ttl')
+    sample_path = os.path.join(os.path.dirname(__file__), 'samples/simple.ttl')
     with open(sample_path, 'r') as f:
         ttl_data = f.read()
 
