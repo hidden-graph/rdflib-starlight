@@ -1,0 +1,31 @@
+@prefix ex: <http://example.org/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:alice ex:likes ex:chess .
+
+[] a sl:Reification ;
+    ex:confidence 0.9 ;
+    rdf:reifies _:si_0 .
+
+[] a sl:TripleTerm ;
+    ex:believedBy ex:bob ;
+    rdf:object true ;
+    rdf:predicate ex:isSurprising ;
+    rdf:subject _:si_0 .
+
+[] a sl:Reification ;
+    ex:confidence 0.6 ;
+    rdf:reifies [ a sl:TripleTerm ;
+            ex:confidence 0.5 ;
+            rdf:object ex:chess123 ;
+            rdf:predicate ex:likes ;
+            rdf:subject ex:alice123 ] .
+
+_:si_0 a sl:TripleTerm ;
+    ex:isSurprising true ;
+    rdf:object ex:chess ;
+    rdf:predicate ex:likes ;
+    rdf:subject ex:alice .
+

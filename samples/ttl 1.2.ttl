@@ -1,0 +1,45 @@
+@prefix ex: <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+ex:alice ex:likes ex:chess .
+<<( ex:alice ex:likes ex:chess )>> ex:isSurprising true .
+<<( <<( ex:alice ex:likes ex:chess )>> ex:isSurprising true )>> ex:believedBy ex:bob .
+
+_:r0 rdf:reifies <<( ex:alice ex:likes ex:chess )>> ;
+     ex:confidence 0.9 .
+
+<< ex:alice123 ex:likes ex:chess123 >> ex:confidence 0.6 .
+
+<< (ex:alice123 ex:likes ex:chess123) >> ex:confidence 0.5 .
+
+_:r1 rdf:reifies <<( ex:alice4 ex:likes ex:chess )>> .
+_:r1 ex:confidence 0.9 .
+
+<< ex:alice5 ex:likes ex:chess ~ ex:r1 >> ex:confidence 0.9 .
+
+<< ex:alice6 ex:likes ex:chess ~ >> ex:confidence 0.9 .
+
+_:r1 rdf:reifies <<( ex:alice7 ex:likes ex:chess )>> ;
+     ex:confidence 0.9 .
+
+_:r2 rdf:reifies <<( ex:alice7 ex:likes ex:chess )>> ;
+     ex:confidence 0.7 ;
+     ex:source ex:NYT .
+
+     _:r1 rdf:reifies <<( ex:alice8 ex:likes ex:chess )>> .
+
+     <<( ex:alice ex:likes ex:chess )>> ex:isBelieved true .
+
+     ex:statement1 ex:about <<( ex:alice ex:likes ex:chess )>> .
+
+     <<( ex:alice ex:likes ex:chess )>> ex:isSurprising true ;
+                                     ex:source ex:NYT .
+
+                                     ex:alice9 ex:likes ex:chess .
+<<( ex:alice9 ex:likes ex:chess )>> ex:confidence 0.9 .
+
+_:r1 rdf:reifies <<( ex:alice ex:likes ex:chess )>> .
+<< _:r1 ex:confidence 0.9 >> ex:source ex:NYT .
