@@ -1,0 +1,158 @@
+@prefix ex: <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+##################################################
+# 1. Base assertion + triple-term annotation
+##################################################
+
+ex:alice ex:likes ex:chess .
+
+<<( ex:alice ex:likes ex:chess )>> ex:isSurprising true .
+
+##################################################
+# 2. Nested triple-term (meta-statement)
+##################################################
+
+<<( <<( ex:alice ex:likes ex:chess )>> ex:isSurprising true )>>
+    ex:believedBy ex:bob .
+
+##################################################
+# 3. Explicit RDF 1.2 reification (rdf:reifies)
+##################################################
+
+_:r0 rdf:reifies <<( ex:alice ex:likes ex:chess )>> ;
+     ex:confidence 0.9 .
+
+##################################################
+# 4. Triple-term syntax variations
+##################################################
+
+<< ex:alice123 ex:likes ex:chess123 >> ex:confidence 0.6 .
+<<( ex:alice123 ex:likes ex:chess123 )>> ex:confidence 0.5 .
+
+##################################################
+# 5. Reifier split across triples
+##################################################
+
+_:r1 rdf:reifies <<( ex:alice4 ex:likes ex:chess )>> .
+_:r1 ex:confidence 0.9 .
+
+##################################################
+# 6. Inline reifier using ~ (explicit identity)
+##################################################
+
+<< ex:alice5 ex:likes ex:chess ~ ex:r_inline >>
+    ex:confidence 0.9 .
+
+##################################################
+# 7. Inline reifier with fresh blank node
+##################################################
+
+<< ex:alice6 ex:likes ex:chess ~ >>
+    ex:confidence 0.9 .
+
+##################################################
+# 8. Multiple reifiers for same triple term
+##################################################
+
+_:r2 rdf:reifies <<( ex:alice7 ex:likes ex:chess )>> ;
+     ex:confidence 0.9 .
+
+_:r3 rdf:reifies <<( ex:alice7 ex:likes ex:chess )>> ;
+     ex:confidence 0.7 ;
+     ex:source ex:NYT .
+
+##################################################
+# 9. Reifier with no additional metadata
+##################################################
+
+_:r4 rdf:reifies <<( ex:alice8 ex:likes ex:chess )>> .
+
+##################################################
+# 10. Triple-term used as subject
+##################################################
+
+<<( ex:alice ex:likes ex:chess )>> ex:isBelieved true .
+
+##################################################
+# 11. Triple-term used as object
+##################################################
+
+ex:statement1 ex:about <<( ex:alice ex:likes ex:chess )>> .
+
+##################################################
+# 12. Multi-property annotation on same triple term
+##################################################
+
+<<( ex:alice ex:likes ex:chess )>>
+    ex:isSurprising true ;
+    ex:source ex:NYT .
+
+##################################################
+# 13. Assertion + annotation coexistence
+##################################################
+
+ex:alice9 ex:likes ex:chess .
+<<( ex:alice9 ex:likes ex:chess )>> ex:confidence 0.9 .
+
+##################################################
+# 14. Reifier referenced as node in another triple term
+##################################################
+
+_:r5 rdf:reifies <<( ex:alice10 ex:likes ex:chess )>> ;
+     ex:confidence 0.9 .
+
+<<( _:r5 ex:confidence 0.9 )>> ex:source ex:NYT .
+
+##################################################
+# 15. Deep nesting with reification inside
+##################################################
+
+<<( 
+    <<( ex:alice11 ex:likes ex:chess )>> ex:confidence 0.8 
+ )>> ex:assertedBy ex:bob .
+
+##################################################
+# 16. Reified triple WITHOUT asserting base triple
+##################################################
+
+<< ex:alice12 ex:likes ex:chess >> ex:confidence 0.4 .
+
+# (No ex:alice12 ex:likes ex:chess .)
+
+##################################################
+# 17. Same triple term reused across annotations
+##################################################
+
+<<( ex:alice13 ex:likes ex:chess )>> ex:confidence 0.6 .
+<<( ex:alice13 ex:likes ex:chess )>> ex:source ex:NYT .
+
+##################################################
+# 18. Mixed explicit + inline reification (same triple)
+##################################################
+
+_:r6 rdf:reifies <<( ex:alice14 ex:likes ex:chess )>> ;
+     ex:confidence 0.5 .
+
+<< ex:alice14 ex:likes ex:chess ~ ex:r6 >>
+    ex:source ex:NYT .
+
+##################################################
+# 19. Reifier reused across different triples (edge case)
+##################################################
+
+_:r7 rdf:reifies <<( ex:alice15 ex:likes ex:chess )>> ;
+     ex:confidence 0.9 .
+
+# same reifier reused (semantically questionable but legal RDF)
+_:r7 rdf:reifies <<( ex:alice16 ex:likes ex:tennis )>> .
+
+##################################################
+# 20. Triple term referencing another triple term as object
+##################################################
+
+<<( ex:alice17 ex:believes <<( ex:alice17 ex:likes ex:chess )>> )>>
+    ex:confidence 0.3 .

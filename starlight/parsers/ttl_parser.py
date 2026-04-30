@@ -155,23 +155,65 @@ class StarlightTurtleParser:
                 {'subject': reif_bnode, 'predicate': 'rdf:reifies', 'object': term_bnode},
             ]
 
+        def expand_qt_in_triple(s, p, o):
+            """Expand quoted triple syntax in s and o. Returns (s, p, o, extra_triples)."""
+            extras = []
+            if is_qt_term(s):
+                s, e = qt_to_json(s); extras.extend(e)
+            elif has_reifier(s):
+                tt_str, reif = get_reifier_parts(s)
+                tb, e = qt_to_json(tt_str); extras.extend(e)
+                s = reif if reif else f'_:si_{blank_counter[0]}'
+                if not reif: blank_counter[0] += 1
+                extras.append({'subject': s, 'predicate': 'rdf:reifies', 'object': tb})
+            elif is_qt_reif(s):
+                s, e = qt_reif_to_json(s); extras.extend(e)
+            if is_qt_term(o):
+                o, e = qt_to_json(norm_qt(o)); extras.extend(e)
+            elif has_reifier(o):
+                tt_str, reif = get_reifier_parts(o)
+                tb, e = qt_to_json(tt_str); extras.extend(e)
+                o = reif if reif else f'_:si_{blank_counter[0]}'
+                if not reif: blank_counter[0] += 1
+                extras.append({'subject': o, 'predicate': 'rdf:reifies', 'object': tb})
+            elif is_qt_reif(o):
+                tb, e = qt_to_json(norm_qt(o)); extras.extend(e)
+                rb = f'_:si_{blank_counter[0]}'; blank_counter[0] += 1
+                extras.append({'subject': rb, 'predicate': 'rdf:reifies', 'object': tb})
+                o = rb
+            return s, p, o, extras
+
+        def expand_annotation(subj_str, pred_str, obj_str, annotations):
+            """Return extra triples for {| ... |} annotation specs on triple (subj_str, pred_str, obj_str)."""
+            extras = []
+            term_bnode, term_extras = qt_to_json(f'<<( {subj_str} {pred_str} {obj_str} )>>')
+            extras.extend(term_extras)
+            for reifier, ann_body in annotations:
+                reif_bnode = reifier if reifier else f'_:si_{blank_counter[0]}'
+                if not reifier: blank_counter[0] += 1
+                extras.append({'subject': reif_bnode, 'predicate': 'rdf:reifies', 'object': term_bnode})
+                if ann_body:
+                    fake_stmt = f'{reif_bnode} {ann_body} .'
+                    ann_fields = self.split_simple.extract_fields(fake_stmt, 'triple')
+                    if ann_fields and 'triple_set' in ann_fields:
+                        for t in self.split_simple.expand_triple_set(ann_fields['triple_set'], blank_counter):
+                            as_, ap, ao, ae = expand_qt_in_triple(t['subject'], t['predicate'], t['object'])
+                            ao_str = ao if isinstance(ao, str) else t.get('object_str', str(t['object']))
+                            if t.get('annotations'):
+                                extras.extend(expand_annotation(as_, ap, ao_str, t['annotations']))
+                            extras.append({'subject': as_, 'predicate': ap, 'object': ao})
+                            extras.extend(ae)
+            return extras
+
         expanded_triples = []
         for triple in canonical_json['triples']:
             s, p, o = triple['subject'], triple['predicate'], triple['object']
-            qt_extras = []
-            # Subject: <<( )>> → TripleTerm bnode; << >> → Reification bnode
-            if is_qt_term(s):
-                s, extras = qt_to_json(s)
-                qt_extras.extend(extras)
-            elif is_qt_reif(s):
-                s, extras = qt_reif_to_json(s)
-                qt_extras.extend(extras)
-            # Object: both forms → TripleTerm bnode (normalise << >> to <<( )>>)
-            if is_qt(o):
-                o, extras = qt_to_json(norm_qt(o))
-                qt_extras.extend(extras)
+            s, p, o, qt_extras = expand_qt_in_triple(s, p, o)
             expanded_triples.append({'subject': s, 'predicate': p, 'object': o})
             expanded_triples.extend(qt_extras)
+            if triple.get('annotations'):
+                ann_obj = o if isinstance(o, str) else triple.get('object_str', str(triple['object']))
+                expanded_triples.extend(expand_annotation(s, p, ann_obj, triple['annotations']))
 
         # --- 3.6. Tag rdf:reifies subjects as sl:Reification ---
         reification_subjects = {

@@ -1,52 +1,31 @@
 {
   "prefixes": [
     {
-      "prefix": "ex",
-      "iri": "http://example.org/"
-    },
-    {
-      "prefix": "foaf",
-      "iri": "http://xmlns.com/foaf/0.1/"
-    },
-    {
-      "prefix": "sh",
-      "iri": "http://www.w3.org/ns/shacl#"
-    },
-    {
-      "prefix": "xsd",
-      "iri": "http://www.w3.org/2001/XMLSchema#"
-    },
-    {
-      "prefix": "rdf",
-      "iri": "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+      "prefix": "",
+      "iri": "http://example/"
     }
   ],
   "bases": [],
   "triples": [
     {
-      "subject": "ex:alice",
-      "predicate": "ex:likes",
-      "object": "ex:chess"
-    },
-    {
-      "subject": "_:si_0",
-      "predicate": "ex:isSurprising",
-      "object": true
+      "subject": "_:si_1",
+      "predicate": ":q",
+      "object": ":z"
     },
     {
       "subject": "_:si_0",
       "predicate": "rdf:subject",
-      "object": "ex:alice"
+      "object": ":s"
     },
     {
       "subject": "_:si_0",
       "predicate": "rdf:predicate",
-      "object": "ex:likes"
+      "object": ":p"
     },
     {
       "subject": "_:si_0",
       "predicate": "rdf:object",
-      "object": "ex:chess"
+      "object": ":o"
     },
     {
       "subject": "_:si_0",
@@ -55,81 +34,11 @@
     },
     {
       "subject": "_:si_1",
-      "predicate": "ex:believedBy",
-      "object": "ex:bob"
-    },
-    {
-      "subject": "_:si_1",
-      "predicate": "rdf:subject",
-      "object": "_:si_0"
-    },
-    {
-      "subject": "_:si_1",
-      "predicate": "rdf:predicate",
-      "object": "ex:isSurprising"
-    },
-    {
-      "subject": "_:si_1",
-      "predicate": "rdf:object",
-      "object": true
-    },
-    {
-      "subject": "_:si_1",
-      "predicate": "rdf:type",
-      "object": "sl:TripleTerm"
-    },
-    {
-      "subject": "_:r0",
       "predicate": "rdf:reifies",
       "object": "_:si_0"
     },
     {
-      "subject": "_:r0",
-      "predicate": "ex:confidence",
-      "object": 0.9
-    },
-    {
-      "subject": "_:si_3",
-      "predicate": "ex:confidence",
-      "object": 0.6
-    },
-    {
-      "subject": "_:si_2",
-      "predicate": "rdf:subject",
-      "object": "ex:alice123"
-    },
-    {
-      "subject": "_:si_2",
-      "predicate": "rdf:predicate",
-      "object": "ex:likes"
-    },
-    {
-      "subject": "_:si_2",
-      "predicate": "rdf:object",
-      "object": "ex:chess123"
-    },
-    {
-      "subject": "_:si_2",
-      "predicate": "rdf:type",
-      "object": "sl:TripleTerm"
-    },
-    {
-      "subject": "_:si_3",
-      "predicate": "rdf:reifies",
-      "object": "_:si_2"
-    },
-    {
-      "subject": "_:si_2",
-      "predicate": "ex:confidence",
-      "object": 0.5
-    },
-    {
-      "subject": "_:r0",
-      "predicate": "rdf:type",
-      "object": "sl:Reification"
-    },
-    {
-      "subject": "_:si_3",
+      "subject": "_:si_1",
       "predicate": "rdf:type",
       "object": "sl:Reification"
     }

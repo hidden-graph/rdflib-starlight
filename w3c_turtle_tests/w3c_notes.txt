@@ -1,0 +1,241 @@
+TEST: turtle12-rt-02
+INPUT:
+PREFIX : <http://example/>
+
+:a :q <<:s :p :o>> .
+
+OUTPUT:
+@prefix : <http://example/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+
+:a :q [ a sl:TripleTerm ;
+            rdf:object :o ;
+            rdf:predicate :p ;
+            rdf:subject :s ] .
+
+NOTE: not picking up as reification.
+
+NT:
+<:a> <:q> _: .
+_: <rdf:reifies> <<( <:s> <:p> <:o> )>> .
+
+TEST: turtle12-rt-03
+INPUT:
+PREFIX : <http://example/>
+
+<< :s :p :o ~ :i >> :q :z .
+
+OUTPUT:
+@prefix : <http://example/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+
+:i a sl:Reification ;
+    :q :z ;
+    rdf:reifies [ a sl:TripleTerm ;
+            rdf:object :o ;
+            rdf:predicate :p ;
+            rdf:subject :s ] .
+
+:s :p :o .
+ NOTE:  improperly asserting the quoted triple
+NT:
+<:i> <:q> <:z> .
+<:i> <rdf:reifies> <<( <:s> <:p> <:o> )>> .
+
+TEST: turtle12-rt-04
+INPUT:
+PREFIX : <http://example/>
+
+:a :q << :s :p :o ~ :i >> .
+
+OUTPUT:
+@prefix : <http://example/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+
+:a :q [ a sl:TripleTerm ;
+            rdf:object :o ;
+            rdf:predicate :p ;
+            rdf:subject :s ] .
+
+NOTE: not picking up the reification
+not giving a name to the reifier i
+
+NT:
+<:a> <:q> <:i> .
+<:i> <rdf:reifies> <<( <:s> <:p> <:o> )>> .
+
+TEST: turtle12-rt-05
+INPUT:
+PREFIX : <http://example/>
+
+<< :s :p :o ~ _:i >> :q :z .
+
+OUTPUT:
+@prefix : <http://example/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+
+:s :p :o .
+
+[] a sl:Reification ;
+    :q :z ;
+    rdf:reifies [ a sl:TripleTerm ;
+            rdf:object :o ;
+            rdf:predicate :p ;
+            rdf:subject :s ] .
+Note.  not assigning a name to the reification
+NT:
+_:i <:q> <:z> .
+_:i <rdf:reifies> <<( <:s> <:p> <:o> )>> .
+
+TEST: turtle12-rt-06
+INPUT:
+PREFIX : <http://example/>
+
+:a :q << :s :p :o ~ _:i >> .
+
+OUTPUT:
+@prefix : <http://example/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+
+:a :q [ a sl:TripleTerm ;
+            rdf:object :o ;
+            rdf:predicate :p ;
+            rdf:subject :s ] .
+Not naming reificaiton
+Not picking up reification
+NT:
+<:a> <:q> _:i .
+_:i <rdf:reifies> <<( <:s> <:p> <:o> )>> .
+
+TEST: turtle12-rt-08
+INPUT:
+PREFIX : <http://example/>
+
+:a :q << :s :p :o ~ >> .
+
+OUTPUT:
+@prefix : <http://example/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+
+:a :q [ a sl:TripleTerm ;
+            rdf:object :o ;
+            rdf:predicate :p ;
+            rdf:subject :s ] .
+Not picking up the reification
+NT:
+<:a> <:q> _:bn .
+_:bn <rdf:reifies> <<( <:s> <:p> <:o> )>> .
+
+TEST: turtle12-bnode-01
+INPUT:
+PREFIX : <http://example/>
+
+_:b :p :o .
+<<_:b :p :o>> :q :z .
+
+OUTPUT:
+@prefix : <http://example/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+
+[] a sl:Reification ;
+    :q :z ;
+    rdf:reifies [ a sl:TripleTerm ;
+            rdf:object :o ;
+            rdf:predicate :p ;
+            rdf:subject [ :p :o ] ] .
+NOTE:
+1. not asserting _:b :p :o .
+2. subject of reification is the blank node and not [:p : o]
+
+
+NT:
+_:b9 <:p> <:o> .
+_: <:q> <:z> .
+_: <rdf:reifies> <<( _:b9 <:p> <:o> )>> .
+
+TEST: turtle12-bnode-02
+INPUT:
+PREFIX : <http://example/>
+
+_:a :p1 _:a .
+<<_:a :p1 _:a >> :q <<_:a :p2 :o>> .
+
+OUTPUT:
+@prefix : <http://example/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sl: <http://starlight.org/ns#> .
+
+[] a sl:Reification ;
+    :q [ a sl:TripleTerm ;
+            rdf:object :o ;
+            rdf:predicate :p2 ;
+            rdf:subject _:a ] ;
+    rdf:reifies [ a sl:TripleTerm ;
+            rdf:object _:a ;
+            rdf:predicate :p1 ;
+            rdf:subject _:a ] .
+
+NOTE- Not picking up blank nodes
+
+_:a :p1 _:a .
+
+NT:
+_:label1 <:p1> _:label1 .
+_:a0 <rdf:reifies> <<(_:label1 <:p1> _:label1)>> .
+_:a0 <:q> _:a1 .
+_:a1 <rdf:reifies> <<(_:label1 <:p2> <:o>)>> .
+
+
+
+TEST: turtle12-tt-02
+INPUT:
+BASE <http://example/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+<s>rdf:reifies<<(<s2><p2><o2>)>>.
+
+OUTPUT:
+@base <http://example/> .
+
+No output
+
+NT:
+<:s><rdf:reifies><<(<:s2><:p2><:o2>)>>.
+
+TEST: turtle12-tt-03
+INPUT:
+BASE <http://example/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+<s>rdf:reifies<<(<s2><q2><<(<s3><p3><o3>)>>)>>.
+
+OUTPUT:
+@base <http://example/> .
+
+NT:
+<:s><rdf:reifies><<(<:s2><:q2><<(<:s3><:p3><:o3>)>>)>>.
+
+No output
+
+
+TEST: turtle12-annotation-01
+INPUT:
+PREFIX : <http://example/>
+
+:s :p :o {| :r :z |} .
+
+OUTPUT:
+[parser error: "http://example/o {| :r :z |}" does not look like a valid URI, I cannot serialize this as N3/Turtle. Perhaps you wanted to urlencode it?]
+
+NT:
+<:s> <:p> <:o> .
+_: <:r> <:z> .
+_: <rdf:reifies> <<( <:s> <:p> <:o> )>> .
+

@@ -99,9 +99,67 @@ def next_token(s):
             i += 1
         return s[:i], s[i:].lstrip()
     i = 0
-    while i < len(s) and not s[i].isspace():
+    while i < len(s) and not s[i].isspace() and s[i] != '<':
         i += 1
     return s[:i], s[i:].lstrip()
+
+def consume_annotation_block(s):
+    """s starts with '{|'. Return (body_str, remaining). Handles nested {| |} and strings."""
+    i, depth = 2, 1
+    in_str, str_char = False, ''
+    while i < len(s):
+        c = s[i]
+        if in_str:
+            if c == '\\' and i + 1 < len(s):
+                i += 2; continue
+            if c == str_char:
+                in_str = False
+            i += 1; continue
+        if c in ('"', "'"):
+            in_str, str_char = True, c
+            i += 1; continue
+        if s[i:i+2] == '{|':
+            depth += 1; i += 2
+        elif s[i:i+2] == '|}':
+            depth -= 1
+            if depth == 0:
+                return s[2:i].strip(), s[i+2:].lstrip()
+            i += 2
+        else:
+            i += 1
+    return s[2:].strip(), ''
+
+def split_obj_and_annotations(s):
+    """Split 'obj [~ reifier [{| body |}]]* [{| body |}]*' into (obj_token, [(reifier_or_None, body_or_None), ...])."""
+    s = s.strip()
+    obj_tok, rest = next_token(s)
+    rest = rest.strip()
+    # Consume ^^dtype or @lang suffix attached to a literal
+    while rest.startswith('^^') or (rest.startswith('@') and len(rest) > 1 and rest[1].isalpha()):
+        suffix, rest = next_token(rest)
+        obj_tok += suffix
+        rest = rest.strip()
+    annotations = []
+    while rest:
+        if rest.startswith('~'):
+            rest = rest[1:].lstrip()
+            reifier, rest = next_token(rest)
+            rest = rest.strip()
+            if not reifier:
+                break
+            if rest.startswith('{|'):
+                body, rest = consume_annotation_block(rest)
+                rest = rest.strip()
+                annotations.append((reifier, body))
+            else:
+                annotations.append((reifier, None))
+        elif rest.startswith('{|'):
+            body, rest = consume_annotation_block(rest)
+            rest = rest.strip()
+            annotations.append((None, body))
+        else:
+            break
+    return obj_tok, annotations
 
 def split_statements(data: str):
     stmts = []
@@ -111,6 +169,29 @@ def split_statements(data: str):
     string_char = ''
     i = 0
     while i < len(data):
+        # Special handling: If at start of line, check for PREFIX/BASE directive
+        at_line_start = (i == 0 or data[i-1] in ('\n', '\r'))
+        if at_line_start:
+            # Look ahead for PREFIX/BASE (with or without @, case-insensitive)
+            for kw in ('@prefix', 'prefix', '@base', 'base'):
+                if data[i:i+len(kw)].lower() == kw:
+                    # Find end of line
+                    line_end = data.find('\n', i)
+                    if line_end == -1:
+                        line_end = len(data)
+                    stmt = data[i:line_end].strip()
+                    if stmt:
+                        if buf.strip():
+                            stmts.append(buf.strip())
+                            buf = ''
+                        stmts.append(stmt)
+                    i = line_end + 1
+                    break
+            else:
+                # Not a PREFIX/BASE line, continue as normal below
+                pass
+            if at_line_start and any(data[i:i+len(kw)].lower() == kw for kw in ('@prefix', 'prefix', '@base', 'base')):
+                continue
         c = data[i]
         if in_string:
             buf += c
@@ -236,11 +317,9 @@ def extract_fields(stmt, typ):
                 pred_obj_groups.append(buf.strip())
 
             for group in pred_obj_groups:
-                parts = group.split(None, 1)
-                if len(parts) < 2:
+                pred, obj_str = next_token(group)
+                if not pred or not obj_str:
                     continue
-                pred = parts[0]
-                obj_str = parts[1].strip()
                 # Split on ',' for object lists, respecting nesting and strings
                 objs = []
                 buf = ''
@@ -272,7 +351,12 @@ def extract_fields(stmt, typ):
                     objs.append(buf.strip())
 
                 for obj in objs:
-                    triple_set.append({'subject': subj, 'predicate': pred, 'object': coerce_object(obj)})
+                    obj_tok, annotations = split_obj_and_annotations(obj)
+                    entry = {'subject': subj, 'predicate': pred, 'object': coerce_object(obj_tok)}
+                    if annotations:
+                        entry['annotations'] = annotations
+                        entry['object_str'] = obj_tok
+                    triple_set.append(entry)
 
             return {'triple_set': triple_set}
     return {}
