@@ -1,3 +1,16 @@
-PREFIX : <http://example/>
+@prefix : <http://example/> .
 
-<<:s :p :o>> :q :z .
+# 1. RDF-star triple as subject
+<<:a :b :c>> :p :o .
+
+# 2. RDF-star triple as object
+:s :p <<:a :b :c>> .
+
+# 3. Annotated triple
+:s :p :o {| :ann :val |} .
+
+# 4. Annotated triple with multiple annotations
+:s :p :o {| :ann1 :val1 ; :ann2 :val2 |} .
+
+# 5. Annotated triple with reifier
+:s :p :o ~ :i {| :ann :val |} .

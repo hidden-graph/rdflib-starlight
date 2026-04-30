@@ -245,7 +245,7 @@ def main():
                 changed = True
                 inner = obj_strip[1:-1].strip()
                 fake_stmt = f'{bnode} {inner} .'
-                inner_fields = extract_fields(fake_stmt, 'triple')
+                inner_fields = extract_fields(fake_stmt, 'triple', blank_counter)
                 if inner_fields and 'triple_set' in inner_fields:
                     expanded_inner = expand_triple_set(inner_fields['triple_set'], blank_counter)
                     for t in expanded_inner:
@@ -299,7 +299,7 @@ def main():
                         # Expand the blank node
                         inner = el_strip[1:-1].strip()
                         fake_stmt = f'{bnode} {inner} .'
-                        inner_fields = extract_fields(fake_stmt, 'triple')
+                        inner_fields = extract_fields(fake_stmt, 'triple', blank_counter)
                         if inner_fields and 'triple_set' in inner_fields:
                             expanded_inner = expand_triple_set(inner_fields['triple_set'], blank_counter)
                             for t in expanded_inner:
@@ -341,7 +341,7 @@ def main():
     blank_counter = [0]  # Shared across all statements for unique blank node IDs
     for stmt in stmts:
         typ = classify_statement(stmt)
-        fields = extract_fields(stmt, typ)
+        fields = extract_fields(stmt, typ, blank_counter)
         entry = {'statement': stmt, 'type': typ}
         if typ == 'triple' and 'triple_set' in fields:
             # Save the original raw_triple before expansion

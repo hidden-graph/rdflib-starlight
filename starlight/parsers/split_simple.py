@@ -270,7 +270,7 @@ def coerce_object(s):
         return float(s)
     return s
 
-def extract_fields(stmt, typ):
+def extract_fields(stmt, typ, blank_counter=None):
     s = stmt.strip()
     if typ == 'prefix':
         m = re.match(r'@?prefix\s+([\w-]*)\s*:\s*<([^>]+)>', s, re.IGNORECASE)
@@ -285,6 +285,10 @@ def extract_fields(stmt, typ):
         if body.endswith('.'):
             body = body[:-1].rstrip()
         subj, rest = next_token(body.strip())
+        # PATCH: treat [] as a new blank node
+        if subj == '[]' and blank_counter is not None:
+            subj = f'_:sl_{blank_counter[0]}'
+            blank_counter[0] += 1
         if subj and rest:
             triple_set = []
             pred_obj_groups = []
@@ -378,7 +382,7 @@ def expand_triple_set(triple_set, blank_counter):
             changed = True
             inner = obj_strip[1:-1].strip()
             fake_stmt = f'{bnode} {inner} .'
-            inner_fields = extract_fields(fake_stmt, 'triple')
+            inner_fields = extract_fields(fake_stmt, 'triple', blank_counter)
             if inner_fields and 'triple_set' in inner_fields:
                 expanded_inner = expand_triple_set(inner_fields['triple_set'], blank_counter)
                 for t in expanded_inner:

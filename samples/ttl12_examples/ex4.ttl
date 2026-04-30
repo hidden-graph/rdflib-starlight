@@ -1,0 +1,3 @@
+@prefix : <http://example/> .
+
+:s :p :o {| :ann1 :val1 ; :ann2 :val2 |} .
