@@ -122,7 +122,15 @@ class StarlightTurtleParser:
             inner = val[3:-3].strip()  # always <<( )>> form here
             subj_str, rest  = self.split_simple.next_token(inner)
             pred_str, rest2 = self.split_simple.next_token(rest)
-            obj_str,  _     = self.split_simple.next_token(rest2)
+            obj_str, rest3  = self.split_simple.next_token(rest2)
+            # consume ^^dtype or @lang suffix on the object literal
+            while rest3.startswith('^^') or (rest3.startswith('@') and len(rest3) > 1 and rest3[1].isalpha()):
+                suffix, rest3 = self.split_simple.next_token(rest3)
+                obj_str += suffix
+                rest3 = rest3.strip()
+
+            if pred_str == 'a':
+                pred_str = 'rdf:type'
 
             all_extras = []
             if is_qt(subj_str):

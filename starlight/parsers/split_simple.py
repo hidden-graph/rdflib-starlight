@@ -173,6 +173,7 @@ def split_statements(data: str):
         at_line_start = (i == 0 or data[i-1] in ('\n', '\r'))
         if at_line_start:
             # Look ahead for PREFIX/BASE (with or without @, case-insensitive)
+            found_directive = False
             for kw in ('@prefix', 'prefix', '@base', 'base'):
                 if data[i:i+len(kw)].lower() == kw:
                     # Find end of line
@@ -186,11 +187,9 @@ def split_statements(data: str):
                             buf = ''
                         stmts.append(stmt)
                     i = line_end + 1
+                    found_directive = True
                     break
-            else:
-                # Not a PREFIX/BASE line, continue as normal below
-                pass
-            if at_line_start and any(data[i:i+len(kw)].lower() == kw for kw in ('@prefix', 'prefix', '@base', 'base')):
+            if found_directive:
                 continue
         c = data[i]
         if in_string:
@@ -371,7 +370,11 @@ def expand_triple_set(triple_set, blank_counter):
         if isinstance(obj_strip, str) and obj_strip.startswith('[') and obj_strip.endswith(']'):
             bnode = f'_:sl_{blank_counter[0]}'
             blank_counter[0] += 1
-            new_triples.append({'subject': subj, 'predicate': pred, 'object': bnode})
+            head = {'subject': subj, 'predicate': pred, 'object': bnode}
+            if triple.get('annotations'):
+                head['annotations'] = triple['annotations']
+                head['object_str'] = bnode
+            new_triples.append(head)
             changed = True
             inner = obj_strip[1:-1].strip()
             fake_stmt = f'{bnode} {inner} .'
@@ -411,12 +414,20 @@ def expand_triple_set(triple_set, blank_counter):
             if buf.strip():
                 elements.append(buf.strip())
             if not elements:
-                new_triples.append({'subject': subj, 'predicate': pred, 'object': 'rdf:nil'})
+                head = {'subject': subj, 'predicate': pred, 'object': 'rdf:nil'}
+                if triple.get('annotations'):
+                    head['annotations'] = triple['annotations']
+                    head['object_str'] = 'rdf:nil'
+                new_triples.append(head)
                 changed = True
                 continue
             list_head = f'_:sl_{blank_counter[0]}'
             blank_counter[0] += 1
-            new_triples.append({'subject': subj, 'predicate': pred, 'object': list_head})
+            head = {'subject': subj, 'predicate': pred, 'object': list_head}
+            if triple.get('annotations'):
+                head['annotations'] = triple['annotations']
+                head['object_str'] = list_head
+            new_triples.append(head)
             changed = True
             current = list_head
             for idx, el in enumerate(elements):
