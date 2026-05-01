@@ -10,10 +10,13 @@ INPUT:
 [] :p1 :o1 ;
     rdf:reifies <<:a :b :c>> .
 
+<<(:a :b :c)>> :funny true
+
 TTL 1.1 OUTPUT:
 @prefix : <http://example/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix sl: <http://starlight.org/ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
 [] a sl:Reification ;
     :p :o ;
@@ -24,6 +27,7 @@ TTL 1.1 OUTPUT:
     rdf:reifies _:si_2 .
 
 _:si_2 a sl:TripleTerm ;
+    :funny true ;
     rdf:object :c ;
     rdf:predicate :b ;
     rdf:subject :a .
@@ -31,17 +35,21 @@ _:si_2 a sl:TripleTerm ;
 TTL 1.2 OUTPUT (round-tripped):
 @prefix : <http://example/> .
 @prefix rdf: <rdf:> .
+@prefix xsd: <xsd:> .
 
 [] :p :o ;
-    rdf:reifies <<:a :b :c>> .
+    rdf:reifies <<( :a :b :c )>> .
 
 [] :p1 :o1 ;
-    rdf:reifies <<:a :b :c>> .
+    rdf:reifies <<( :a :b :c )>> .
+
+<<( :a :b :c )>> :funny true .
 
 TTL 1.1 OUTPUT (from 1.2 round-trip):
 @prefix : <http://example/> .
 @prefix rdf1: <rdf:> .
 @prefix sl: <http://starlight.org/ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
 [] :p :o ;
     rdf1:reifies _:si_2 ;
@@ -51,7 +59,8 @@ TTL 1.1 OUTPUT (from 1.2 round-trip):
     rdf1:reifies _:si_2 ;
     rdf1:type sl:Reification .
 
-_:si_2 rdf1:object :c ;
+_:si_2 :funny true ;
+    rdf1:object :c ;
     rdf1:predicate :b ;
     rdf1:subject :a ;
     rdf1:type sl:TripleTerm .
@@ -77,7 +86,7 @@ TTL 1.2 OUTPUT (round-tripped):
 @prefix : <http://example/> .
 @prefix rdf: <rdf:> .
 
-:s :p [ rdf:reifies <<:a :b :c>> ] .
+:s :p [ rdf:reifies <<( :a :b :c )>> ] .
 
 TTL 1.1 OUTPUT (from 1.2 round-trip):
 @prefix : <http://example/> .
@@ -117,7 +126,7 @@ TTL 1.2 OUTPUT (round-tripped):
 :s :p :o .
 
 [] :ann :val ;
-    rdf:reifies <<:s :p :o>> .
+    rdf:reifies <<( :s :p :o )>> .
 
 TTL 1.1 OUTPUT (from 1.2 round-trip):
 @prefix : <http://example/> .
@@ -162,7 +171,7 @@ TTL 1.2 OUTPUT (round-tripped):
 
 [] :ann1 :val1 ;
     :ann2 :val2 ;
-    rdf:reifies <<:s :p :o>> .
+    rdf:reifies <<( :s :p :o )>> .
 
 TTL 1.1 OUTPUT (from 1.2 round-trip):
 @prefix : <http://example/> .
@@ -204,7 +213,7 @@ TTL 1.2 OUTPUT (round-tripped):
 @prefix rdf: <rdf:> .
 
 :i :ann :val ;
-    rdf:reifies <<:s :p :o>> .
+    rdf:reifies <<( :s :p :o )>> .
 
 :s :p :o .
 

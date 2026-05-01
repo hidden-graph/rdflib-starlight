@@ -74,13 +74,22 @@ class StarlightTurtleParser:
 
         def norm_qt(val):
             """Normalise any quoted triple form to <<( s p o )>> for the TripleTerm cache."""
-            val = val.strip()
-            if val.startswith('<<(') and val.endswith(')>>'):
-                return val
-            inner = val[2:-2].strip()
+            s = val.strip()
+            inner = s[2:-2].strip()
             if inner.startswith('(') and inner.endswith(')'):
                 inner = inner[1:-1].strip()
-            return f'<<( {inner} )>>'
+
+            # Canonicalise token spacing so <<:a :b :c>> and <<(:a :b :c)>>
+            # produce the same cache key.
+            ts, r1 = self.split_simple.next_token(inner)
+            tp, r2 = self.split_simple.next_token(r1)
+            to, r3 = self.split_simple.next_token(r2)
+            while r3.startswith('^^') or (r3.startswith('@') and len(r3) > 1 and r3[1].isalpha()):
+                suffix, r3 = self.split_simple.next_token(r3)
+                to += suffix
+                r3 = r3.strip()
+
+            return f'<<( {ts} {tp} {to} )>>'
 
         def has_reifier(val):
             """<< s p o ~ r >> — has a reifier after ~."""

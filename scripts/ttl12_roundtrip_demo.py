@@ -72,6 +72,8 @@ with open(output_path, 'w') as out:
             g2 = copy_graph_with_prefixes(g)
 
             tripleterm_map = {}
+            bnode_to_normqt = {}
+            normqt_to_bnode = {}
             to_remove = set()
             # Helper to get prefixed name
             def to_prefixed(val, ns_manager):
@@ -84,6 +86,20 @@ with open(output_path, 'w') as out:
                 else:
                     return str(val)
 
+            def norm_qt_local(qt_str):
+                s = qt_str.strip()
+                inner = s[2:-2].strip()
+                if inner.startswith('(') and inner.endswith(')'):
+                    inner = inner[1:-1].strip()
+                ts, r1 = parser.split_simple.next_token(inner)
+                tp, r2 = parser.split_simple.next_token(r1)
+                to, r3 = parser.split_simple.next_token(r2)
+                while r3.startswith('^^') or (r3.startswith('@') and len(r3) > 1 and r3[1].isalpha()):
+                    suffix, r3 = parser.split_simple.next_token(r3)
+                    to += suffix
+                    r3 = r3.strip()
+                return f'<<( {ts} {tp} {to} )>>'
+
             ns_manager = g2.namespace_manager
             # Step 2: Find all triple term nodes (blank or named)
             for s, p, o in g2.triples((None, RDF.type, SL.TripleTerm)):
@@ -91,19 +107,28 @@ with open(output_path, 'w') as out:
                 pred = g2.value(subj, RDF.predicate)
                 obj = g2.value(subj, RDF.object)
                 subj2 = g2.value(subj, RDF.subject)
-                # Use the exact identifier as it appears in Turtle output
-                if isinstance(subj, rdflib.term.BNode):
-                    subj_key = str(subj)
-                    # Ensure it starts with '_:'
-                    if not subj_key.startswith('_:'):
-                        subj_key = f'_:{subj_key}'
-                else:
-                    subj_key = ns_manager.normalizeUri(subj)
                 if subj2 and pred and obj:
-                    tripleterm_map[subj_key] = f"<<{to_prefixed(subj2, ns_manager)} {to_prefixed(pred, ns_manager)} {to_prefixed(obj, ns_manager)}>>"
-                for p2, o2 in g2.predicate_objects(subj):
-                    to_remove.add((subj, p2, o2))
-            # Step 3: Remove all triple term statements
+                    # Build normalized quoted triple string
+                    qt = f"<<{to_prefixed(subj2, ns_manager)} {to_prefixed(pred, ns_manager)} {to_prefixed(obj, ns_manager)}>>"
+                    norm_qt_str = norm_qt_local(qt)
+                    # Map normalized quoted triple to a canonical blank node (first seen)
+                    if norm_qt_str not in normqt_to_bnode:
+                        normqt_to_bnode[norm_qt_str] = str(subj)
+                    bnode_to_normqt[str(subj)] = norm_qt_str
+            # Now, for each bnode, map to the canonical quoted triple
+            for bnode, normqt in bnode_to_normqt.items():
+                tripleterm_map[bnode] = normqt
+            # Only mark for removal the specific triple term statements
+            for s, p, o in g2.triples((None, RDF.type, SL.TripleTerm)):
+                for p2, o2 in g2.predicate_objects(s):
+                    if (
+                        (p2 == RDF.type and o2 == SL.TripleTerm)
+                        or p2 == RDF.subject
+                        or p2 == RDF.predicate
+                        or p2 == RDF.object
+                    ):
+                        to_remove.add((s, p2, o2))
+            # Step 3: Remove only the specific triple term statements
             for t in to_remove:
                 g2.remove(t)
             # Step 4: Remove all 'a sl:Reification' statements
@@ -129,12 +154,13 @@ with open(output_path, 'w') as out:
             print('DEBUG: tripleterm_map:', tripleterm_map)
             print('DEBUG: TTL 1.2 output before replacement:\n', ttl12_output[:500])
             for bnode, qt in tripleterm_map.items():
+                bnode_token = bnode if bnode.startswith('_:') else f'_:{bnode}'
                 # Replace as object: rdf:reifies _:si_2 [with trailing . ; , or whitespace]
-                ttl12_output = re.sub(rf'(rdf:reifies\s+){re.escape(bnode)}(\s*[.;,\]])', rf'\1{qt}\2', ttl12_output)
+                ttl12_output = re.sub(rf'(rdf:reifies\s+){re.escape(bnode_token)}(\s*[.;,\]])', rf'\1{qt}\2', ttl12_output)
                 # Replace as object in []: rdf:reifies [ ]
                 ttl12_output = re.sub(r'(rdf:reifies\s+)\[\s*\]', r'\1'+qt, ttl12_output)
                 # Replace as subject (rare): ^_:si_2 ...
-                ttl12_output = re.sub(rf'^{re.escape(bnode)}(\s)', rf'{qt}\1', ttl12_output, flags=re.MULTILINE)
+                ttl12_output = re.sub(rf'^{re.escape(bnode_token)}(\s)', rf'{qt}\1', ttl12_output, flags=re.MULTILINE)
             # Replace IRIs with prefixed names
             for prefix, ns in nsmap.items():
                 if prefix == '': continue
