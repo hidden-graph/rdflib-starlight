@@ -10,7 +10,7 @@ from rdflib import Graph, URIRef, Literal, BNode
 from rdflib.namespace import RDF
 
 from starlight.graph.starlight_graph import StarlightGraph, RDF_REIFIES
-from starlight.model.triple import TripleTerm, Statement
+from starlight.model.triple import TripleTerm
 
 EX = 'http://example.org/'
 
@@ -133,7 +133,7 @@ class TestEncodingHidden:
 
     def test_sl_reification_type_hidden(self, sg):
         from starlight.graph.starlight_graph import SL_REIFICATION
-        sg.add_statement(Statement(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
+        sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
         objs = list(sg.objects(predicate=RDF.type))
         assert SL_REIFICATION not in objs
 
@@ -200,32 +200,32 @@ class TestFromRdflib:
 # ---------------------------------------------------------------------------
 
 class TestStatements:
-    def test_add_statement_visible_as_reifies_triple(self, sg):
-        sg.add_statement(Statement(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
+    def test_add_reification_visible_as_reifies_triple(self, sg):
+        sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
         results = list(sg.triples((URIRef(EX+'stmt'), RDF_REIFIES, None)))
         assert len(results) == 1
         _, _, o = results[0]
         assert isinstance(o, TripleTerm)
 
-    def test_statements_by_reifier(self, sg):
-        sg.add_statement(Statement(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
-        stmts = list(sg.statements(reifier=URIRef(EX+'stmt')))
-        assert len(stmts) == 1
-        assert stmts[0].reifier == URIRef(EX+'stmt')
-        assert stmts[0].triple_term == TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+    def test_reifications_by_reifier(self, sg):
+        sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
+        reifiers = list(sg.reifications(TT=(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
+        assert URIRef(EX+'stmt') in reifiers
+        tts = list(sg.reified_triples(URIRef(EX+'stmt')))
+        assert tts[0] == TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
 
-    def test_statements_by_triple_term(self, sg):
-        sg.add_statement(Statement(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
+    def test_reifications_by_triple_term(self, sg):
+        sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
         tt = (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
-        stmts = list(sg.statements(triple_term=tt))
-        assert len(stmts) == 1
+        reifiers = list(sg.reifications(TT=tt))
+        assert len(reifiers) == 1
 
-    def test_statements_all(self, sg):
-        sg.add_statement(Statement(URIRef(EX+'stmt1'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
-        sg.add_statement(Statement(URIRef(EX+'stmt2'), (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))))
-        stmts = list(sg.statements())
-        assert len(stmts) == 2
+    def test_reifications_all(self, sg):
+        sg.add_reification(URIRef(EX+'stmt1'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
+        sg.add_reification(URIRef(EX+'stmt2'), (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        reifiers = list(sg.reifications())
+        assert len(reifiers) == 2
 
     def test_statement_len(self, sg):
-        sg.add_statement(Statement(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
+        sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
         assert len(sg) == 1  # only rdf:reifies triple visible; 3 encoding triples hidden

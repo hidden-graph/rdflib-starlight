@@ -1,3 +1,3 @@
-from starlight.model.triple import TripleTerm, Statement
+from starlight.model.triple import TripleTerm
 
-__all__ = ['TripleTerm', 'Statement']
+__all__ = ['TripleTerm']

@@ -1,7 +1,7 @@
 """
 starlight.model.triple
 
-Core RDF 1.2 types: TripleTerm and Statement.
+Core RDF 1.2 types: TripleTerm.
 """
 
 
@@ -43,26 +43,3 @@ class TripleTerm:
         return f'TripleTerm({self.subject!r}, {self.predicate!r}, {self.object!r})'
 
 
-class Statement:
-    """A reified triple — a resource that rdf:reifies a TripleTerm."""
-    __slots__ = ('reifier', 'triple_term')
-
-    def __init__(self, reifier, triple_term):
-        self.reifier = reifier
-        self.triple_term = (
-            triple_term if isinstance(triple_term, TripleTerm)
-            else TripleTerm(*triple_term)
-        )
-
-    def __eq__(self, other):
-        return (
-            isinstance(other, Statement)
-            and self.reifier == other.reifier
-            and self.triple_term == other.triple_term
-        )
-
-    def __hash__(self):
-        return hash((self.reifier, self.triple_term))
-
-    def __repr__(self):
-        return f'Statement(reifier={self.reifier!r}, triple_term={self.triple_term!r})'

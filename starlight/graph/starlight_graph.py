@@ -14,7 +14,7 @@ triples that define the encoding are hidden from callers.
 
 from rdflib import Graph, URIRef, BNode
 from rdflib.namespace import RDF
-from starlight.model.triple import TripleTerm, Statement
+from starlight.model.triple import TripleTerm
 from starlight.model.encoding import TT_NS, tt_hash
 
 SL_NS           = 'http://starlight.org/ns#'
@@ -27,6 +27,10 @@ _ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
 
 # Unbound reference to Graph.triples — used to bypass our override safely
 _raw_triples = Graph.triples
+
+# Sentinel returned by _coerce_tt_read when a TripleTerm is not in the registry.
+# Distinct from None (which means wildcard) so callers can detect "no match".
+_TT_NOT_FOUND = object()
 
 
 def _is_tt_like(node):
@@ -56,7 +60,8 @@ class StarlightGraph(Graph):
     # ------------------------------------------------------------------
 
     def _coerce_tt(self, node):
-        """Translate a tuple/TripleTerm to its internal URIRef. None-safe."""
+        """Translate a tuple/TripleTerm to its internal URIRef, creating it if new.
+        Use only on write paths (add, add_reification). For reads use _coerce_tt_read."""
         if node is None:
             return None
         if isinstance(node, TripleTerm):
@@ -64,7 +69,19 @@ class StarlightGraph(Graph):
         if isinstance(node, tuple) and len(node) == 3:
             if all(x is not None for x in node):
                 return self._intern_tt(TripleTerm(*node))
-            # tuple with None components = wildcard pattern; treat as None
+            return None
+        return node
+
+    def _coerce_tt_read(self, node):
+        """Translate a tuple/TripleTerm to its URIRef for read-only paths.
+        Returns _TT_NOT_FOUND if the TripleTerm is not registered — never creates."""
+        if node is None:
+            return None
+        if isinstance(node, TripleTerm):
+            return self._tt_registry.get(node._key(), _TT_NOT_FOUND)
+        if isinstance(node, tuple) and len(node) == 3:
+            if all(x is not None for x in node):
+                return self._tt_registry.get(TripleTerm(*node)._key(), _TT_NOT_FOUND)
             return None
         return node
 
@@ -145,25 +162,34 @@ class StarlightGraph(Graph):
         super().add((self._coerce_tt(s), p, self._coerce_tt(obj)))
 
     def remove(self, triple):
-        """Remove a triple. Tuples in subject/object positions are coerced to TripleTerms."""
+        """Remove a triple. Returns immediately if a TripleTerm in the pattern is not registered."""
         s, p, obj = triple
-        super().remove((self._coerce_tt(s), p, self._coerce_tt(obj)))
+        s_n, o_n = self._coerce_tt_read(s), self._coerce_tt_read(obj)
+        if s_n is _TT_NOT_FOUND or o_n is _TT_NOT_FOUND:
+            return
+        super().remove((s_n, p, o_n))
 
     def triples(self, triple):
         """Iterate triples matching the pattern. Filters internal encoding triples.
 
         TripleTerms in results are returned as TripleTerm objects, not raw URIRefs.
-        Tuples in the pattern are coerced to TripleTerm lookups.
+        Returns nothing if a TripleTerm in the pattern is not registered in this graph.
         """
         s, p, obj = triple
-        for s_r, p_r, o_r in super().triples((self._coerce_tt(s), p, self._coerce_tt(obj))):
+        s_n, o_n = self._coerce_tt_read(s), self._coerce_tt_read(obj)
+        if s_n is _TT_NOT_FOUND or o_n is _TT_NOT_FOUND:
+            return
+        for s_r, p_r, o_r in super().triples((s_n, p, o_n)):
             if not self._is_encoding_triple(s_r, p_r, o_r):
                 yield (self._restore(s_r), p_r, self._restore(o_r))
 
     def __contains__(self, triple):
-        """Test triple membership. Tuples are coerced to TripleTerms."""
+        """Test triple membership. Returns False if a TripleTerm in the pattern is not registered."""
         s, p, obj = triple
-        return super().__contains__((self._coerce_tt(s), p, self._coerce_tt(obj)))
+        s_n, o_n = self._coerce_tt_read(s), self._coerce_tt_read(obj)
+        if s_n is _TT_NOT_FOUND or o_n is _TT_NOT_FOUND:
+            return False
+        return super().__contains__((s_n, p, o_n))
 
     def __len__(self):
         """Count of visible (non-encoding) triples."""
@@ -173,41 +199,103 @@ class StarlightGraph(Graph):
     # RDF 1.2-specific additions
     # ------------------------------------------------------------------
 
-    def add_statement(self, statement: Statement):
-        """Add a reification: reifier rdf:reifies triple_term."""
-        tt_uri = self._intern_tt(statement.triple_term)
-        super().add((statement.reifier, RDF_REIFIES, tt_uri))
+    def add_reifier(self, predicate, obj, name=None):
+        """Assert a reifier triple and return the reifier node.
 
-    def statements(self, triple_term=None, reifier=None):
-        """Yield Statement objects matching the given filter.
+        If name is given it is used as the reifier URIRef; otherwise a fresh
+        BNode is created. The triple (reifier, predicate, obj) is added to the
+        graph and the reifier is returned for use with add_reification().
 
-        triple_term -- only statements reifying this triple term
-        reifier     -- only statements with this reifier
-        Neither     -- all statements in the graph
+            stmt = g.add_reifier(EX.reported, EX.NYTimes, name=EX.stmt1)
+            g.add_reification(stmt, (EX.a, EX.b, EX.c))
+
+            # or inline:
+            g.add_reification(g.add_reifier(EX.reported, EX.NYTimes), triple)
         """
-        if triple_term is not None:
-            tt_uri = self._coerce_tt(triple_term)
-            if tt_uri is None:
+        reifier = URIRef(name) if name is not None else BNode()
+        super().add((reifier, predicate, obj))
+        return reifier
+
+    def add_reification(self, reifier, triple_term):
+        """Add a reification: reifier rdf:reifies triple_term."""
+        tt = triple_term if isinstance(triple_term, TripleTerm) else TripleTerm(*triple_term)
+        tt_uri = self._intern_tt(tt)
+        super().add((reifier, RDF_REIFIES, tt_uri))
+
+    def reifications(self, TT=None, predicate=None, object=None):
+        """Yield reifier nodes matching the given filters.
+
+        TT        -- only reifiers that rdf:reifies this triple term
+        predicate -- only reifiers that have (reifier, predicate, ?) in the graph
+        object    -- only reifiers that have (reifier, ?, object) in the graph
+
+        Filters combine: reifications(TT=t, predicate=p, object=o) returns
+        reifiers that reify t AND have (reifier, p, o) in the graph.
+        """
+        # Step 1 — candidate reifiers from TT filter (fast path via rdf:reifies index)
+        if TT is not None:
+            tt_uri = self._coerce_tt_read(TT)
+            if tt_uri is None or tt_uri is _TT_NOT_FOUND:
                 return
-            tt = self._tt_nodes.get(tt_uri)
-            if tt is None:
-                return
-            for r, _, _ in super().triples((None, RDF_REIFIES, tt_uri)):
-                yield Statement(r, tt)
-        elif reifier is not None:
-            for _, _, o in super().triples((reifier, RDF_REIFIES, None)):
-                if isinstance(o, URIRef) and str(o).startswith(TT_NS):
-                    tt = self._tt_nodes.get(o)
-                    if tt is not None:
-                        yield Statement(reifier, tt)
+            tt_reifiers = {r for r, _, _ in super().triples((None, RDF_REIFIES, tt_uri))}
         else:
-            seen = set()
-            for r, _, o in super().triples((None, RDF_REIFIES, None)):
-                if isinstance(o, URIRef) and str(o).startswith(TT_NS) and r not in seen:
-                    tt = self._tt_nodes.get(o)
-                    if tt is not None:
-                        seen.add(r)
-                        yield Statement(r, tt)
+            tt_reifiers = None  # no TT filter
+
+        # Step 2 — candidate reifiers from predicate/object filter
+        if predicate is not None or object is not None:
+            prop_reifiers = {s for s, _, _ in super().triples((None, predicate, object))
+                             if not str(s).startswith(TT_NS)}
+        else:
+            prop_reifiers = None  # no property filter
+
+        # Step 3 — intersect whichever filters are active
+        if tt_reifiers is not None and prop_reifiers is not None:
+            candidates = tt_reifiers & prop_reifiers
+        elif tt_reifiers is not None:
+            candidates = tt_reifiers
+        elif prop_reifiers is not None:
+            # keep only nodes that are actually reifiers
+            all_reifiers = {r for r, _, _ in super().triples((None, RDF_REIFIES, None))}
+            candidates = prop_reifiers & all_reifiers
+        else:
+            candidates = {r for r, _, _ in super().triples((None, RDF_REIFIES, None))}
+
+        yield from candidates
+
+    def reified_triples(self, reifier):
+        """Yield the TripleTerms reified by the given reifier node."""
+        for _, _, o in super().triples((reifier, RDF_REIFIES, None)):
+            if isinstance(o, URIRef) and str(o).startswith(TT_NS):
+                tt = self._tt_nodes.get(o)
+                if tt is not None:
+                    yield tt
+
+    def triple_terms(self, subject=None, predicate=None, object=None):
+        """Yield all TripleTerms registered in this graph, with optional filters.
+
+        Any combination of subject, predicate, object narrows the results:
+            g.triple_terms()                        # all triple terms
+            g.triple_terms(predicate=EX.knows)      # all TTs with that predicate
+            g.triple_terms(EX.bob, EX.knows, None)  # any TT with that s and p
+        """
+        for tt in self._tt_nodes.values():
+            if subject   is not None and tt.subject   != subject:   continue
+            if predicate is not None and tt.predicate != predicate: continue
+            if object    is not None and tt.object    != object:    continue
+            yield tt
+
+    def has_triple_term(self, subject, predicate, object):
+        """Return True if a TripleTerm with these exact components exists in the graph."""
+        key = TripleTerm(subject, predicate, object)._key()
+        return key in self._tt_registry
+
+    def reifiers(self, TT):
+        """Yield all reifier nodes that rdf:reifies the given triple term."""
+        yield from self.reifications(TT=TT)
+
+    def remove_reification(self, reifier):
+        """Remove the rdf:reifies triple(s) for the given reifier."""
+        super().remove((reifier, RDF_REIFIES, None))
 
     def parse(self, source=None, publicID=None, format=None,
               location=None, file=None, data=None, **kwargs):
