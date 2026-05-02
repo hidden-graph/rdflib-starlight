@@ -1,50 +1,68 @@
 """
 starlight.model.triple
 
-Defines core RDF-star triple and statement classes, independent of RDFLib.
+Core RDF 1.2 types: TripleTerm and Statement.
 """
 
-from typing import Any, Tuple
 
-class Triple:
-    """Represents an RDF triple or RDF-star triple (subject, predicate, object)."""
-    def __init__(self, subject: Any, predicate: Any, object: Any):
+class TripleTerm:
+    """An RDF 1.2 triple term — a triple used as a resource.
+
+    Value-typed: two instances with the same (s, p, o) are equal and have the
+    same hash. A plain Python 3-tuple is coerced to TripleTerm wherever the
+    StarlightGraph API expects a node.
+    """
+    __slots__ = ('subject', 'predicate', 'object')
+
+    def __init__(self, subject, predicate, obj):
         self.subject = subject
         self.predicate = predicate
-        self.object = object
+        self.object = obj
 
-    def as_tuple(self) -> Tuple[Any, Any, Any]:
-        return (self.subject, self.predicate, self.object)
+    def _key(self):
+        s = self.subject._key() if isinstance(self.subject, TripleTerm) else self.subject
+        o = self.object._key()  if isinstance(self.object,  TripleTerm) else self.object
+        return (s, self.predicate, o)
 
     def __eq__(self, other):
-        return (
-            isinstance(other, Triple) and
-            self.subject == other.subject and
-            self.predicate == other.predicate and
-            self.object == other.object
-        )
+        if isinstance(other, TripleTerm):
+            return self._key() == other._key()
+        if isinstance(other, tuple) and len(other) == 3:
+            return self._key() == TripleTerm(*other)._key()
+        return NotImplemented
 
     def __hash__(self):
-        return hash((self.subject, self.predicate, self.object))
+        return hash(self._key())
+
+    def __iter__(self):
+        yield self.subject
+        yield self.predicate
+        yield self.object
 
     def __repr__(self):
-        return f"Triple({self.subject!r}, {self.predicate!r}, {self.object!r})"
+        return f'TripleTerm({self.subject!r}, {self.predicate!r}, {self.object!r})'
+
 
 class Statement:
-    """Represents a named or reified statement (for RDF-star or reification)."""
-    def __init__(self, triple: Triple, name: Any = None):
-        self.triple = triple
-        self.name = name  # Optional identifier for named statement
+    """A reified triple — a resource that rdf:reifies a TripleTerm."""
+    __slots__ = ('reifier', 'triple_term')
+
+    def __init__(self, reifier, triple_term):
+        self.reifier = reifier
+        self.triple_term = (
+            triple_term if isinstance(triple_term, TripleTerm)
+            else TripleTerm(*triple_term)
+        )
 
     def __eq__(self, other):
         return (
-            isinstance(other, Statement) and
-            self.triple == other.triple and
-            self.name == other.name
+            isinstance(other, Statement)
+            and self.reifier == other.reifier
+            and self.triple_term == other.triple_term
         )
 
     def __hash__(self):
-        return hash((self.triple, self.name))
+        return hash((self.reifier, self.triple_term))
 
     def __repr__(self):
-        return f"Statement({self.triple!r}, name={self.name!r})"
+        return f'Statement(reifier={self.reifier!r}, triple_term={self.triple_term!r})'

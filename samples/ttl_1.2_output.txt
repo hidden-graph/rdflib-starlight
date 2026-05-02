@@ -1,233 +1,64 @@
-# Turtle 1.2 round-trip demonstration output
-
-# Example 1
-INPUT:
-@prefix : <http://example/> .
-
-[] :p :o ;
-    rdf:reifies <<:a :b :c>> .
-
-[] :p1 :o1 ;
-    rdf:reifies <<:a :b :c>> .
-
-<<(:a :b :c)>> :funny true
-
-TTL 1.1 OUTPUT:
-@prefix : <http://example/> .
+------------------------------------------------------------
+INPUT (Turtle 1.2)
+------------------------------------------------------------
+@prefix : <http://example.org/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix sl: <http://starlight.org/ns#> .
-@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
-[] a sl:Reification ;
-    :p :o ;
-    rdf:reifies _:si_2 .
+# Named reifier — :stmt1 reifies the triple and carries provenance
+:alice :says <<( :bob :knows :carol )>> .
+:stmt1 rdf:reifies <<( :bob :knows :carol )>> ;
+       :confidence "0.9" ;
+       :source :WikiData .
 
-[] a sl:Reification ;
-    :p1 :o1 ;
-    rdf:reifies _:si_2 .
+# Inline annotation shorthand {| |} — anonymous reifier
+:bob :knows :carol {| :since "2020" ; :via :LinkedIn |} .
 
-_:si_2 a sl:TripleTerm ;
-    :funny true ;
-    rdf:object :c ;
-    rdf:predicate :b ;
-    rdf:subject :a .
+# Triple term used as subject
+<<( :bob :knows :carol )>> :verifiedBy :ResearchTeam .
 
-TTL 1.2 OUTPUT (round-tripped):
-@prefix : <http://example/> .
-@prefix rdf: <rdf:> .
-@prefix xsd: <xsd:> .
-
-[] :p :o ;
-    rdf:reifies <<( :a :b :c )>> .
-
-[] :p1 :o1 ;
-    rdf:reifies <<( :a :b :c )>> .
-
-<<( :a :b :c )>> :funny true .
-
-TTL 1.1 OUTPUT (from 1.2 round-trip):
-@prefix : <http://example/> .
-@prefix rdf1: <rdf:> .
-@prefix sl: <http://starlight.org/ns#> .
-@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-
-[] :p :o ;
-    rdf1:reifies _:si_2 ;
-    rdf1:type sl:Reification .
-
-[] :p1 :o1 ;
-    rdf1:reifies _:si_2 ;
-    rdf1:type sl:Reification .
-
-_:si_2 :funny true ;
-    rdf1:object :c ;
-    rdf1:predicate :b ;
-    rdf1:subject :a ;
-    rdf1:type sl:TripleTerm .
-
-# Example 2
-INPUT:
-@prefix : <http://example/> .
-
-:s :p <<:a :b :c>> .
-
-TTL 1.1 OUTPUT:
-@prefix : <http://example/> .
+------------------------------------------------------------
+STARLIGHT INTERNAL STORE  (Turtle 1.1 view, encoding exposed)
+------------------------------------------------------------
+@prefix : <http://example.org/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix sl: <http://starlight.org/ns#> .
+@prefix rr: <http://starlight.org/ns/rr#> .
+@prefix tt: <http://starlight.org/ns/tt#> .
 
-:s :p [ a sl:Reification ;
-            rdf:reifies [ a sl:TripleTerm ;
-                    rdf:object :c ;
-                    rdf:predicate :b ;
-                    rdf:subject :a ] ] .
+:alice :says tt:22ae9be2 .
 
-TTL 1.2 OUTPUT (round-tripped):
-@prefix : <http://example/> .
-@prefix rdf: <rdf:> .
+:stmt1 :confidence "0.9" ;
+    :source :WikiData ;
+    rdf:reifies tt:22ae9be2 .
 
-:s :p [ rdf:reifies <<( :a :b :c )>> ] .
+rr:0 :since "2020" ;
+    :via :LinkedIn ;
+    rdf:reifies tt:22ae9be2 .
 
-TTL 1.1 OUTPUT (from 1.2 round-trip):
-@prefix : <http://example/> .
-@prefix rdf1: <rdf:> .
-@prefix sl: <http://starlight.org/ns#> .
+:bob :knows :carol .
 
-:s :p [ rdf1:reifies [ rdf1:object :c ;
-                    rdf1:predicate :b ;
-                    rdf1:subject :a ;
-                    rdf1:type sl:TripleTerm ] ;
-            rdf1:type sl:Reification ] .
+tt:22ae9be2 :verifiedBy :ResearchTeam ;
+    rdf:object :carol ;
+    rdf:predicate :knows ;
+    rdf:subject :bob .
 
-# Example 3
-INPUT:
-@prefix : <http://example/> .
 
-:s :p :o {| :ann :val |} .
-
-TTL 1.1 OUTPUT:
-@prefix : <http://example/> .
+------------------------------------------------------------
+STARLIGHT TURTLE 1.2  (encoding hidden, triple terms as <<( )>>)
+------------------------------------------------------------
+@prefix : <http://example.org/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix sl: <http://starlight.org/ns#> .
 
-:s :p :o .
+:alice :says <<( :bob :knows :carol )>> .
 
-[] a sl:Reification ;
-    :ann :val ;
-    rdf:reifies [ a sl:TripleTerm ;
-            rdf:object :o ;
-            rdf:predicate :p ;
-            rdf:subject :s ] .
+:bob :knows :carol .
 
-TTL 1.2 OUTPUT (round-tripped):
-@prefix : <http://example/> .
-@prefix rdf: <rdf:> .
+:stmt1 :confidence "0.9" ;
+    :source :WikiData ;
+    rdf:reifies <<( :bob :knows :carol )>> .
 
-:s :p :o .
+_:rr_0 :since "2020" ;
+    :via :LinkedIn ;
+    rdf:reifies <<( :bob :knows :carol )>> .
 
-[] :ann :val ;
-    rdf:reifies <<( :s :p :o )>> .
-
-TTL 1.1 OUTPUT (from 1.2 round-trip):
-@prefix : <http://example/> .
-@prefix rdf1: <rdf:> .
-@prefix sl: <http://starlight.org/ns#> .
-
-:s :p :o .
-
-[] :ann :val ;
-    rdf1:reifies [ rdf1:object :o ;
-            rdf1:predicate :p ;
-            rdf1:subject :s ;
-            rdf1:type sl:TripleTerm ] ;
-    rdf1:type sl:Reification .
-
-# Example 4
-INPUT:
-@prefix : <http://example/> .
-
-:s :p :o {| :ann1 :val1 ; :ann2 :val2 |} .
-
-TTL 1.1 OUTPUT:
-@prefix : <http://example/> .
-@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix sl: <http://starlight.org/ns#> .
-
-:s :p :o .
-
-[] a sl:Reification ;
-    :ann1 :val1 ;
-    :ann2 :val2 ;
-    rdf:reifies [ a sl:TripleTerm ;
-            rdf:object :o ;
-            rdf:predicate :p ;
-            rdf:subject :s ] .
-
-TTL 1.2 OUTPUT (round-tripped):
-@prefix : <http://example/> .
-@prefix rdf: <rdf:> .
-
-:s :p :o .
-
-[] :ann1 :val1 ;
-    :ann2 :val2 ;
-    rdf:reifies <<( :s :p :o )>> .
-
-TTL 1.1 OUTPUT (from 1.2 round-trip):
-@prefix : <http://example/> .
-@prefix rdf1: <rdf:> .
-@prefix sl: <http://starlight.org/ns#> .
-
-:s :p :o .
-
-[] :ann1 :val1 ;
-    :ann2 :val2 ;
-    rdf1:reifies [ rdf1:object :o ;
-            rdf1:predicate :p ;
-            rdf1:subject :s ;
-            rdf1:type sl:TripleTerm ] ;
-    rdf1:type sl:Reification .
-
-# Example 5
-INPUT:
-@prefix : <http://example/> .
-
-:s :p :o ~ :i {| :ann :val |} .
-
-TTL 1.1 OUTPUT:
-@prefix : <http://example/> .
-@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix sl: <http://starlight.org/ns#> .
-
-:i a sl:Reification ;
-    :ann :val ;
-    rdf:reifies [ a sl:TripleTerm ;
-            rdf:object :o ;
-            rdf:predicate :p ;
-            rdf:subject :s ] .
-
-:s :p :o .
-
-TTL 1.2 OUTPUT (round-tripped):
-@prefix : <http://example/> .
-@prefix rdf: <rdf:> .
-
-:i :ann :val ;
-    rdf:reifies <<( :s :p :o )>> .
-
-:s :p :o .
-
-TTL 1.1 OUTPUT (from 1.2 round-trip):
-@prefix : <http://example/> .
-@prefix rdf1: <rdf:> .
-@prefix sl: <http://starlight.org/ns#> .
-
-:i :ann :val ;
-    rdf1:reifies [ rdf1:object :o ;
-            rdf1:predicate :p ;
-            rdf1:subject :s ;
-            rdf1:type sl:TripleTerm ] ;
-    rdf1:type sl:Reification .
-
-:s :p :o .
+<<( :bob :knows :carol )>> :verifiedBy :ResearchTeam .
 
