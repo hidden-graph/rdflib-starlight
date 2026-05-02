@@ -330,6 +330,34 @@ class StarlightGraph(Graph):
         return super().parse(source=source, publicID=publicID, format=format,
                              location=location, file=file, data=data, **kwargs)
 
+    def query(self, query_object, processor='sparql', result='sparql',
+              initNs=None, initBindings=None, use_store_provided=True, **kwargs):
+        """Execute a SPARQL query. Triple-term patterns are rewritten to SPARQL 1.1.
+
+        The rewritten query runs against a plain Graph view of the same store so
+        that encoding triples (rdf:subject/predicate/object on tt: URIRefs) are
+        visible to the SPARQL engine. Results are post-processed to restore tt:HASH
+        URIRefs back to TripleTerm objects.
+        """
+        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+        if isinstance(query_object, str):
+            query_object = rewrite_sparql12_to_11(query_object)
+        raw = Graph(store=self.store, identifier=self.identifier)
+        for prefix, ns in self.namespaces():
+            raw.bind(prefix, ns)
+        r = raw.query(query_object, processor=processor, result=result,
+                      initNs=initNs, initBindings=initBindings,
+                      use_store_provided=use_store_provided, **kwargs)
+        if r.type == 'SELECT':
+            r.bindings = [
+                {var: self._restore(val) if val is not None else None
+                 for var, val in row.items()}
+                for row in r.bindings
+            ]
+        elif r.type == 'CONSTRUCT':
+            r.graph = StarlightGraph.from_rdflib(r.graph)
+        return r
+
     def serialize(self, destination=None, format='turtle', **kwargs):
         """Serialize the graph. format='turtle12' produces Turtle 1.2 with <<( )>> notation."""
         if format == 'turtle12':

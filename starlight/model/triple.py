@@ -39,6 +39,12 @@ class TripleTerm:
         yield self.predicate
         yield self.object
 
+    def __str__(self):
+        s = str(self.subject)   if isinstance(self.subject, TripleTerm) else self.subject.n3()
+        p = self.predicate.n3()
+        o = str(self.object)    if isinstance(self.object,  TripleTerm) else self.object.n3()
+        return f'<<( {s} {p} {o} )>>'
+
     def __repr__(self):
         return f'TripleTerm({self.subject!r}, {self.predicate!r}, {self.object!r})'
 
