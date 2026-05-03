@@ -1,3 +1,10 @@
+# areas of research.
+1. look at how other tools that have implemented rdf 1.2 handle serilization and query before making changes
+2. how do we intergrate with back-end databases
+
+
+
+
 # Future Enhancements
 
 
@@ -7,8 +14,8 @@
 4, (maybe we build on version 8 stable release)
 4. per rdf 1.2 specification a triple can not be the subject of a triple. - should we allow
 5. how to announce RDF version
-6. should we serialize jsut to normal form of 1.2 or provide optionsc
-7. are tripleTerm and Reification the proper rdf1.2 terms?
+6. should we serialize just to normal form of 1.2 or provide options
+
 
 
 

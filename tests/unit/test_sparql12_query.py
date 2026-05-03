@@ -194,6 +194,16 @@ class TestQ6:
         tt = r.bindings[0][tt_var]
         assert isinstance(tt, TripleTerm)
 
+    def test_tt_str_uses_prefixed_names(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT ?who ?tt WHERE {
+              ?who :says ?tt .
+            }
+        """)
+        tt = r.bindings[0][r.vars[1]]
+        assert str(tt) == '<<( :bob :knows :carol )>>'
+
     def test_tt_components_correct(self, g):
         r = g.query("""
             PREFIX :   <http://example.org/>
@@ -205,6 +215,136 @@ class TestQ6:
         assert tt.subject   == URIRef(EX + 'bob')
         assert tt.predicate == URIRef(EX + 'knows')
         assert tt.object    == URIRef(EX + 'carol')
+
+
+# ---------------------------------------------------------------------------
+# Q7 — SUBJECT / PREDICATE / OBJECT functions
+# ---------------------------------------------------------------------------
+
+class TestQ7:
+    def test_subject_predicate_object_all_components(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT ?who (SUBJECT(?tt) AS ?knower) (PREDICATE(?tt) AS ?rel) (OBJECT(?tt) AS ?known) WHERE {
+              ?who :says ?tt .
+            }
+        """)
+        assert len(r.bindings) == 1
+        row = r.bindings[0]
+        knower = row[r.vars[1]]
+        rel    = row[r.vars[2]]
+        known  = row[r.vars[3]]
+        assert knower == URIRef(EX + 'bob')
+        assert rel    == URIRef(EX + 'knows')
+        assert known  == URIRef(EX + 'carol')
+
+    def test_subject_only(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT ?who (SUBJECT(?tt) AS ?knower) WHERE {
+              ?who :says ?tt .
+            }
+        """)
+        assert r.bindings[0][r.vars[1]] == URIRef(EX + 'bob')
+
+
+# ---------------------------------------------------------------------------
+# Q8 — Annotation patterns
+# ---------------------------------------------------------------------------
+
+class TestQ8:
+    def test_annotation_subject_all_annotations(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?s ?p ?o ?pred ?val WHERE {
+              << ?s ?p ?o >> ?pred ?val .
+              FILTER(?pred != rdf:reifies)
+            }
+        """)
+        pred_var, val_var = r.vars[3], r.vars[4]
+        preds = {row[pred_var] for row in r.bindings}
+        assert URIRef(EX + 'since')      in preds
+        assert URIRef(EX + 'via')        in preds
+        assert URIRef(EX + 'confidence') in preds
+        assert URIRef(EX + 'source')     in preds
+
+    def test_annotation_subject_base_triple_bound(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT DISTINCT ?s ?p ?o WHERE {
+              << ?s ?p ?o >> ?pred ?val .
+            }
+        """)
+        assert len(r.bindings) == 1
+        row = r.bindings[0]
+        assert row[r.vars[0]] == URIRef(EX + 'bob')
+        assert row[r.vars[1]] == URIRef(EX + 'knows')
+        assert row[r.vars[2]] == URIRef(EX + 'carol')
+
+    def test_inline_annotation_block(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT ?since WHERE {
+              :bob :knows :carol {| :since ?since |} .
+            }
+        """)
+        assert len(r.bindings) == 1
+        assert r.bindings[0][r.vars[0]] == Literal('2020')
+
+    def test_tilde_reifier_binding(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?r ?pred ?val WHERE {
+              :bob :knows :carol ~ ?r .
+              ?r ?pred ?val .
+              FILTER(?pred != rdf:reifies)
+            }
+        """)
+        assert len(r.bindings) == 4
+        preds = {row[r.vars[1]] for row in r.bindings}
+        assert URIRef(EX + 'since')      in preds
+        assert URIRef(EX + 'via')        in preds
+        assert URIRef(EX + 'confidence') in preds
+        assert URIRef(EX + 'source')     in preds
+
+
+# ---------------------------------------------------------------------------
+# Q9 — Nested triple term
+# ---------------------------------------------------------------------------
+
+NESTED_DATASET = DATASET + """
+:verifStmt rdf:reifies <<( <<( :bob :knows :dave )>> :believedBy :alice )>> .
+"""
+
+
+@pytest.fixture
+def g9():
+    sg = StarlightGraph()
+    sg.parse(data=NESTED_DATASET, format='turtle12')
+    return sg
+
+
+class TestQ9:
+    def test_nested_components_bind(self, g9):
+        r = g9.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?stmt ?innerS ?innerP ?innerO ?outerP ?outerO WHERE {
+              ?stmt rdf:reifies <<( <<( ?innerS ?innerP ?innerO )>> ?outerP ?outerO )>> .
+            }
+        """)
+        assert len(r.bindings) == 1
+        row = r.bindings[0]
+        vs = r.vars
+        assert row[vs[0]] == URIRef(EX + 'verifStmt')
+        assert row[vs[1]] == URIRef(EX + 'bob')
+        assert row[vs[2]] == URIRef(EX + 'knows')
+        assert row[vs[3]] == URIRef(EX + 'dave')
+        assert row[vs[4]] == URIRef(EX + 'believedBy')
+        assert row[vs[5]] == URIRef(EX + 'alice')
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +419,14 @@ class TestQ12:
         """)
         assert isinstance(r.graph, StarlightGraph)
 
+    def test_construct_always_starlight_graph_no_tt(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            CONSTRUCT { :a :b :c . }
+            WHERE { :alice :says ?tt . }
+        """)
+        assert isinstance(r.graph, StarlightGraph)
+
     def test_construct_plain_triple_content(self, g):
         r = g.query("""
             PREFIX :   <http://example.org/>
@@ -294,3 +442,54 @@ class TestQ12:
         s, _, o = triples[0]
         assert s == URIRef(EX + 'stmt1')
         assert o == Literal('0.9')
+
+
+# ---------------------------------------------------------------------------
+# Q13 — isTripleTerm and assertion check
+# ---------------------------------------------------------------------------
+
+class TestQ13:
+    def test_is_triple_term_finds_tt(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT DISTINCT ?tt WHERE {
+              { ?s ?p ?tt } UNION { ?tt ?p ?o }
+              FILTER(isTripleTerm(?tt))
+            }
+        """)
+        tts = [row[r.vars[0]] for row in r.bindings]
+        assert len(tts) == 1
+        assert isinstance(tts[0], TripleTerm)
+
+    def test_bind_components_via_subject_predicate_object(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT DISTINCT ?tt ?s ?p ?o WHERE {
+              { ?sub ?pred ?tt } UNION { ?tt ?pred ?obj }
+              FILTER(isTripleTerm(?tt))
+              BIND(SUBJECT(?tt) AS ?s)
+              BIND(PREDICATE(?tt) AS ?p)
+              BIND(OBJECT(?tt) AS ?o)
+            }
+        """)
+        assert len(r.bindings) == 1
+        row = r.bindings[0]
+        assert isinstance(row[r.vars[0]], TripleTerm)
+        assert row[r.vars[1]] == URIRef(EX + 'bob')
+        assert row[r.vars[2]] == URIRef(EX + 'knows')
+        assert row[r.vars[3]] == URIRef(EX + 'carol')
+
+    def test_assertion_check_via_ask(self, g):
+        # The base triple :bob :knows :carol is asserted (via {| |} annotation)
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT DISTINCT ?tt ?s ?p ?o WHERE {
+              { ?sub ?pred ?tt } UNION { ?tt ?pred ?obj }
+              FILTER(isTripleTerm(?tt))
+              BIND(SUBJECT(?tt) AS ?s)
+              BIND(PREDICATE(?tt) AS ?p)
+              BIND(OBJECT(?tt) AS ?o)
+              ?s ?p ?o .
+            }
+        """)
+        assert len(r.bindings) == 1

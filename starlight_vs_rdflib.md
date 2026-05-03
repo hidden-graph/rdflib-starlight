@@ -21,7 +21,7 @@ Triples may contain triples statements {(c b c)} in the subject or object positi
 
 🔗 `set(triple)` — Calls our `remove()` + `add()`, so coercion flows through correctly.
 
-🔲 `addN(quads)` — Bypasses `add()` and writes directly to the store; TripleTerms in quads are stored raw and will corrupt the registry.
+✅ `addN(quads)` — Overridden; coerces TripleTerms in subject/object positions before writing to the store.
 
 ---
 
@@ -29,7 +29,7 @@ Triples may contain triples statements {(c b c)} in the subject or object positi
 Patterns may contain triple statements as part of the pattern.
 ✅ `triples(pattern)` — Coerces TripleTerm patterns; filters internal encoding triples (`tt:` subject + `rdf:subject/predicate/object`); restores TT URIRefs to TripleTerm objects in results.
 
-🔲 `triples_choices(triple)` — Hits the store directly, bypassing our `triples()` override; does not coerce TripleTerms and will expose `tt:` URIRefs raw.
+✅ `triples_choices(triple)` — Overridden; coerces TripleTerm patterns (lists or singles), filters encoding triples, restores TripleTerm objects in results.
 
 🔗 `__iter__` — rdflib implements as `self.triples((None, None, None))` — our override fires correctly.
 
@@ -95,9 +95,9 @@ Allows for the parsing from 1.2 formats and the serialization into 1.2 formats.
 
 Allow SPARQL queries to consume and return triple statements.
 
-🔲 `query(query_object, ...)` — rdflib's SPARQL engine operates on the raw store; triple-term patterns (`<<?s :p ?o>>`) are not rewritten; queries will see `tt:HASH` URIRefs, not TripleTerm objects. SPARQL-star rewriting is tracked in `future_enhancements.md`.
+✅ `query(query_object, ...)` — Overridden. Rewrites SPARQL 1.2 syntax to SPARQL 1.1 before execution; runs the rewritten query against a plain `Graph` view of the store so encoding triples are visible; post-processes SELECT bindings to restore `tt:HASH` URIRefs to `TripleTerm` objects (including prefixed-name serialization via the graph's namespace manager); wraps CONSTRUCT output in a `StarlightGraph`. Supported forms: `<<( )>>` triple-term patterns, `<< >>` annotation subjects, `{| |}` inline annotation blocks, `~?r` reifier binding, `SUBJECT()`/`PREDICATE()`/`OBJECT()` functions, `isTripleTerm()` filter.
 
-🔲 `update(update_object, ...)` — Same issue as `query()`; INSERT/DELETE with triple-term patterns will not work correctly.
+✅ `update(update_object, ...)` — Overridden. Three paths: (1) WHERE clauses — `<<( )>>` rewritten to encoding patterns; (2) INSERT/DELETE DATA — ground triple terms parsed via Turtle 1.2 and added/removed directly; (3) INSERT/DELETE templates — `<<( )>>` in subject **or** object position handled via post-processing SELECT against the same WHERE clause; bindings resolved via Python API. Registry rebuilt after every update.
 
 ---
 
@@ -183,7 +183,7 @@ New classes introduced by Starlight with no direct rdflib equivalent.
 
 ### starlight/model/triple.py
 
-✅ `TripleTerm` — Represents an RDF 1.2 triple term `<<( s p o )>>` as a Python value type. Value-equality and hashing based on content; accepts nested TripleTerms. Coerced from plain 3-tuples wherever the StarlightGraph API accepts a node.
+✅ `TripleTerm` — Represents an RDF 1.2 triple term `<<( s p o )>>` as a Python value type. Value-equality and hashing based on content; accepts nested TripleTerms. Coerced from plain 3-tuples wherever the StarlightGraph API accepts a node. Implements `n3(namespace_manager=None)` for rdflib term interface compatibility.
 
 ### starlight/graph/starlight_graph.py
 
@@ -198,7 +198,9 @@ New classes introduced by Starlight with no direct rdflib equivalent.
 
 ### starlight/query/sparql12_to_11.py
 
-🔲 `_RewriteState` — Internal state class for SPARQL-star query rewriting. Exists but the rewriter is incomplete; tracked as a gap in `future_enhancements.md`.
+✅ `rewrite_sparql12_to_11(query)` — Public entry point. Rewrites SPARQL 1.2 syntax to SPARQL 1.1: triple-term patterns `<<( )>>`, annotation subjects `<< >>`, inline annotation blocks `{| |}`, reifier binding `~?r`, `SUBJECT()`/`PREDICATE()`/`OBJECT()` function calls, and `isTripleTerm()` filter. Passes plain queries through unchanged.
+
+➖ `_RewriteState` — Internal counter for generating unique `?__ttN` variable names across a single rewrite pass. Not part of the public API.
 
 ---
 
@@ -214,17 +216,12 @@ Module-level functions that are part of the internal encoding but not public API
 
 ## Summary
 
-✅ Done — 7
+✅ Done — 11
 🔗 Inherited (works) — 14
 ⚠️ Partial / caveats — 5
-🔲 Not started (gap) — 6
+🔲 Not started (gap) — 2
 ➖ Not needed — 16
 
-### Gaps to address
-
-1. **`addN`** — bypasses `add()`; needs an override that coerces TripleTerms before writing to the store.
-2. **`triples_choices`** — bypasses `triples()`; needs an override that coerces patterns and restores TripleTerm objects in results.
-3. **`query` / `update`** — no SPARQL-star support; requires rewriting triple-term patterns before delegating to rdflib's SPARQL engine (tracked in `future_enhancements.md`).
 
 ### Known caveats
 

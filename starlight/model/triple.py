@@ -11,13 +11,18 @@ class TripleTerm:
     Value-typed: two instances with the same (s, p, o) are equal and have the
     same hash. A plain Python 3-tuple is coerced to TripleTerm wherever the
     StarlightGraph API expects a node.
+
+    _namespace_manager is set by StarlightGraph._restore() when returning a
+    TripleTerm from a query result so that __str__ can emit prefixed names.
+    It is excluded from equality and hashing.
     """
-    __slots__ = ('subject', 'predicate', 'object')
+    __slots__ = ('subject', 'predicate', 'object', '_namespace_manager')
 
     def __init__(self, subject, predicate, obj):
         self.subject = subject
         self.predicate = predicate
         self.object = obj
+        self._namespace_manager = None
 
     def _key(self):
         s = self.subject._key() if isinstance(self.subject, TripleTerm) else self.subject
@@ -39,11 +44,12 @@ class TripleTerm:
         yield self.predicate
         yield self.object
 
+    def n3(self, namespace_manager=None):
+        nm = namespace_manager if namespace_manager is not None else self._namespace_manager
+        return f'<<( {self.subject.n3(nm)} {self.predicate.n3(nm)} {self.object.n3(nm)} )>>'
+
     def __str__(self):
-        s = str(self.subject)   if isinstance(self.subject, TripleTerm) else self.subject.n3()
-        p = self.predicate.n3()
-        o = str(self.object)    if isinstance(self.object,  TripleTerm) else self.object.n3()
-        return f'<<( {s} {p} {o} )>>'
+        return self.n3()
 
     def __repr__(self):
         return f'TripleTerm({self.subject!r}, {self.predicate!r}, {self.object!r})'
