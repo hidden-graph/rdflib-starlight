@@ -14,13 +14,48 @@
 4, (maybe we build on version 8 stable release)
 4. per rdf 1.2 specification a triple can not be the subject of a triple. - should we allow
 5. how to announce RDF version
-6. should we serialize just to normal form of 1.2 or provide options
-
+6. should we serialize just to normal form of 1.2 or provide options for ttl
+7. ~~review all out-of-box serialization formats and compare to our implementation~~ → see **Format Coverage** section below.
 
 
 
 
 Ideas deferred from active development. Grouped by layer.
+
+---
+
+## Format Coverage
+
+### Implemented RDF 1.2 formats
+
+| Starlight format | rdflib alias(es) | Parse | Serialize | Notes |
+|---|---|:---:|:---:|---|
+| `turtle12` | `turtle`, `ttl`, `text/turtle` | ✅ | ✅ | Full RDF 1.2 with `<<( )>>` |
+| `nt12` | `nt`, `ntriples`, `nt11` | ✅ | ✅ | Flat line-per-triple; single graph |
+| `nq12` | `nquads` | ✅ | ✅ | N-Quads 1.2; StarlightConjunctiveGraph |
+| `trig12` | `trig` | ✅ | ✅ | Named GRAPH blocks; StarlightConjunctiveGraph |
+| `jsonld12` | `json-ld`, `application/ld+json` | ✅ | ✅ | tt:HASH nodes; rdflib JSON-LD parser used for input |
+
+### rdflib formats not yet extended to RDF 1.2
+
+**N3 / Notation3** (`n3`, `text/n3`)
+N3 is a strict superset of Turtle, so our Turtle 1.2 parser already handles any triple-term syntax that also appears in Turtle.  The extra N3 constructs (formulae `{ }`, `@forAll`, `@forSome`) are not part of RDF 1.2 and do not require 1.2 treatment.  A lightweight `n3-12` format alias that routes to `turtle12` (with an explicit caveat that formulae are not supported) would give full coverage at near-zero cost.  Effort: **Very Low**.
+
+**RDF/XML** (`xml`, `application/rdf+xml`, `pretty-xml`)
+The RDF 1.2 spec defines XML serialization of triple terms via a new `rdf:TripleTerm` element containing `rdf:subject`, `rdf:predicate`, `rdf:object` child elements, and `rdf:reifies` as an attribute on property elements.  Implementing this requires writing a custom XML parser/serializer (rdflib's `rdf+xml` plugin does not support these constructs).  RDF/XML is still widely used for OWL ontologies and Linked Data.  Effort: **High**.
+
+**TriX** (`trix`, `application/trix`)
+TriX is an XML named-graph format.  Extending it to RDF 1.2 follows the same pattern as RDF/XML — new XML elements for triple terms — but it is less widely deployed than RDF/XML.  Effort: **Medium-High**.
+
+**longturtle** (`longturtle`)
+`longturtle` is rdflib's verbose Turtle variant (expanded predicates, one triple per line).  It uses exactly the same grammar as Turtle, so a `longturtle12` serializer could be a thin wrapper around `serialize_turtle12` that disables prefix folding and subject grouping.  Parsing `longturtle` already works via `turtle12` since the grammar is a subset.  Effort: **Very Low**.
+
+### Not applicable
+
+| Format | Reason |
+|---|---|
+| `hext` | HTML extraction; not an RDF authoring format |
+| `patch` | SPARQL Update diff format; separate concern from RDF 1.2 triple terms |
 
 ---
 

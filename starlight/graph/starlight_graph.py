@@ -25,6 +25,10 @@ RDF_REIFIES     = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 # Predicates used in the internal TripleTerm URIRef encoding
 _ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
 
+# rdf:TripleTerm type URI — emitted by the JSON-LD 1.2 serializer; treated as
+# internal encoding so it is never surfaced through triples() / __len__ etc.
+_RDF_TRIPLE_TERM = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#TripleTerm'
+
 # Unbound reference to Graph.triples — used to bypass our override safely
 _raw_triples = Graph.triples
 
@@ -136,8 +140,14 @@ class StarlightGraph(Graph):
 
     def _is_encoding_triple(self, s, p, o):
         """True if (s, p, o) is internal infrastructure that must not be surfaced."""
-        if isinstance(s, URIRef) and str(s).startswith(TT_NS) and p in _ENCODING_PREDS:
-            return True
+        if isinstance(s, URIRef) and str(s).startswith(TT_NS):
+            if p in _ENCODING_PREDS:
+                return True
+            # rdf:type rdf:TripleTerm is emitted by the JSON-LD 1.2 serializer so
+            # that standard JSON-LD parsers can reconstruct triple terms; filter it
+            # here so it never appears in user-visible results.
+            if p == RDF.type and isinstance(o, URIRef) and str(o) == _RDF_TRIPLE_TERM:
+                return True
         return False
 
     def _build_registry_from_store(self):
@@ -344,10 +354,16 @@ class StarlightGraph(Graph):
 
     def parse(self, source=None, publicID=None, format=None,
               location=None, file=None, data=None, **kwargs):
-        """Parse RDF data into the graph. format='turtle12' accepts Turtle 1.2 syntax."""
-        if format == 'turtle12':
+        """Parse RDF data into the graph.
+
+        format='turtle12' — Turtle 1.2 with <<( )>>, {| |}, ~ reifier syntax
+        format='nt12'     — N-Triples 1.2 with <<( )>> triple terms
+        format='nq12'     — N-Quads 1.2 (all named graphs merged into this graph)
+        format='trig12'   — TriG 1.2 (all named graphs merged into this graph)
+        All other formats delegate to rdflib (no triple-term support).
+        """
+        if format in ('turtle12', 'nt12', 'nq12', 'trig12', 'jsonld12'):
             from pathlib import Path
-            from starlight.parsers.turtle_parser import StarlightTurtleParser, _skolemize_encoding
             if data is not None:
                 text = data
             elif file is not None:
@@ -364,13 +380,43 @@ class StarlightGraph(Graph):
                     raise ValueError(f'Cannot read source: {source!r}')
             else:
                 raise ValueError('No source data to parse')
-            raw = StarlightTurtleParser().parse(text)
-            processed = _skolemize_encoding(raw)
-            for prefix, ns in processed.namespaces():
-                self.bind(prefix, ns)
-            for triple in processed:
-                super().add(triple)
-            self._build_registry_from_store()
+
+            if format == 'turtle12':
+                from starlight.parsers.turtle_parser import StarlightTurtleParser, _skolemize_encoding
+                raw = StarlightTurtleParser().parse(text)
+                processed = _skolemize_encoding(raw)
+                for prefix, ns in processed.namespaces():
+                    self.bind(prefix, ns)
+                for triple in processed:
+                    super().add(triple)
+                self._build_registry_from_store()
+
+            elif format in ('nt12', 'nq12'):
+                if format == 'nt12':
+                    from starlight.parsers.ntriples12 import parse_ntriples12
+                    triples = parse_ntriples12(text)
+                else:
+                    from starlight.parsers.ntriples12 import parse_nquads12
+                    # merge all named graphs: drop the graph component
+                    triples = [(s, p, o) for s, p, o, _g in parse_nquads12(text)]
+                for triple in triples:
+                    self.add(triple)
+
+            elif format == 'trig12':
+                from starlight.parsers.trig12 import parse_trig12
+                for triple in parse_trig12(text):
+                    super().add(triple)
+                self._build_registry_from_store()
+
+            elif format == 'jsonld12':
+                # Delegate to rdflib's JSON-LD parser (handles @context expansion);
+                # the tt: encoding triples and rdf:type rdf:TripleTerm markers are
+                # loaded into the store, then _build_registry_from_store rebuilds
+                # the TripleTerm registry.  rdf:type rdf:TripleTerm is filtered by
+                # _is_encoding_triple so it never surfaces to callers.
+                super().parse(data=text, format='json-ld')
+                self._build_registry_from_store()
+
             return self
         return super().parse(source=source, publicID=publicID, format=format,
                              location=location, file=file, data=data, **kwargs)
@@ -671,10 +717,31 @@ class StarlightGraph(Graph):
         return None
 
     def serialize(self, destination=None, format='turtle', **kwargs):
-        """Serialize the graph. format='turtle12' produces Turtle 1.2 with <<( )>> notation."""
-        if format == 'turtle12':
-            from starlight.serializers.turtle12 import serialize_turtle12
-            text = serialize_turtle12(self)
+        """Serialize the graph.
+
+        format='turtle12' — Turtle 1.2 with <<( )>> triple terms
+        format='nt12'     — N-Triples 1.2 with <<( )>> triple terms
+        format='nq12'     — N-Quads 1.2 (graph name from self.identifier)
+        format='trig12'   — TriG 1.2 (GRAPH block wrapper around Turtle 1.2)
+        All other formats delegate to rdflib (internal tt: encoding visible).
+        """
+        _RDF12_FORMATS = {'turtle12', 'nt12', 'nq12', 'trig12', 'jsonld12'}
+        if format in _RDF12_FORMATS:
+            if format == 'turtle12':
+                from starlight.serializers.turtle12 import serialize_turtle12
+                text = serialize_turtle12(self)
+            elif format == 'nt12':
+                from starlight.serializers.ntriples12 import serialize_ntriples12
+                text = serialize_ntriples12(self)
+            elif format == 'nq12':
+                from starlight.serializers.ntriples12 import serialize_nquads12
+                text = serialize_nquads12(self)
+            elif format == 'trig12':
+                from starlight.serializers.trig12 import serialize_trig12
+                text = serialize_trig12(self)
+            elif format == 'jsonld12':
+                from starlight.serializers.jsonld12 import serialize_jsonld12
+                text = serialize_jsonld12(self)
             if destination is not None:
                 with open(destination, 'w', encoding='utf-8') as f:
                     f.write(text)

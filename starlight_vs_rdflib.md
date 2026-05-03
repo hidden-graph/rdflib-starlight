@@ -83,11 +83,11 @@ Subjects and objects may be triple terms and subjects() and objects() may return
 
 Allows for the parsing from 1.2 formats and the serialization into 1.2 formats. 
 
-⚠️ `parse(...)` — `format='turtle12'` routes to `StarlightTurtleParser` + `_skolemize_encoding`; all other formats delegate to rdflib with no TripleTerm support (TripleTerms will not be recognized or registered).
+✅ `parse(...)` — Four RDF 1.2 formats supported: `format='turtle12'` (full Turtle 1.2 via `StarlightTurtleParser`); `format='nt12'` (N-Triples 1.2 line-by-line parser); `format='nq12'` (N-Quads 1.2, all named graphs merged); `format='trig12'` (TriG 1.2, all named graphs merged). All other formats delegate to rdflib with no TripleTerm support.
 
-⚠️ `serialize(...)` — `format='turtle12'` routes to `serialize_turtle12()`; all other formats serialize the raw store (encoding triples visible, TT URIRefs as `tt:HASH` instead of `<<( )>>`).
+✅ `serialize(...)` — Four RDF 1.2 formats supported: `format='turtle12'` (`serialize_turtle12()`); `format='nt12'` (N-Triples 1.2, one triple per line, full IRIs); `format='nq12'` (N-Quads 1.2, graph name from `self.identifier`); `format='trig12'` (TriG 1.2, `GRAPH <id> { Turtle 1.2 }` for named-graph identifiers, plain Turtle for BNode identifiers). All other formats serialize the raw store (encoding triples visible).
 
-⚠️ `print(format, out)` — Calls `self.serialize()`; Turtle 1.2 output works cleanly; all other formats expose internal encoding.
+⚠️ `print(format, out)` — Calls `self.serialize()`; all four RDF 1.2 formats work cleanly; non-RDF-1.2 formats expose internal encoding.
 
 ---
 
@@ -187,12 +187,36 @@ New classes introduced by Starlight with no direct rdflib equivalent.
 
 ### starlight/graph/starlight_graph.py
 
-✅ `StarlightGraph` — Subclass of `rdflib.Graph`; the main public API. Stores TripleTerms as content-addressed `tt:HASH` URIRefs internally and hides the encoding from all callers. See method tracker above.
+✅ `StarlightGraph` — Subclass of `rdflib.Graph`; the main public API for single-graph RDF 1.2. Stores TripleTerms as content-addressed `tt:HASH` URIRefs internally and hides the encoding from all callers. See method tracker above.
+
+### starlight/graph/starlight_conjunctive_graph.py
+
+✅ `StarlightConjunctiveGraph` — Subclass of `rdflib.ConjunctiveGraph`; multi-graph container where every named-graph context is a `StarlightGraph`. Overrides `get_context()` to return `StarlightGraph` views (with registry populated), `quads()` to filter encoding triples and restore TripleTerms, `contexts()` to yield `StarlightGraph` instances, `parse(format='trig12')` to load TriG 1.2 into isolated per-graph `StarlightGraph` contexts, and `serialize(format='trig12')` to emit a valid TriG 1.2 document with `GRAPH <uri> { Turtle 1.2 }` blocks. Each named graph's TripleTerm registry is independent; triple terms in graph A are not visible from graph B.
 
 
 ### starlight/parsers/turtle_parser.py
 
 ✅ `StarlightTurtleParser` — Parses Turtle 1.2 text (including `<<( )>>`, `{| |}`, and `~ reifier` syntax) into an rdflib Graph with BNode-based triple-term encoding. Called by `StarlightGraph.parse(format='turtle12')`.
+
+### starlight/parsers/ntriples12.py
+
+✅ `parse_ntriples12(text)` — Parses N-Triples 1.2 text line-by-line; returns a list of `(s, p, o)` triples where subjects/objects may be `TripleTerm` instances. Handles full IRIs, blank nodes, plain/typed/language-tagged literals, and `<<( )>>` triple terms (including nested). Called by `StarlightGraph.parse(format='nt12')`.
+
+✅ `parse_nquads12(text)` — Parses N-Quads 1.2 text; returns a list of `(s, p, o, g)` quads. Called by `StarlightGraph.parse(format='nq12')`; the graph component `g` is discarded when merging into a single-graph `StarlightGraph`.
+
+### starlight/parsers/trig12.py
+
+✅ `parse_trig12(text)` — Parses TriG 1.2 text by splitting the document into prefix declarations and named-graph content blocks, parsing each block as Turtle 1.2 via `StarlightTurtleParser`, and merging all resulting triples. Called by `StarlightGraph.parse(format='trig12')`.
+
+### starlight/serializers/ntriples12.py
+
+✅ `serialize_ntriples12(g)` — Serializes a `StarlightGraph` to N-Triples 1.2 text (one triple per line, full IRIs, `<<( )>>` for triple terms). Called by `StarlightGraph.serialize(format='nt12')`.
+
+✅ `serialize_nquads12(g, graph_uri=None)` — Serializes to N-Quads 1.2 text (N-Triples + graph name from `g.identifier`). Called by `StarlightGraph.serialize(format='nq12')`.
+
+### starlight/serializers/trig12.py
+
+✅ `serialize_trig12(g)` — Serializes to TriG 1.2 text. Named-graph identifiers (URIRef) produce a `GRAPH <uri> { ... }` block around Turtle 1.2 content; BNode identifiers produce plain Turtle 1.2 (default-graph convention). Called by `StarlightGraph.serialize(format='trig12')`.
 
 ➖ `_Expander` — Internal helper class used by the parser to resolve prefixes and base URIs during parsing. Not part of the public API.
 
@@ -216,15 +240,16 @@ Module-level functions that are part of the internal encoding but not public API
 
 ## Summary
 
-✅ Done — 11
+✅ Done — 13
 🔗 Inherited (works) — 14
-⚠️ Partial / caveats — 5
+⚠️ Partial / caveats — 3
 🔲 Not started (gap) — 2
 ➖ Not needed — 16
 
 
 ### Known caveats
 
-- **`serialize` non-turtle12 formats** — internal `tt:HASH` URIRefs and encoding triples (`rdf:subject/predicate/object`) are visible; intended for debugging but may surprise callers expecting clean RDF 1.1.
+- **`serialize` non-RDF-1.2 formats** — internal `tt:HASH` URIRefs and encoding triples (`rdf:subject/predicate/object`) are visible; intended for debugging but may surprise callers expecting clean RDF 1.1.
 - **`cbd`** — only safe when `target_graph` is a `StarlightGraph`; TripleTerms in object positions cannot be stored in a plain `rdflib.Graph`.
 - **`isomorphic`** — TripleTerms with BNodes inside them are content-addressed and will not isomorphize across separately parsed graphs (expected RDF 1.2 semantics, but worth noting).
+- **`parse`/`serialize` TriG/N-Quads named-graph merging** — `StarlightGraph` is a single-graph view; `trig12` and `nq12` parsing merges all named-graph content into one graph (provenance is lost).
