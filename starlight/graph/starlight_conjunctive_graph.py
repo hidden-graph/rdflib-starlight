@@ -222,6 +222,99 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
 
         return self
 
+    # ------------------------------------------------------------------
+    # Query / Update with SPARQL-star support
+    # ------------------------------------------------------------------
+
+    def _restore_any(self, node):
+        """Restore a tt:HASH URIRef to a TripleTerm by searching all cached graph registries."""
+        if not (isinstance(node, URIRef) and str(node).startswith(TT_NS)):
+            return node
+        for sg in self._sg_cache.values():
+            tt = sg._tt_nodes.get(node)
+            if tt is not None:
+                return tt
+        return node
+
+    def _build_raw_execution_graph(self) -> 'ConjunctiveGraph':
+        """Build a plain ConjunctiveGraph containing all raw triples including encoding triples.
+
+        When the SPARQL engine evaluates ``GRAPH ?g { }`` with a variable graph, it
+        calls ``store.contexts()`` then ``context.triples()`` on each context.
+        Because the store holds ``StarlightGraph`` instances as context objects,
+        ``triples()`` would filter encoding triples and break triple-term patterns.
+        Running the rewritten query against a plain ``ConjunctiveGraph`` built here
+        (whose context objects are plain ``Graph`` instances) sidesteps this.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            raw = ConjunctiveGraph()
+        for prefix, ns in self.namespaces():
+            raw.bind(prefix, ns)
+        for sg in self._sg_cache.values():
+            raw_ctx = raw.get_context(sg.identifier)
+            for t in _raw_triples(sg, (None, None, None)):
+                raw_ctx.add(t)
+        return raw
+
+    def query(self, query_object, processor='sparql', result='sparql',
+              initNs=None, initBindings=None, use_store_provided=True, **kwargs):
+        """Execute a SPARQL query across all named graphs with SPARQL-star support.
+
+        Triple-term patterns (``<<( )>>``, ``{| |}``, ``~``, SUBJECT/PREDICATE/
+        OBJECT functions, isTripleTerm) are rewritten to SPARQL 1.1 before
+        execution.  SELECT result rows are post-processed to restore tt:HASH
+        URIRefs back to TripleTerm objects.
+
+        Note: SUBJECT/PREDICATE/OBJECT accessor functions must appear inside the
+        same GRAPH clause that binds the ``?tt`` variable; they are injected at
+        the WHERE level by the rewriter, which places them outside any GRAPH block.
+        Use explicit triple patterns (``?tt <rdf:subject> ?s``) when the accessor
+        needs to be scoped to a named graph.
+        """
+        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+        if isinstance(query_object, str):
+            query_object = rewrite_sparql12_to_11(query_object)
+        raw = self._build_raw_execution_graph()
+        r = raw.query(query_object, processor=processor, result=result,
+                      initNs=initNs, initBindings=initBindings,
+                      use_store_provided=use_store_provided, **kwargs)
+        if r.type == 'SELECT':
+            r.bindings = [
+                {var: self._restore_any(row.get(var)) if row.get(var) is not None else None
+                 for var in r.vars}
+                for row in r.bindings
+            ]
+        elif r.type == 'CONSTRUCT':
+            r.graph = StarlightGraph.from_rdflib(r.graph)
+        return r
+
+    def update(self, update_object, processor='sparql',
+               initNs=None, initBindings=None, use_store_provided=True, **kwargs):
+        """Execute a SPARQL UPDATE across named graphs with SPARQL-star support.
+
+        Triple-term patterns in WHERE clauses are rewritten to SPARQL 1.1.
+        All cached per-graph registries are rebuilt after execution so that
+        newly added triple terms are immediately visible.
+
+        Limitation: ground ``<<( )>>`` inside ``INSERT DATA { GRAPH <uri> { } }``
+        blocks is not supported — use ``cg.get_context(uri).add(triple)`` instead.
+        """
+        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+        if isinstance(update_object, str):
+            update_object = rewrite_sparql12_to_11(update_object)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            raw = ConjunctiveGraph(store=self.store)
+        for prefix, ns in self.namespaces():
+            raw.bind(prefix, ns)
+        raw.update(update_object, processor=processor,
+                   initNs=initNs, initBindings=initBindings,
+                   use_store_provided=use_store_provided, **kwargs)
+        for sg in self._sg_cache.values():
+            sg._build_registry_from_store()
+        return None
+
     def serialize(self, destination=None, format='trig', **kwargs) -> str | None:
         """Serialize this dataset.
 

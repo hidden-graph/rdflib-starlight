@@ -4,7 +4,7 @@
 
 - **RDF version declaration** — Should serialized output include a version marker (e.g. a comment or magic token) so consumers know they are reading RDF 1.2? No standard mechanism exists yet.
 - **Annotation syntax in serializer** — Emit the compact `{| |}` annotation shorthand or always use explicit `rdf:reifies` triples? The compact form is more readable but requires pattern-matching at serialize time (see Serializer section).
-- **Backend database integration** — How to persist the tt:HASH encoding and TripleTerm registry in a triple store (e.g. GraphDB, Stardog, Apache Jena Fuseki). Custom IRI prefix conventions or named-graph sidecars are candidate approaches.
+- **Backend database integration** — How to persist the tt:HASH encoding and TripleTerm registry in a triple store (e.g. GraphDB, Stardog, Apache Jena Fuseki). Custom IRI prefix conventions or named-graph sidecars are candidate approaches.  (Note - need to determine whehter the backend supprots rdf1.2 or not.  if it does not, then we write and query 1.1 trasnforamtions.  if it does, then we have the opportunity to write and query 1.2 with quoted triples.)
 
 ---
 
@@ -104,6 +104,12 @@ The conjunctive graph has no `query()` override, so SPARQL-star patterns are not
 
 **`StarlightConjunctiveGraph.update()`**
 Same gap as `query()` — SPARQL UPDATE with triple-term patterns is not rewritten for the multi-graph case. After UPDATE execution, per-graph registries may also need rebuilding via `_build_registry_from_store()`.
+
+**SUBJECT/PREDICATE/OBJECT functions inside GRAPH clauses** ✅ Resolved
+`BIND(SUBJECT(?tt) AS ?s)` inside a `GRAPH { }` block is now rewritten to `?tt <rdf:subject> ?s .` in-place (same scope). Inline calls like `SELECT (SUBJECT(?tt) AS ?s)` in SELECT projections continue to inject at the WHERE level, which is correct for that clause position.
+
+**`query()` copies all triples per call**
+`_build_raw_execution_graph()` constructs a fresh plain `ConjunctiveGraph` on each `query()` call to ensure encoding triples are visible to the SPARQL engine's `GRAPH ?g` enumeration. For large datasets this is expensive. A cached raw graph that is invalidated on `update()` / `parse()` would reduce this to an amortized cost.
 
 ---
 

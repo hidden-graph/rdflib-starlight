@@ -35,6 +35,12 @@ _FUNC_TO_PRED = {
     'OBJECT':    RDF_OBJECT,
 }
 
+# BIND(SUBJECT(?tt) AS ?s)  →  ?tt <rdf:subject> ?s  (in-place, no outer injection)
+_BIND_ACCESSOR_RE = _re.compile(
+    r'\bBIND\s*\(\s*(SUBJECT|PREDICATE|OBJECT)\s*\(\s*(\?[A-Za-z_]\w*)\s*\)\s+AS\s+(\?[A-Za-z_]\w*)\s*\)',
+    _re.IGNORECASE,
+)
+
 # A SPARQL term: variable, full IRI, prefixed name, default-prefix name,
 # quoted literal (simple), blank node, or rdf:type shorthand 'a'.
 _T = (
@@ -110,12 +116,41 @@ def rewrite_sparql12_to_11(query: str) -> str:
         query = _rewrite_annotation_forms(query, state)
 
     if needs_func:
-        query = _rewrite_triple_functions(query, state)
+        # BIND(SUBJECT(?tt) AS ?s) → ?tt <rdf:subject> ?s  in-place.
+        # This keeps the binding triple inside the same group graph pattern (and
+        # named-graph scope) as the original BIND, which is essential for correct
+        # evaluation when the BIND appears inside a GRAPH { } clause.
+        query = _rewrite_bind_accessors(query)
+        needs_func = bool(_TRIPLE_FUNC_RE.search(query))
 
-    if needs_tt or "<<(" in query:
+    # Run _rewrite_group_content when there are <<( )>> patterns OR when there
+    # are non-BIND function calls that need inline injection inside blocks.
+    if needs_tt or needs_func or "<<(" in query:
         query = _rewrite_group_content(query, state)
 
+    # After inline handling, any remaining SUBJECT/PREDICATE/OBJECT calls live
+    # outside {…} blocks (SELECT projections, HAVING, ORDER BY).  Inject their
+    # binding triples at the WHERE level — correct for those clause positions.
+    if needs_func and _TRIPLE_FUNC_RE.search(query):
+        query = _rewrite_triple_functions(query, state)
+
     return query
+
+
+def _rewrite_bind_accessors(query: str) -> str:
+    """Rewrite BIND(SUBJECT(?tt) AS ?s) → ?tt <rdf:subject> ?s in place.
+
+    Unlike the WHERE-level injection used for SELECT-projection function calls,
+    this keeps the binding triple inside the same group graph pattern as the
+    original BIND.  That is essential when the BIND appears inside a GRAPH { }
+    clause: rdflib's SPARQL engine does not propagate outer-scope variable
+    bindings into BIND or FILTER expressions inside a named-graph scope.
+    """
+    def _replace(m: _re.Match) -> str:
+        func = m.group(1).upper()
+        tt_var, result_var = m.group(2), m.group(3)
+        return f"{tt_var} {_FUNC_TO_PRED[func]} {result_var} ."
+    return _BIND_ACCESSOR_RE.sub(_replace, query)
 
 
 def _rewrite_annotation_forms(query: str, state: _RewriteState) -> str:
@@ -191,7 +226,18 @@ def _rewrite_triple_functions(query: str, state: _RewriteState) -> str:
     return result
 
 
-def _rewrite_group_content(text: str, state: _RewriteState) -> str:
+def _rewrite_group_content(text: str, state: _RewriteState,
+                           handle_funcs: bool = False) -> str:
+    """Rewrite <<( )>> triple-term patterns and, when handle_funcs is True,
+    SUBJECT/PREDICATE/OBJECT function calls inline within the current block.
+
+    handle_funcs is False at the outermost call (SELECT/WHERE level) so that
+    accessor functions in SELECT projections are left for _rewrite_triple_functions
+    to handle via WHERE-level injection (correct for that clause position).
+    It is set to True for all recursive calls (inside { } blocks) so that
+    functions inside GRAPH, OPTIONAL, UNION etc. inject their binding triple
+    within the same named-graph scope rather than at the outer WHERE level.
+    """
     result: list[str] = []
     pending_patterns: list[str] = []
     buffer: list[str] = []
@@ -229,9 +275,24 @@ def _rewrite_group_content(text: str, state: _RewriteState) -> str:
             pending_patterns.extend(patterns)
             continue
 
+        # Inline SUBJECT/PREDICATE/OBJECT detection — only inside blocks.
+        # Injects the binding triple into the current group graph pattern via
+        # pending_patterns, which is emitted at the next '.' or '}' boundary.
+        # This keeps the triple in the same named-graph scope as the function call.
+        if handle_funcs and text[i].isalpha():
+            m = _TRIPLE_FUNC_RE.match(text, i)
+            if m:
+                func = m.group(1).upper()
+                tt_var = m.group(2)
+                fresh_var = state.new_var()
+                buffer.append(fresh_var)
+                pending_patterns.append(f"{tt_var} {_FUNC_TO_PRED[func]} {fresh_var} .")
+                i = m.end()
+                continue
+
         if text[i] == '{':
             inner, i = _consume_balanced(text, i, '{', '}')
-            rewritten = _rewrite_group_content(inner[1:-1], state)
+            rewritten = _rewrite_group_content(inner[1:-1], state, handle_funcs=True)
             buffer.append('{')
             buffer.append(rewritten)
             buffer.append('}')
