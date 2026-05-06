@@ -16,8 +16,8 @@
 |---|---|:---:|:---:|---|
 | `turtle12` | `turtle`, `ttl`, `text/turtle` | ✅ | ✅ | Full RDF 1.2 with `<<( )>>` |
 | `nt12` | `nt`, `ntriples`, `nt11` | ✅ | ✅ | Flat line-per-triple; single graph |
-| `nq12` | `nquads` | ✅ | ✅ | N-Quads 1.2; StarlightConjunctiveGraph |
-| `trig12` | `trig` | ✅ | ✅ | Named GRAPH blocks; StarlightConjunctiveGraph |
+| `nq12` | `nquads` | ✅ | ✅ | N-Quads 1.2; StarlightDataset |
+| `trig12` | `trig` | ✅ | ✅ | Named GRAPH blocks; StarlightDataset |
 | `jsonld12` | `json-ld`, `application/ld+json` | ✅ | ✅ | tt:HASH nodes; rdflib JSON-LD parser used for input |
 
 ### Formats not yet extended to RDF 1.2
@@ -69,9 +69,6 @@ Same as annotation folding but for named reifiers. When a named URI is the reifi
 **Reification shorthand as subject (`<< s p o >>` syntax)**
 When a reification node appears only as subject (never as object), the RDF 1.2 Turtle grammar allows the `<< s p o >>` subject shorthand rather than a separate triple.
 
-**Compact output — skip unused built-in prefixes**
-rdflib's default NamespaceManager registers ~30 well-known prefixes (brick, csvw, foaf, etc.). The serializer currently emits all of them. Filter to only prefixes whose namespace appears in the graph's actual triples.
-
 ---
 
 ### Parser
@@ -89,27 +86,15 @@ The parser records `@base` declarations but does not fully resolve relative IRIs
 **`subjects()` / `objects()` with triple-term wildcards**
 Same as above — e.g. `g.objects(EX.s, predicate=(None, EX.knows, None))` should find all objects of triples whose subject matches a triple-term pattern.
 
-**`StarlightGraph.__iter__`**
-Inherits rdflib's `__iter__`, which yields raw bnode encodings for triple terms. Override to yield restored `TripleTerm` objects so `for s, p, o in g:` is consistent with `g.triples()`.
-
 **`from_rdflib` zero-copy variant**
 `from_rdflib()` currently copies all triples into a new graph. A zero-copy variant would wrap the source graph's store directly, useful for large graphs loaded by rdflib tooling.
 
 ---
 
-### Multi-graph (StarlightConjunctiveGraph)
-
-**`StarlightConjunctiveGraph.query()`**
-The conjunctive graph has no `query()` override, so SPARQL-star patterns are not rewritten when querying across named graphs. Override `query()` to apply the same `rewrite_sparql12_to_11` logic used by `StarlightGraph.query()`, then post-process results to restore TripleTerms across all contexts.
-
-**`StarlightConjunctiveGraph.update()`**
-Same gap as `query()` — SPARQL UPDATE with triple-term patterns is not rewritten for the multi-graph case. After UPDATE execution, per-graph registries may also need rebuilding via `_build_registry_from_store()`.
-
-**SUBJECT/PREDICATE/OBJECT functions inside GRAPH clauses** ✅ Resolved
-`BIND(SUBJECT(?tt) AS ?s)` inside a `GRAPH { }` block is now rewritten to `?tt <rdf:subject> ?s .` in-place (same scope). Inline calls like `SELECT (SUBJECT(?tt) AS ?s)` in SELECT projections continue to inject at the WHERE level, which is correct for that clause position.
+### Multi-graph (StarlightDataset)
 
 **`query()` copies all triples per call**
-`_build_raw_execution_graph()` constructs a fresh plain `ConjunctiveGraph` on each `query()` call to ensure encoding triples are visible to the SPARQL engine's `GRAPH ?g` enumeration. For large datasets this is expensive. A cached raw graph that is invalidated on `update()` / `parse()` would reduce this to an amortized cost.
+`_build_raw_execution_graph()` constructs a fresh plain `Dataset` on each `query()` call to ensure encoding triples are visible to the SPARQL engine's `GRAPH ?g` enumeration. For large datasets this is expensive. A cached raw graph that is invalidated on `update()` / `parse()` would reduce this to an amortized cost.
 
 ---
 

@@ -1,12 +1,11 @@
 """
-Unit tests for StarlightConjunctiveGraph.query() and .update() with SPARQL-star.
+Unit tests for StarlightDataset.query() and .update() with SPARQL-star.
 
 Covers:
   - SELECT with ground triple-term pattern in a named graph
   - SELECT with variable triple-term pattern across multiple graphs
-  - SELECT with SUBJECT/PREDICATE/OBJECT accessor functions
+  - SELECT with SUBJECT/PREDICATE/OBJECT accessor functions inside GRAPH blocks
   - SELECT with isTripleTerm() filter
-  - SELECT with {| |} annotation syntax
   - CONSTRUCT query
   - ASK query
   - UPDATE with WHERE clause containing triple-term pattern
@@ -14,19 +13,16 @@ Covers:
 """
 
 import pytest
-import warnings
 from rdflib import URIRef, Literal
 from rdflib.namespace import RDF
 
-from starlight.graph import StarlightConjunctiveGraph, StarlightGraph
+from starlight.graph import StarlightDataset, StarlightGraph
 from starlight.graph.starlight_graph import RDF_REIFIES
 from starlight.model.triple import TripleTerm
 
 EX = 'http://example.org/'
 G1 = URIRef(EX + 'graph1')
 G2 = URIRef(EX + 'graph2')
-
-pytestmark = pytest.mark.filterwarnings('ignore::DeprecationWarning')
 
 
 def ex(local):
@@ -51,10 +47,10 @@ GRAPH <{EX}graph2> {{
 
 
 @pytest.fixture
-def cg():
-    c = StarlightConjunctiveGraph()
-    c.parse(data=TRIG, format='trig12')
-    return c
+def ds():
+    d = StarlightDataset()
+    d.parse(data=TRIG, format='trig12')
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +58,7 @@ def cg():
 # ---------------------------------------------------------------------------
 
 class TestSelectGround:
-    def test_select_in_specific_graph(self, cg):
+    def test_select_in_specific_graph(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -72,11 +68,11 @@ class TestSelectGround:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 1
         assert rows[0][0] == ex('stmt1')
 
-    def test_select_across_graphs(self, cg):
+    def test_select_across_graphs(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -86,13 +82,13 @@ class TestSelectGround:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 2
         stmts = {row[0] for row in rows}
         assert ex('stmt1') in stmts
         assert ex('stmt2') in stmts
 
-    def test_select_result_is_uri_not_triple_term(self, cg):
+    def test_select_result_is_uri_not_triple_term(self, ds):
         """?stmt is bound to a URI (the reifier), not a TripleTerm."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -103,10 +99,10 @@ class TestSelectGround:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert isinstance(rows[0][0], URIRef)
 
-    def test_no_match_returns_empty(self, cg):
+    def test_no_match_returns_empty(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -116,7 +112,7 @@ class TestSelectGround:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert rows == []
 
 
@@ -125,7 +121,7 @@ class TestSelectGround:
 # ---------------------------------------------------------------------------
 
 class TestSelectRestore:
-    def test_variable_bound_to_triple_term_restored(self, cg):
+    def test_variable_bound_to_triple_term_restored(self, ds):
         """When ?tt is bound to a tt:HASH encoding, it should be restored to TripleTerm."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -136,13 +132,13 @@ class TestSelectRestore:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 1
         tt = rows[0][0]
         assert isinstance(tt, TripleTerm)
         assert tt == TripleTerm(ex('alice'), ex('knows'), ex('bob'))
 
-    def test_triple_term_from_graph2_restored(self, cg):
+    def test_triple_term_from_graph2_restored(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -152,13 +148,13 @@ class TestSelectRestore:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 1
         tt = rows[0][0]
         assert isinstance(tt, TripleTerm)
         assert tt == TripleTerm(ex('bob'), ex('likes'), ex('carol'))
 
-    def test_triple_terms_from_both_graphs_restored(self, cg):
+    def test_triple_terms_from_both_graphs_restored(self, ds):
         q = f"""
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
         SELECT ?tt WHERE {{
@@ -167,18 +163,18 @@ class TestSelectRestore:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         tts = {row[0] for row in rows}
         assert TripleTerm(ex('alice'), ex('knows'), ex('bob')) in tts
         assert TripleTerm(ex('bob'), ex('likes'), ex('carol')) in tts
 
 
 # ---------------------------------------------------------------------------
-# SELECT — SPARQL-star accessor functions
+# SELECT — SPARQL-star accessor functions inside GRAPH blocks
 # ---------------------------------------------------------------------------
 
 class TestSelectFunctions:
-    def test_subject_via_bind(self, cg):
+    def test_subject_via_bind(self, ds):
         """BIND(SUBJECT(?tt) AS ?s) inside a GRAPH block extracts the subject."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -190,11 +186,11 @@ class TestSelectFunctions:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 1
         assert rows[0][0] == ex('alice')
 
-    def test_predicate_via_bind(self, cg):
+    def test_predicate_via_bind(self, ds):
         """BIND(PREDICATE(?tt) AS ?p) inside a GRAPH block extracts the predicate."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -206,11 +202,11 @@ class TestSelectFunctions:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 1
         assert rows[0][0] == ex('knows')
 
-    def test_object_via_bind(self, cg):
+    def test_object_via_bind(self, ds):
         """BIND(OBJECT(?tt) AS ?o) inside a GRAPH block extracts the object."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -222,11 +218,11 @@ class TestSelectFunctions:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 1
         assert rows[0][0] == ex('bob')
 
-    def test_all_components_via_bind(self, cg):
+    def test_all_components_via_bind(self, ds):
         """All three BIND accessors work together inside a GRAPH block."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -240,13 +236,13 @@ class TestSelectFunctions:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 1
         assert rows[0][0] == ex('alice')
         assert rows[0][1] == ex('knows')
         assert rows[0][2] == ex('bob')
 
-    def test_istripleTerm_filter(self, cg):
+    def test_istripleTerm_filter(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -257,7 +253,7 @@ class TestSelectFunctions:
             }}
         }}
         """
-        rows = list(cg.query(q))
+        rows = list(ds.query(q))
         assert len(rows) == 1
         assert isinstance(rows[0][0], TripleTerm)
 
@@ -267,7 +263,7 @@ class TestSelectFunctions:
 # ---------------------------------------------------------------------------
 
 class TestAsk:
-    def test_ask_true_when_pattern_matches(self, cg):
+    def test_ask_true_when_pattern_matches(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -277,9 +273,9 @@ class TestAsk:
             }}
         }}
         """
-        assert bool(cg.query(q))
+        assert bool(ds.query(q))
 
-    def test_ask_false_when_no_match(self, cg):
+    def test_ask_false_when_no_match(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -289,7 +285,7 @@ class TestAsk:
             }}
         }}
         """
-        assert not bool(cg.query(q))
+        assert not bool(ds.query(q))
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +293,7 @@ class TestAsk:
 # ---------------------------------------------------------------------------
 
 class TestConstruct:
-    def test_construct_returns_starlight_graph(self, cg):
+    def test_construct_returns_starlight_graph(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -308,10 +304,10 @@ class TestConstruct:
             }}
         }}
         """
-        r = cg.query(q)
+        r = ds.query(q)
         assert isinstance(r.graph, StarlightGraph)
 
-    def test_construct_result_has_triple(self, cg):
+    def test_construct_result_has_triple(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -322,7 +318,7 @@ class TestConstruct:
             }}
         }}
         """
-        r = cg.query(q)
+        r = ds.query(q)
         triples = list(r.graph.triples((None, None, None)))
         assert len(triples) == 1
         assert triples[0][0] == ex('stmt1')
@@ -333,7 +329,7 @@ class TestConstruct:
 # ---------------------------------------------------------------------------
 
 class TestUpdatePlain:
-    def test_insert_plain_triple_visible_in_context(self, cg):
+    def test_insert_plain_triple_visible_in_context(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         INSERT DATA {{
@@ -342,11 +338,11 @@ class TestUpdatePlain:
             }}
         }}
         """
-        cg.update(q)
-        g1 = cg.get_context(G1)
+        ds.update(q)
+        g1 = ds.get_context(G1)
         assert (ex('alice'), ex('age'), Literal('30')) in g1
 
-    def test_delete_plain_triple(self, cg):
+    def test_delete_plain_triple(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         DELETE DATA {{
@@ -355,8 +351,8 @@ class TestUpdatePlain:
             }}
         }}
         """
-        cg.update(q)
-        g1 = cg.get_context(G1)
+        ds.update(q)
+        g1 = ds.get_context(G1)
         assert (ex('stmt1'), ex('confidence'), Literal('0.9')) not in g1
 
 
@@ -365,7 +361,7 @@ class TestUpdatePlain:
 # ---------------------------------------------------------------------------
 
 class TestUpdateWithTripleTerm:
-    def test_insert_using_triple_term_where(self, cg):
+    def test_insert_using_triple_term_where(self, ds):
         """Mark all statements about alice-knows-bob as verified."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -379,11 +375,11 @@ class TestUpdateWithTripleTerm:
             }}
         }}
         """
-        cg.update(q)
-        g1 = cg.get_context(G1)
+        ds.update(q)
+        g1 = ds.get_context(G1)
         assert (ex('stmt1'), ex('verified'), Literal('true')) in g1
 
-    def test_delete_using_triple_term_where(self, cg):
+    def test_delete_using_triple_term_where(self, ds):
         """Remove confidence annotation for any alice-knows-bob reification."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -398,12 +394,12 @@ class TestUpdateWithTripleTerm:
             }}
         }}
         """
-        cg.update(q)
-        g1 = cg.get_context(G1)
+        ds.update(q)
+        g1 = ds.get_context(G1)
         triples = list(g1.triples((ex('stmt1'), ex('confidence'), None)))
         assert triples == []
 
-    def test_cross_graph_update(self, cg):
+    def test_cross_graph_update(self, ds):
         """Copy a metadata property from graph2 to graph1 when graphs share a subject predicate."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -417,11 +413,11 @@ class TestUpdateWithTripleTerm:
             }}
         }}
         """
-        cg.update(q)
-        g1 = cg.get_context(G1)
+        ds.update(q)
+        g1 = ds.get_context(G1)
         assert (ex('stmt2'), ex('copied'), Literal('yes')) in g1
 
-    def test_registry_intact_after_update(self, cg):
+    def test_registry_intact_after_update(self, ds):
         """Triple-term registry in graph1 must survive an UPDATE that touches graph1."""
         q = f"""
         PREFIX ex: <{EX}>
@@ -429,6 +425,6 @@ class TestUpdateWithTripleTerm:
             GRAPH <{EX}graph1> {{ ex:extra ex:p ex:o . }}
         }}
         """
-        cg.update(q)
-        g1 = cg.get_context(G1)
+        ds.update(q)
+        g1 = ds.get_context(G1)
         assert g1.has_triple_term(ex('alice'), ex('knows'), ex('bob'))

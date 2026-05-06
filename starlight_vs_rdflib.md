@@ -189,9 +189,9 @@ New classes introduced by Starlight with no direct rdflib equivalent.
 
 ✅ `StarlightGraph` — Subclass of `rdflib.Graph`; the main public API for single-graph RDF 1.2. Stores TripleTerms as content-addressed `tt:HASH` URIRefs internally and hides the encoding from all callers. See method tracker above.
 
-### starlight/graph/starlight_conjunctive_graph.py
+### starlight/graph/starlight_dataset.py
 
-✅ `StarlightConjunctiveGraph` — Subclass of `rdflib.ConjunctiveGraph`; multi-graph container where every named-graph context is a `StarlightGraph`. Overrides `get_context()` to return `StarlightGraph` views (with registry populated), `quads()` to filter encoding triples and restore TripleTerms, `contexts()` to yield `StarlightGraph` instances, `parse(format='trig12')` to load TriG 1.2 into isolated per-graph `StarlightGraph` contexts, and `serialize(format='trig12')` to emit a valid TriG 1.2 document with `GRAPH <uri> { Turtle 1.2 }` blocks. Each named graph's TripleTerm registry is independent; triple terms in graph A are not visible from graph B.
+✅ `StarlightDataset` — Subclass of `rdflib.Dataset`; multi-graph container where every named-graph context is a `StarlightGraph`. Overrides `get_context()` to return `StarlightGraph` views (with registry populated), `quads()` to filter encoding triples and restore TripleTerms, `contexts()` to yield `StarlightGraph` instances, `parse(format='trig12')` to load TriG 1.2 into isolated per-graph `StarlightGraph` contexts, and `serialize(format='trig12')` to emit a valid TriG 1.2 document with `GRAPH <uri> { Turtle 1.2 }` blocks. Each named graph's TripleTerm registry is independent; triple terms in graph A are not visible from graph B.
 
 
 ### starlight/parsers/turtle_parser.py

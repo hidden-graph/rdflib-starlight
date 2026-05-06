@@ -1,59 +1,63 @@
 """
-starlight.graph.starlight_conjunctive_graph
+starlight.graph.starlight_dataset
 
-StarlightConjunctiveGraph — multi-graph container where every named-graph
-context is a StarlightGraph with full RDF 1.2 triple-term support.
+StarlightDataset — an RDF 1.2 dataset where every named-graph context is a
+StarlightGraph with full triple-term support.
+
+Terminology: "RDF dataset" is the term used by RDF 1.2, SPARQL, TriG, and
+N-Quads.  rdflib models this as ``Dataset`` (default graph is an explicit,
+independent graph, not a union of named graphs).
 
 Typical usage::
 
-    from starlight.graph import StarlightConjunctiveGraph
+    from starlight.graph import StarlightDataset
 
-    cg = StarlightConjunctiveGraph()
-    cg.parse("knowledge_base.trig", format="trig12")
+    ds = StarlightDataset()
+    ds.parse("knowledge_base.trig", format="trig12")
 
-    g1 = cg.get_context(URIRef("http://example.org/graph1"))
+    g1 = ds.get_context(URIRef("http://example.org/graph1"))
     # g1 is a StarlightGraph — all TripleTerm API available
     for tt in g1.triple_terms():
         print(tt)
 
-    for s, p, o, g in cg.quads():
+    for s, p, o, g in ds.quads():
         print(s, p, o, "in", g.identifier)
 
-    cg.serialize("out.trig", format="trig12")
-
-Note: ``ConjunctiveGraph`` is deprecated in rdflib 7; this class inherits
-from it for maximum compatibility but the same approach can be applied to
-``rdflib.Dataset`` via an identical override pattern.
+    ds.serialize("out.trig", format="trig12")
 """
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
-from rdflib import ConjunctiveGraph, Graph, URIRef, BNode
+from rdflib import Dataset, Graph, URIRef, BNode
+from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 from rdflib.namespace import RDF
 
 from starlight.graph.starlight_graph import StarlightGraph, _raw_triples
 from starlight.model.encoding import TT_NS
 
-# Encoding predicates — used to filter internal triples from quad results
 _ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
 
-# Unbound Graph.add to bypass StarlightGraph.add when loading tt:-encoded triples
 _raw_graph_add = Graph.add
 
 
-class StarlightConjunctiveGraph(ConjunctiveGraph):
-    """A ConjunctiveGraph where every named-graph context is a StarlightGraph.
+class StarlightDataset(Dataset):
+    """An RDF dataset where every named-graph context is a StarlightGraph.
 
     All RDF 1.2 triple-term handling (encoding, filtering, restoration) is
-    delegated to the per-context StarlightGraph instances.  The shared store
-    holds the tt: URIRef encoding triples; each StarlightGraph's registry maps
-    those back to TripleTerm objects.
+    delegated to per-context StarlightGraph instances.  The shared store holds
+    the tt: URIRef encoding triples; each StarlightGraph's registry maps those
+    back to TripleTerm objects.
 
-    Public API additions vs ConjunctiveGraph:
+    The default graph is an explicit, independent graph (``default_union=False``
+    per the RDF dataset spec and rdflib 7 default).  Pass
+    ``default_union=True`` to make the default graph a union of all named graphs.
+
+    Public API additions vs Dataset:
         parse(format='trig12')      — load TriG 1.2 with triple-term support
+        parse(format='nq12')        — load N-Quads 1.2 with triple-term support
         serialize(format='trig12')  — emit TriG 1.2 with triple-term support
+        serialize(format='nq12')    — emit N-Quads 1.2 with triple-term support
         get_context(identifier)     — returns StarlightGraph (not plain Graph)
         contexts()                  — yields StarlightGraph instances
         quads()                     — yields (s, p, o, StarlightGraph) with
@@ -61,26 +65,19 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
     """
 
     def __init__(self, *args, **kwargs):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', DeprecationWarning)
-            super().__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self._sg_cache: dict[str, StarlightGraph] = {}
 
     # ------------------------------------------------------------------
     # Context access
     # ------------------------------------------------------------------
 
-    def get_context(
-        self,
-        identifier,
-        quoted: bool = False,
-        base=None,
-    ) -> StarlightGraph:
+    def get_context(self, identifier, quoted: bool = False, base=None) -> StarlightGraph:
         """Return the StarlightGraph for the named graph with the given identifier.
 
         If the graph was populated via parse(), its TripleTerm registry is
-        already current.  If the context was added through other means (e.g.,
-        direct store manipulation), the registry is rebuilt on first access.
+        already current.  If the context was added through other means, the
+        registry is rebuilt on first access.
         """
         key = str(identifier)
         if key not in self._sg_cache:
@@ -95,7 +92,7 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
 
     def contexts(self, triple=None):
         """Yield a StarlightGraph for every named graph in this dataset."""
-        for ctx in super().contexts(triple=triple):
+        for ctx in super(Dataset, self).contexts(triple):
             yield self.get_context(ctx.identifier)
 
     # ------------------------------------------------------------------
@@ -112,7 +109,10 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
     def quads(self, triple=(None, None, None)):
         """Yield (s, p, o, StarlightGraph) with encoding triples filtered out
         and tt:HASH URIRefs restored to TripleTerm objects."""
-        for s_r, p_r, o_r, g in super().quads(triple):
+        # Bypass Dataset.quads() (which yields bare URIRef graph identifiers)
+        # and call the grandparent implementation directly so the 4th element
+        # is a Graph object with .identifier.
+        for s_r, p_r, o_r, g in super(Dataset, self).quads(triple):
             if self._is_encoding_triple(s_r, p_r, o_r):
                 continue
             sg = self.get_context(g.identifier)
@@ -126,10 +126,6 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
         """
         for s, p, o, _g in self.quads(triple):
             yield s, p, o
-
-    # ------------------------------------------------------------------
-    # Parse / Serialize
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Internal parse helpers
@@ -152,13 +148,8 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
             raise ValueError(f'Cannot read source: {source!r}')
         raise ValueError('No source data provided')
 
-    def _load_context(self, identifier, triples, namespaces=()) -> StarlightGraph:
-        """Create (or update) a StarlightGraph context and populate its registry.
-
-        *triples* may be either tt:-encoded (s,p,o) tuples (use _raw_graph_add)
-        or tuples containing TripleTerm objects (use sg.add for coercion).
-        The caller controls which path via the *encoded* flag on the calling site.
-        """
+    def _load_context(self, identifier, namespaces=()) -> StarlightGraph:
+        """Create (or update) a StarlightGraph context and register its namespaces."""
         sg = StarlightGraph(
             store=self.store,
             identifier=identifier,
@@ -182,7 +173,7 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
         file=None,
         data=None,
         **kwargs,
-    ) -> 'StarlightConjunctiveGraph':
+    ) -> 'StarlightDataset':
         """Parse RDF data into named-graph contexts.
 
         format='trig12' — TriG 1.2; each GRAPH block becomes a StarlightGraph.
@@ -200,10 +191,10 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
         if format == 'trig12':
             from starlight.parsers.trig12 import parse_trig12_named
             for graph_id, triples, namespaces in parse_trig12_named(text):
-                identifier = self.default_context.identifier if graph_id is None else graph_id
-                sg = self._load_context(identifier, [], namespaces)
+                identifier = DATASET_DEFAULT_GRAPH_ID if graph_id is None else graph_id
+                sg = self._load_context(identifier, namespaces)
                 for triple in triples:
-                    _raw_graph_add(sg, triple)   # already tt:-encoded
+                    _raw_graph_add(sg, triple)
                 sg._build_registry_from_store()
                 self._sg_cache[str(identifier)] = sg
 
@@ -212,12 +203,12 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
             from collections import defaultdict
             by_graph: dict = defaultdict(list)
             for s, p, o, graph_id in parse_nquads12(text):
-                key = graph_id if graph_id is not None else self.default_context.identifier
+                key = graph_id if graph_id is not None else DATASET_DEFAULT_GRAPH_ID
                 by_graph[key].append((s, p, o))
             for identifier, triples in by_graph.items():
-                sg = self._load_context(identifier, [])
+                sg = self._load_context(identifier)
                 for triple in triples:
-                    sg.add(triple)              # TripleTerm objects — coerce via sg.add
+                    sg.add(triple)
                 self._sg_cache[str(identifier)] = sg
 
         return self
@@ -236,19 +227,17 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
                 return tt
         return node
 
-    def _build_raw_execution_graph(self) -> 'ConjunctiveGraph':
-        """Build a plain ConjunctiveGraph containing all raw triples including encoding triples.
+    def _build_raw_execution_graph(self) -> Dataset:
+        """Build a plain Dataset containing all raw triples including encoding triples.
 
         When the SPARQL engine evaluates ``GRAPH ?g { }`` with a variable graph, it
         calls ``store.contexts()`` then ``context.triples()`` on each context.
         Because the store holds ``StarlightGraph`` instances as context objects,
         ``triples()`` would filter encoding triples and break triple-term patterns.
-        Running the rewritten query against a plain ``ConjunctiveGraph`` built here
+        Running the rewritten query against a plain ``Dataset`` built here
         (whose context objects are plain ``Graph`` instances) sidesteps this.
         """
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', DeprecationWarning)
-            raw = ConjunctiveGraph()
+        raw = Dataset()
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
         for sg in self._sg_cache.values():
@@ -265,12 +254,6 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
         OBJECT functions, isTripleTerm) are rewritten to SPARQL 1.1 before
         execution.  SELECT result rows are post-processed to restore tt:HASH
         URIRefs back to TripleTerm objects.
-
-        Note: SUBJECT/PREDICATE/OBJECT accessor functions must appear inside the
-        same GRAPH clause that binds the ``?tt`` variable; they are injected at
-        the WHERE level by the rewriter, which places them outside any GRAPH block.
-        Use explicit triple patterns (``?tt <rdf:subject> ?s``) when the accessor
-        needs to be scoped to a named graph.
         """
         from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
         if isinstance(query_object, str):
@@ -298,14 +281,12 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
         newly added triple terms are immediately visible.
 
         Limitation: ground ``<<( )>>`` inside ``INSERT DATA { GRAPH <uri> { } }``
-        blocks is not supported — use ``cg.get_context(uri).add(triple)`` instead.
+        blocks is not supported — use ``ds.get_context(uri).add(triple)`` instead.
         """
         from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
         if isinstance(update_object, str):
             update_object = rewrite_sparql12_to_11(update_object)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', DeprecationWarning)
-            raw = ConjunctiveGraph(store=self.store)
+        raw = Dataset(store=self.store)
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
         raw.update(update_object, processor=processor,
@@ -325,9 +306,6 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
         if format not in ('trig12', 'nq12'):
             return super().serialize(destination=destination, format=format, **kwargs)
 
-        from starlight.serializers.turtle12 import serialize_turtle12
-
-        # Collect all prefix declarations across contexts
         if format == 'nq12':
             from starlight.serializers.ntriples12 import serialize_nquads12
             lines: list[str] = []
@@ -342,11 +320,8 @@ class StarlightConjunctiveGraph(ConjunctiveGraph):
         else:  # trig12
             from starlight.serializers.turtle12 import serialize_turtle12
 
-            # Collect prefix declarations and graph bodies in two passes so
-            # that auto-generated prefixes (e.g. ns1:) from any context are
-            # included in the shared header rather than being silently dropped.
             all_prefix_lines: set[str] = set()
-            graph_entries: list[tuple] = []   # (identifier, body_text)
+            graph_entries: list[tuple] = []
 
             for sg in self.contexts():
                 if len(sg) == 0:
