@@ -18,11 +18,24 @@ class TripleTerm:
     """
     __slots__ = ('subject', 'predicate', 'object', '_namespace_manager')
 
+    # Slots that may only be written once (during __init__)
+    _IMMUTABLE = frozenset({'subject', 'predicate', 'object'})
+
     def __init__(self, subject, predicate, obj):
         self.subject = subject
         self.predicate = predicate
         self.object = obj
         self._namespace_manager = None
+
+    def __setattr__(self, name, value):
+        if name in TripleTerm._IMMUTABLE:
+            try:
+                object.__getattribute__(self, name)
+            except AttributeError:
+                object.__setattr__(self, name, value)
+                return
+            raise AttributeError(f"TripleTerm is immutable; cannot reassign '{name}'")
+        object.__setattr__(self, name, value)
 
     def _key(self):
         s = self.subject._key() if isinstance(self.subject, TripleTerm) else self.subject

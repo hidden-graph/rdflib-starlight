@@ -80,15 +80,15 @@ When a reification node appears only as subject (never as object), the RDF 1.2 T
 
 ### Parser
 
-**Base URI resolution**
-The parser records `@base` declarations but does not fully resolve relative IRIs against the base. Full RFC 3986 resolution is needed for strict conformance.
+**Base URI resolution** — ✅ Done
+`urljoin` (RFC 3986) replaces naive string concatenation in `_to_node`. Each `@base` declaration is resolved against the previously active base, and each triple is stamped with its active base at parse time so that multiple `@base` declarations in one file each apply only to the triples that follow them. `g.base` is set to the last active base.
 
 ---
 
 ### Graph API
 
-**`subjects()` / `objects()` with triple-term wildcards**
-`g.objects(subject, predicate=(None, EX.knows, None))` — `triples()` now supports wildcard tuple patterns, but the convenience methods `subjects()`, `objects()`, and `predicates()` delegate to rdflib's implementation which does not pass tuple patterns through. These would need thin overrides.
+**`subjects()` / `objects()` with triple-term wildcards** — ✅ Already works
+rdflib's `subjects()`, `objects()`, and `predicates()` all call `self.triples()` internally, so our wildcard fan-out is invoked automatically. No overrides needed. Verified: `g.subjects(RDF_REIFIES, (EX.alice, None, None))` returns all reifiers whose triple term has alice as subject.
 
 **`from_rdflib` zero-copy variant**
 `from_rdflib()` currently copies all triples into a new graph. A zero-copy variant would wrap the source graph's store directly, useful for large graphs loaded by rdflib tooling.
@@ -104,5 +104,5 @@ The parser records `@base` declarations but does not fully resolve relative IRIs
 
 ### Model
 
-**Immutability enforcement on `TripleTerm`**
-`TripleTerm.__slots__` is defined but `__setattr__` is not overridden, so the three slots can still be written after construction. Add `__setattr__` to raise `AttributeError` on any post-init write, enforcing the value-type contract.
+**Immutability enforcement on `TripleTerm`** — ✅ Done
+`__setattr__` now raises `AttributeError` on any post-init write to `subject`, `predicate`, or `object`. `_namespace_manager` remains freely settable (display-only mutable state, set by `_restore()`).

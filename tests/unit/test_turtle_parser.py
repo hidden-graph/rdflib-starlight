@@ -250,3 +250,86 @@ class TestVersionDirective:
         g2 = parser.parse(out)
         sg2 = StarlightGraph.from_rdflib(g2)
         assert sg2.has_triple_term(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+
+
+# ---------------------------------------------------------------------------
+# Base URI resolution (RFC 3986)
+# ---------------------------------------------------------------------------
+
+class TestBaseURI:
+    def test_fragment_relative(self, parser):
+        """<#name> resolved against @base gives base + fragment."""
+        ttl = (
+            '@base <http://example.org/> .\n'
+            '@prefix ex: <http://example.org/> .\n'
+            '<#alice> ex:knows <#bob> .\n'
+        )
+        g = parser.parse(ttl)
+        assert (URIRef('http://example.org/#alice'), URIRef(EX+'knows'), URIRef('http://example.org/#bob')) in g
+
+    def test_path_relative(self, parser):
+        """A path-relative IRI is resolved against the base."""
+        ttl = (
+            '@base <http://example.org/data/> .\n'
+            '@prefix ex: <http://example.org/> .\n'
+            '<alice> ex:knows <bob> .\n'
+        )
+        g = parser.parse(ttl)
+        assert (URIRef('http://example.org/data/alice'), URIRef(EX+'knows'), URIRef('http://example.org/data/bob')) in g
+
+    def test_dot_dot_navigation(self, parser):
+        """<../other> navigates up from the base path."""
+        ttl = (
+            '@base <http://example.org/a/b/> .\n'
+            '@prefix ex: <http://example.org/> .\n'
+            '<../../alice> ex:knows ex:bob .\n'
+        )
+        g = parser.parse(ttl)
+        assert (URIRef('http://example.org/alice'), URIRef(EX+'knows'), URIRef(EX+'bob')) in g
+
+    def test_multiple_base_declarations(self, parser):
+        """Each @base affects only the triples that follow it."""
+        ttl = (
+            '@base <http://example.org/a/> .\n'
+            '@prefix ex: <http://example.org/> .\n'
+            '<x> ex:type ex:A .\n'
+            '@base <http://example.org/b/> .\n'
+            '<y> ex:type ex:B .\n'
+        )
+        g = parser.parse(ttl)
+        assert (URIRef('http://example.org/a/x'), URIRef(EX+'type'), URIRef(EX+'A')) in g
+        assert (URIRef('http://example.org/b/y'), URIRef(EX+'type'), URIRef(EX+'B')) in g
+
+    def test_second_base_relative_to_first(self, parser):
+        """A relative @base is resolved against the active base."""
+        ttl = (
+            '@base <http://example.org/> .\n'
+            '@prefix ex: <http://example.org/> .\n'
+            '@base <sub/> .\n'
+            '<item> ex:type ex:Thing .\n'
+        )
+        g = parser.parse(ttl)
+        assert (URIRef('http://example.org/sub/item'), URIRef(EX+'type'), URIRef(EX+'Thing')) in g
+
+    def test_absolute_iri_unaffected_by_base(self, parser):
+        """Absolute IRIs are never modified by @base."""
+        ttl = (
+            '@base <http://example.org/> .\n'
+            '<http://other.org/alice> <http://other.org/knows> <http://other.org/bob> .\n'
+        )
+        g = parser.parse(ttl)
+        assert (
+            URIRef('http://other.org/alice'),
+            URIRef('http://other.org/knows'),
+            URIRef('http://other.org/bob'),
+        ) in g
+
+    def test_g_base_set_to_last_base(self, parser):
+        """g.base is set to the last active @base declaration."""
+        ttl = (
+            '@base <http://example.org/a/> .\n'
+            '@base <http://example.org/b/> .\n'
+            '<x> <http://example.org/p> <http://example.org/o> .\n'
+        )
+        g = parser.parse(ttl)
+        assert str(g.base) == 'http://example.org/b/'

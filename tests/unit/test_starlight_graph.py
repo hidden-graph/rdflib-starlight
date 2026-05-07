@@ -319,3 +319,95 @@ class TestTripleWildcards:
         results = list(sg_two_tts.triples((None, None, (None, None, None))))
         keys = [(str(s), str(p), str(o)) for s, p, o in results]
         assert len(keys) == len(set(keys))
+
+
+# ---------------------------------------------------------------------------
+# TripleTerm immutability
+# ---------------------------------------------------------------------------
+
+class TestTripleTermImmutability:
+    def test_construction_succeeds(self):
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        assert tt.subject   == URIRef(EX+'s')
+        assert tt.predicate == URIRef(EX+'p')
+        assert tt.object    == URIRef(EX+'o')
+
+    def test_reassign_subject_raises(self):
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        with pytest.raises(AttributeError):
+            tt.subject = URIRef(EX+'x')
+
+    def test_reassign_predicate_raises(self):
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        with pytest.raises(AttributeError):
+            tt.predicate = URIRef(EX+'x')
+
+    def test_reassign_object_raises(self):
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        with pytest.raises(AttributeError):
+            tt.object = URIRef(EX+'x')
+
+    def test_namespace_manager_is_mutable(self):
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        tt._namespace_manager = object()   # must not raise
+
+    def test_unknown_attribute_raises(self):
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        with pytest.raises(AttributeError):
+            tt.foo = 'bar'
+
+    def test_equality_unaffected(self):
+        tt1 = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        tt2 = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        assert tt1 == tt2
+        assert hash(tt1) == hash(tt2)
+
+
+# ---------------------------------------------------------------------------
+# subjects() / objects() / predicates() with wildcard tuple patterns
+# (convenience methods call self.triples() so wildcards work automatically)
+# ---------------------------------------------------------------------------
+
+class TestConvenienceMethodWildcards:
+    @pytest.fixture
+    def g(self):
+        g = StarlightGraph()
+        g.add((URIRef(EX+'stmt1'), RDF_REIFIES,
+               TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))))
+        g.add((URIRef(EX+'stmt2'), RDF_REIFIES,
+               TripleTerm(URIRef(EX+'alice'), URIRef(EX+'likes'), URIRef(EX+'eve'))))
+        g.add((URIRef(EX+'stmt3'), RDF_REIFIES,
+               TripleTerm(URIRef(EX+'carol'), URIRef(EX+'knows'), URIRef(EX+'dave'))))
+        return g
+
+    def test_objects_returns_triple_terms(self, g):
+        objs = list(g.objects(URIRef(EX+'stmt1'), RDF_REIFIES))
+        assert len(objs) == 1
+        assert isinstance(objs[0], TripleTerm)
+
+    def test_subjects_with_triple_term_object(self, g):
+        tt = TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+        subjs = list(g.subjects(RDF_REIFIES, tt))
+        assert URIRef(EX+'stmt1') in subjs
+        assert URIRef(EX+'stmt2') not in subjs
+
+    def test_subjects_with_wildcard_tuple_object(self, g):
+        # Find all stmts reifying a triple term whose subject is alice
+        subjs = list(g.subjects(RDF_REIFIES, (URIRef(EX+'alice'), None, None)))
+        assert URIRef(EX+'stmt1') in subjs
+        assert URIRef(EX+'stmt2') in subjs
+        assert URIRef(EX+'stmt3') not in subjs
+
+    def test_subjects_with_fully_wild_tuple_object(self, g):
+        # Find all stmts reifying any triple term
+        subjs = list(g.subjects(RDF_REIFIES, (None, None, None)))
+        assert len(subjs) == 3
+
+    def test_predicates_with_triple_term_object(self, g):
+        tt = TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+        preds = list(g.predicates(URIRef(EX+'stmt1'), tt))
+        assert RDF_REIFIES in preds
+
+    def test_predicates_with_wildcard_tuple_object(self, g):
+        preds = list(g.predicates(URIRef(EX+'stmt1'), (URIRef(EX+'alice'), None, None)))
+        assert RDF_REIFIES in preds

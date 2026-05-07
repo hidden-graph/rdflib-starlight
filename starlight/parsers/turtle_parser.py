@@ -12,6 +12,7 @@ Entry point: StarlightTurtleParser().parse(data)
 """
 
 import re
+from urllib.parse import urljoin
 from rdflib import Graph, URIRef, BNode, Literal
 from rdflib.namespace import RDF, XSD
 from starlight.parsers import lexer as _lexer
@@ -173,7 +174,7 @@ def _to_node(val, prefix_map, base_uri):
     if val.startswith('<') and val.endswith('>'):
         inner = val[1:-1]
         if base_uri and not re.match(r'^[a-zA-Z][a-zA-Z0-9+\-.]*:', inner):
-            return URIRef(base_uri + inner)
+            return URIRef(urljoin(base_uri, inner))
         return URIRef(inner)
 
     if val.startswith(('"""', "'''", '"', "'")):
@@ -197,7 +198,7 @@ def _to_node(val, prefix_map, base_uri):
         return URIRef(val)
 
     if base_uri:
-        return URIRef(base_uri + val)
+        return URIRef(urljoin(base_uri, val))
 
     return Literal(val)
 
@@ -424,6 +425,7 @@ class StarlightTurtleParser:
 
         blank_counter = [0]
         canonical = {'prefixes': [], 'bases': [], 'triples': []}
+        current_base = None
 
         for stmt in _syntax.split_statements(data_clean):
             typ = _syntax.classify_statement(stmt)
@@ -433,10 +435,14 @@ class StarlightTurtleParser:
             elif typ == 'prefix' and 'prefix' in fields and 'iri' in fields:
                 canonical['prefixes'].append({'prefix': fields['prefix'], 'iri': fields['iri']})
             elif typ == 'base' and 'iri' in fields:
-                canonical['bases'].append({'iri': fields['iri']})
+                raw = fields['iri']
+                current_base = urljoin(current_base, raw) if current_base else raw
+                canonical['bases'].append({'iri': current_base})
             elif typ == 'triple' and 'triple_set' in fields:
-                canonical['triples'].extend(
-                    _syntax.expand_triple_set(fields['triple_set'], blank_counter)
+                triples = _syntax.expand_triple_set(fields['triple_set'], blank_counter)
+                for t in triples:
+                    t['_base_uri'] = current_base
+                canonical['triples'].extend(triples
                 )
 
         if debug:
@@ -447,12 +453,18 @@ class StarlightTurtleParser:
         expanded = []
         for triple in canonical['triples']:
             s, p, o = triple['subject'], triple['predicate'], triple['object']
+            t_base = triple.get('_base_uri')
             s, p, o, extras = expander.expand_qt_in_triple(s, p, o)
-            expanded.append({'subject': s, 'predicate': p, 'object': o})
+            expanded.append({'subject': s, 'predicate': p, 'object': o, '_base_uri': t_base})
+            for e in extras:
+                e['_base_uri'] = t_base
             expanded.extend(extras)
             if triple.get('annotations'):
                 ann_obj = o if isinstance(o, str) else triple.get('object_str', str(triple['object']))
-                expanded.extend(expander.expand_annotation(s, p, ann_obj, triple['annotations']))
+                ann_extras = expander.expand_annotation(s, p, ann_obj, triple['annotations'])
+                for e in ann_extras:
+                    e['_base_uri'] = t_base
+                expanded.extend(ann_extras)
 
         if debug:
             import json
@@ -461,7 +473,6 @@ class StarlightTurtleParser:
         prefix_map = {p['prefix']: p['iri'] for p in canonical['prefixes']}
         prefix_map.setdefault('rdf', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#')
         prefix_map.setdefault('sl',  SL_NS)   # needed for intermediate sl:TripleTerm triples
-        base_uri = canonical['bases'][0]['iri'] if canonical['bases'] else None
 
         # Add sl:Reification markers so _skolemize_encoding can find reifier bnodes
         reif_subjects = {t['subject'] for t in expanded if t['predicate'] == 'rdf:reifies'}
@@ -471,14 +482,15 @@ class StarlightTurtleParser:
         g = Graph()
         for prefix, iri in prefix_map.items():
             g.bind(prefix, iri)
-        if base_uri:
-            g.base = base_uri
+        if current_base:
+            g.base = current_base
 
         for triple in expanded:
-            s_node = _to_node(triple['subject'], prefix_map, base_uri)
+            t_base = triple.get('_base_uri')
+            s_node = _to_node(triple['subject'], prefix_map, t_base)
             p_raw = triple['predicate']
-            p_node = RDF.type if p_raw == 'a' else _to_node(p_raw, prefix_map, base_uri)
-            o_node = _to_node(triple['object'], prefix_map, base_uri)
+            p_node = RDF.type if p_raw == 'a' else _to_node(p_raw, prefix_map, t_base)
+            o_node = _to_node(triple['object'], prefix_map, t_base)
             g.add((s_node, p_node, o_node))
 
         return g
