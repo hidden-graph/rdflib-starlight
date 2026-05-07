@@ -136,8 +136,66 @@ def serialize_turtle12(graph) -> str:
 
         triple_lines.append('')
 
-    # --- Pass 2: emit only used prefix declarations ---
+    # --- Pass 2: emit version declaration and used prefix declarations ---
     prefix_lines = []
+    if getattr(sg, '_tt_nodes', None):
+        prefix_lines.append('@version "1.2" .')
+    for prefix, ns_uri in sorted(sg.namespaces(), key=lambda x: x[0]):
+        ns = str(ns_uri)
+        if ns in _INTERNAL_NS:
+            continue
+        if any(u.startswith(ns) for u in used_uris):
+            prefix_lines.append(f'@prefix {prefix}: <{ns_uri}> .')
+
+    if _RDF_NS not in {str(ns) for _, ns in sg.namespaces()}:
+        prefix_lines.append(f'@prefix rdf: <{_RDF_NS}> .')
+
+    prefix_lines.append('')
+
+    return '\n'.join(prefix_lines + triple_lines)
+
+
+def serialize_longturtle12(graph) -> str:
+    """Serialize a StarlightGraph to longturtle 1.2 — one triple per line.
+
+    Identical to turtle12 but with no subject/predicate grouping: every triple
+    is emitted as ``s p o .`` on its own line.  Prefix declarations and the
+    ``@version`` directive are emitted the same way as turtle12.
+    """
+    from starlight.graph.starlight_graph import StarlightGraph
+
+    sg = graph if isinstance(graph, StarlightGraph) else StarlightGraph.from_rdflib(graph)
+    ns_mgr = sg.namespace_manager
+
+    used_uris: set = set()
+
+    def _collect_tt(tt):
+        for part in (tt.subject, tt.predicate, tt.object):
+            if isinstance(part, TripleTerm):
+                _collect_tt(part)
+            elif isinstance(part, URIRef):
+                used_uris.add(str(part))
+
+    def _fmt_collect(node):
+        if isinstance(node, TripleTerm):
+            _collect_tt(node)
+            return _tt_to_str(node, ns_mgr)
+        if isinstance(node, URIRef) and not str(node).startswith(RR_NS):
+            used_uris.add(str(node))
+        elif isinstance(node, Literal) and node.datatype:
+            used_uris.add(str(node.datatype))
+        return _node_to_ttl(node, ns_mgr)
+
+    triple_lines = []
+    for s, p, o in sorted(sg.triples((None, None, None)), key=lambda t: (_sort_key(t[0]), str(t[1]), _sort_key(t[2]))):
+        used_uris.add(str(p))
+        triple_lines.append(f'{_fmt_collect(s)} {_fmt(p, ns_mgr)} {_fmt_collect(o)} .')
+
+    triple_lines.append('')
+
+    prefix_lines = []
+    if getattr(sg, '_tt_nodes', None):
+        prefix_lines.append('@version "1.2" .')
     for prefix, ns_uri in sorted(sg.namespaces(), key=lambda x: x[0]):
         ns = str(ns_uri)
         if ns in _INTERNAL_NS:

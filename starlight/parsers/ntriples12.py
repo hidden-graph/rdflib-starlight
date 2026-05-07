@@ -183,7 +183,7 @@ def _parse_nt_line(line: str, lineno: int, quads: bool = False) -> tuple | None:
         None             for blank / comment lines
     """
     stripped = line.strip()
-    if not stripped or stripped.startswith('#'):
+    if not stripped or stripped.startswith('#') or stripped.upper().startswith('VERSION'):
         return None
 
     try:

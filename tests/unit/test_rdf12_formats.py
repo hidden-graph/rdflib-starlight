@@ -387,3 +387,123 @@ class TestTriG12RoundTrip:
         g.add((ex('s'), ex('p'), ex('o')))
         _, g2 = round_trip(g, 'trig12')
         assert len(g2) == len(g)
+
+
+# ---------------------------------------------------------------------------
+# RDF 1.2 version declaration — nt12, nq12, trig12
+# ---------------------------------------------------------------------------
+
+class TestVersionDeclarationNT12:
+    def test_emitted_when_triple_terms_present(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        text = g.serialize(format='nt12')
+        assert text.startswith('VERSION "1.2"')
+
+    def test_not_emitted_for_plain_graph(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        text = g.serialize(format='nt12')
+        assert 'VERSION' not in text
+
+    def test_version_line_before_triples(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        text = g.serialize(format='nt12')
+        lines = [l for l in text.splitlines() if l.strip()]
+        assert lines[0].startswith('VERSION')
+
+    def test_parser_skips_version_line(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        text = g.serialize(format='nt12')
+        g2 = StarlightGraph()
+        g2.parse(data=text, format='nt12')
+        assert g2.has_triple_term(ex('s'), ex('p'), ex('o'))
+
+    def test_round_trip_preserves_triple_term(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((ex('stmt1'), RDF_REIFIES, tt))
+        _, g2 = round_trip(g, 'nt12')
+        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+
+
+class TestVersionDeclarationNQ12:
+    def test_emitted_when_triple_terms_present(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        text = g.serialize(format='nq12')
+        assert text.startswith('VERSION "1.2"')
+
+    def test_not_emitted_for_plain_graph(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        text = g.serialize(format='nq12')
+        assert 'VERSION' not in text
+
+    def test_parser_skips_version_line(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        text = g.serialize(format='nq12')
+        g2 = StarlightGraph()
+        g2.parse(data=text, format='nq12')
+        assert g2.has_triple_term(ex('s'), ex('p'), ex('o'))
+
+    def test_round_trip_preserves_triple_term(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((ex('stmt1'), RDF_REIFIES, tt))
+        _, g2 = round_trip(g, 'nq12')
+        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+
+
+class TestVersionDeclarationTriG12:
+    def test_emitted_when_triple_terms_present(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        text = g.serialize(format='trig12')
+        assert '@version "1.2" .' in text
+
+    def test_not_emitted_for_plain_graph(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        text = g.serialize(format='trig12')
+        assert '@version' not in text
+
+    def test_version_before_prefix_declarations(self):
+        g = StarlightGraph()
+        g.bind('ex', EX)
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        text = g.serialize(format='trig12')
+        lines = [l for l in text.splitlines() if l.strip()]
+        version_idx = next((i for i, l in enumerate(lines) if '@version' in l), None)
+        prefix_idx  = next((i for i, l in enumerate(lines) if '@prefix' in l), None)
+        assert version_idx is not None
+        if prefix_idx is not None:
+            assert version_idx < prefix_idx
+
+    def test_parser_handles_version_directive(self):
+        trig = (
+            f'@version "1.2" .\n'
+            f'@prefix ex: <{EX}> .\n'
+            f'@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n'
+            f'ex:stmt rdf:reifies <<( ex:s ex:p ex:o )>> .\n'
+        )
+        g = StarlightGraph()
+        g.parse(data=trig, format='trig12')
+        assert g.has_triple_term(ex('s'), ex('p'), ex('o'))
+
+    def test_round_trip_preserves_triple_term(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((ex('stmt1'), RDF_REIFIES, tt))
+        _, g2 = round_trip(g, 'trig12')
+        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))

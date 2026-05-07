@@ -78,7 +78,9 @@ class StarlightGraph(Graph):
 
     def _coerce_tt_read(self, node):
         """Translate a tuple/TripleTerm to its URIRef for read-only paths.
-        Returns _TT_NOT_FOUND if the TripleTerm is not registered — never creates."""
+        Returns _TT_NOT_FOUND if the TripleTerm is not registered — never creates.
+        Partial-wildcard tuples (containing None) are not handled here; callers
+        should check _is_tt_wildcard and use _matching_tt_uris instead."""
         if node is None:
             return None
         if isinstance(node, TripleTerm):
@@ -86,8 +88,34 @@ class StarlightGraph(Graph):
         if isinstance(node, tuple) and len(node) == 3:
             if all(x is not None for x in node):
                 return self._tt_registry.get(TripleTerm(*node)._key(), _TT_NOT_FOUND)
-            return None
+            # Partial wildcard — caller must use _matching_tt_uris
+            return _TT_NOT_FOUND
         return node
+
+    @staticmethod
+    def _is_tt_wildcard(node) -> bool:
+        """True if node is a tuple pattern containing at least one None — a wildcard triple-term."""
+        return (
+            isinstance(node, tuple)
+            and len(node) == 3
+            and not all(x is not None for x in node)
+        )
+
+    def _matching_tt_uris(self, pattern: tuple):
+        """Yield tt:HASH URIRefs for every registered TripleTerm matching the tuple pattern.
+
+        Each component of pattern may be None (wildcard) or a ground value.
+        Comparison is against the TripleTerm's stored subject/predicate/object.
+        """
+        s_pat, p_pat, o_pat = pattern
+        for uri, tt in self._tt_nodes.items():
+            if s_pat is not None and tt.subject != s_pat:
+                continue
+            if p_pat is not None and tt.predicate != p_pat:
+                continue
+            if o_pat is not None and tt.object != o_pat:
+                continue
+            yield uri
 
     def _coerce_choices(self, node):
         """Coerce a subject/object slot in triples_choices.
@@ -213,14 +241,60 @@ class StarlightGraph(Graph):
 
         TripleTerms in results are returned as TripleTerm objects, not raw URIRefs.
         Returns nothing if a TripleTerm in the pattern is not registered in this graph.
+
+        Wildcard triple-term patterns — tuples containing None — are supported in
+        subject and object positions.  ``(None, None, None)`` matches any triple
+        term; ``(EX.alice, None, None)`` matches only triple terms whose subject
+        is EX.alice.  The fan-out is O(k) where k is the number of registered
+        triple terms that match the pattern.
         """
         s, p, obj = triple
+        s_wild = self._is_tt_wildcard(s)
+        o_wild = self._is_tt_wildcard(obj)
+
+        if s_wild or o_wild:
+            yield from self._triples_tt_wildcard(s, p, obj, s_wild, o_wild)
+            return
+
         s_n, o_n = self._coerce_tt_read(s), self._coerce_tt_read(obj)
         if s_n is _TT_NOT_FOUND or o_n is _TT_NOT_FOUND:
             return
         for s_r, p_r, o_r in super().triples((s_n, p, o_n)):
             if not self._is_encoding_triple(s_r, p_r, o_r):
                 yield (self._restore(s_r), p_r, self._restore(o_r))
+
+    def _triples_tt_wildcard(self, s, p, obj, s_wild: bool, o_wild: bool):
+        """Fan-out triples() for wildcard triple-term patterns.
+
+        For each registered TripleTerm whose encoding matches the wildcard
+        pattern, issues one store query with the concrete tt:HASH URI and
+        unions the results.  A seen-set prevents duplicates when both
+        subject and object carry wildcard patterns.
+        """
+        s_uris  = list(self._matching_tt_uris(s))   if s_wild else None
+        o_uris  = list(self._matching_tt_uris(obj))  if o_wild else None
+
+        s_fixed = None   if s_wild else self._coerce_tt_read(s)
+        o_fixed = None   if o_wild else self._coerce_tt_read(obj)
+
+        if not s_wild and s_fixed is _TT_NOT_FOUND:
+            return
+        if not o_wild and o_fixed is _TT_NOT_FOUND:
+            return
+
+        # Build the Cartesian product of concrete URIs for both positions.
+        s_candidates = s_uris  if s_wild  else [s_fixed]
+        o_candidates = o_uris  if o_wild  else [o_fixed]
+
+        seen: set = set()
+        for s_n in s_candidates:
+            for o_n in o_candidates:
+                for s_r, p_r, o_r in super().triples((s_n, p, o_n)):
+                    if not self._is_encoding_triple(s_r, p_r, o_r):
+                        key = (s_r, p_r, o_r)
+                        if key not in seen:
+                            seen.add(key)
+                            yield (self._restore(s_r), p_r, self._restore(o_r))
 
     def triples_choices(self, triple, context=None):
         """Iterate triples matching a choices pattern. Filters encoding triples; restores TripleTerms.
@@ -362,7 +436,7 @@ class StarlightGraph(Graph):
         format='trig12'   — TriG 1.2 (all named graphs merged into this graph)
         All other formats delegate to rdflib (no triple-term support).
         """
-        if format in ('turtle12', 'nt12', 'nq12', 'trig12', 'jsonld12'):
+        if format in ('turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'jsonld12'):
             from pathlib import Path
             if data is not None:
                 text = data
@@ -381,7 +455,7 @@ class StarlightGraph(Graph):
             else:
                 raise ValueError('No source data to parse')
 
-            if format == 'turtle12':
+            if format in ('turtle12', 'longturtle12'):
                 from starlight.parsers.turtle_parser import StarlightTurtleParser, _skolemize_encoding
                 raw = StarlightTurtleParser().parse(text)
                 processed = _skolemize_encoding(raw)
@@ -719,17 +793,21 @@ class StarlightGraph(Graph):
     def serialize(self, destination=None, format='turtle', **kwargs):
         """Serialize the graph.
 
-        format='turtle12' — Turtle 1.2 with <<( )>> triple terms
-        format='nt12'     — N-Triples 1.2 with <<( )>> triple terms
-        format='nq12'     — N-Quads 1.2 (graph name from self.identifier)
-        format='trig12'   — TriG 1.2 (GRAPH block wrapper around Turtle 1.2)
+        format='turtle12'     — Turtle 1.2 with <<( )>> triple terms
+        format='longturtle12' — Turtle 1.2, one triple per line (no grouping)
+        format='nt12'         — N-Triples 1.2 with <<( )>> triple terms
+        format='nq12'         — N-Quads 1.2 (graph name from self.identifier)
+        format='trig12'       — TriG 1.2 (GRAPH block wrapper around Turtle 1.2)
         All other formats delegate to rdflib (internal tt: encoding visible).
         """
-        _RDF12_FORMATS = {'turtle12', 'nt12', 'nq12', 'trig12', 'jsonld12'}
+        _RDF12_FORMATS = {'turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'jsonld12'}
         if format in _RDF12_FORMATS:
             if format == 'turtle12':
                 from starlight.serializers.turtle12 import serialize_turtle12
                 text = serialize_turtle12(self)
+            elif format == 'longturtle12':
+                from starlight.serializers.turtle12 import serialize_longturtle12
+                text = serialize_longturtle12(self)
             elif format == 'nt12':
                 from starlight.serializers.ntriples12 import serialize_ntriples12
                 text = serialize_ntriples12(self)

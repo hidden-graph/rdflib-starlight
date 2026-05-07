@@ -203,3 +203,50 @@ class TestAnnotations:
         ann_b = list(g.objects(reif, URIRef(EX+'b')))
         assert ann_a == [Literal('1')]
         assert ann_b == [Literal('2')]
+
+
+# ---------------------------------------------------------------------------
+# RDF 1.2 version declaration parsing
+# ---------------------------------------------------------------------------
+
+class TestVersionDirective:
+    def test_turtle_version_directive_ignored(self, parser):
+        """@version "1.2" . is silently consumed; triples parse normally."""
+        ttl = f'@version "1.2" .\n@prefix ex: <{EX}> .\nex:s ex:p ex:o .\n'
+        g = parser.parse(ttl)
+        assert (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')) in g
+
+    def test_sparql_version_directive_ignored(self, parser):
+        """VERSION "1.2" (no period) is silently consumed; triples parse normally."""
+        ttl = f'VERSION "1.2"\n@prefix ex: <{EX}> .\nex:s ex:p ex:o .\n'
+        g = parser.parse(ttl)
+        assert (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')) in g
+
+    def test_version_directive_with_triple_terms(self, parser):
+        """@version directive does not interfere with triple-term parsing."""
+        RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
+        ttl = (
+            '@version "1.2" .\n'
+            f'@prefix ex: <{EX}> .\n'
+            '@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n'
+            'ex:stmt rdf:reifies <<( ex:alice ex:knows ex:bob )>> .\n'
+        )
+        g = parser.parse(ttl)
+        from starlight.graph import StarlightGraph
+        sg = StarlightGraph.from_rdflib(g)
+        assert len(list(sg.triple_terms())) == 1
+
+    def test_round_trip_preserves_version(self, parser):
+        """Serialize with @version, re-parse, verify data intact."""
+        from starlight.graph import StarlightGraph
+        from starlight.model.triple import TripleTerm
+        RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
+        sg = StarlightGraph()
+        sg.bind('ex', EX)
+        tt = TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+        sg.add((URIRef(EX+'stmt1'), RDF_REIFIES, tt))
+        out = sg.serialize(format='turtle12')
+        assert '@version "1.2" .' in out
+        g2 = parser.parse(out)
+        sg2 = StarlightGraph.from_rdflib(g2)
+        assert sg2.has_triple_term(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))

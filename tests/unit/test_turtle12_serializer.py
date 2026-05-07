@@ -192,3 +192,113 @@ class TestSerializeMethod:
         out = sg.serialize(format='turtle12')
         assert '<<(' in out
         assert 'TripleTerm' not in out
+
+
+# ---------------------------------------------------------------------------
+# RDF 1.2 version declaration
+# ---------------------------------------------------------------------------
+
+class TestVersionDeclaration:
+    def test_version_emitted_when_triple_terms_present(self):
+        sg = StarlightGraph()
+        sg.add((URIRef(EX+'stmt'), RDF_REIFIES,
+                TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
+        out = sg.serialize(format='turtle12')
+        assert '@version "1.2" .' in out
+
+    def test_version_before_prefix_lines(self):
+        sg = StarlightGraph()
+        sg.bind('ex', EX)
+        sg.add((URIRef(EX+'stmt'), RDF_REIFIES,
+                TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
+        out = sg.serialize(format='turtle12')
+        lines = out.splitlines()
+        version_idx = next(i for i, l in enumerate(lines) if '@version' in l)
+        prefix_idx  = next(i for i, l in enumerate(lines) if '@prefix' in l)
+        assert version_idx < prefix_idx
+
+    def test_version_not_emitted_for_plain_graph(self):
+        sg = StarlightGraph()
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
+        out = sg.serialize(format='turtle12')
+        assert '@version' not in out
+
+    def test_version_not_emitted_for_empty_graph(self):
+        sg = StarlightGraph()
+        out = sg.serialize(format='turtle12')
+        assert '@version' not in out
+
+# ---------------------------------------------------------------------------
+# longturtle12 serializer
+# ---------------------------------------------------------------------------
+
+class TestLongTurtle12:
+    def test_one_triple_per_line(self):
+        sg = StarlightGraph()
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o1')))
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o2')))
+        out = sg.serialize(format='longturtle12')
+        triple_lines = [l for l in out.splitlines() if l.strip() and not l.startswith('@')]
+        assert len(triple_lines) == 2
+
+    def test_no_semicolon_grouping(self):
+        sg = StarlightGraph()
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
+        sg.add((URIRef(EX+'s'), URIRef(EX+'q'), URIRef(EX+'z')))
+        out = sg.serialize(format='longturtle12')
+        assert ';' not in out
+
+    def test_no_comma_grouping(self):
+        sg = StarlightGraph()
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o1')))
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o2')))
+        out = sg.serialize(format='longturtle12')
+        assert ',' not in out
+
+    def test_triple_term_serialized(self):
+        sg = StarlightGraph()
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        sg.add((URIRef(EX+'stmt'), RDF_REIFIES, tt))
+        out = sg.serialize(format='longturtle12')
+        assert '<<(' in out
+
+    def test_version_emitted_with_triple_terms(self):
+        sg = StarlightGraph()
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        sg.add((URIRef(EX+'stmt'), RDF_REIFIES, tt))
+        out = sg.serialize(format='longturtle12')
+        assert '@version "1.2" .' in out
+
+    def test_version_not_emitted_for_plain_graph(self):
+        sg = StarlightGraph()
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
+        out = sg.serialize(format='longturtle12')
+        assert '@version' not in out
+
+    def test_round_trip_plain_triples(self):
+        sg = StarlightGraph()
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
+        sg.add((URIRef(EX+'s'), URIRef(EX+'q'), Literal('hello')))
+        out = sg.serialize(format='longturtle12')
+        sg2 = StarlightGraph()
+        sg2.parse(data=out, format='longturtle12')
+        assert (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')) in sg2
+        assert (URIRef(EX+'s'), URIRef(EX+'q'), Literal('hello')) in sg2
+
+    def test_round_trip_triple_term(self):
+        sg = StarlightGraph()
+        tt = TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+        sg.add((URIRef(EX+'stmt'), RDF_REIFIES, tt))
+        out = sg.serialize(format='longturtle12')
+        sg2 = StarlightGraph()
+        sg2.parse(data=out, format='longturtle12')
+        assert sg2.has_triple_term(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+
+    def test_parse_via_longturtle12_alias(self):
+        ttl = (
+            f'@prefix ex: <{EX}> .\n'
+            f'ex:s ex:p ex:o .\n'
+        )
+        sg = StarlightGraph()
+        sg.parse(data=ttl, format='longturtle12')
+        assert (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')) in sg

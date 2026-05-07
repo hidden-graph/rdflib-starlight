@@ -308,19 +308,22 @@ class StarlightDataset(Dataset):
 
         if format == 'nq12':
             from starlight.serializers.ntriples12 import serialize_nquads12
+            has_tt = any(getattr(sg, '_tt_nodes', None) for sg in self.contexts())
+            header = 'VERSION "1.2"\n' if has_tt else ''
             lines: list[str] = []
             for sg in self.contexts():
                 if len(sg) == 0:
                     continue
-                chunk = serialize_nquads12(sg)
+                chunk = serialize_nquads12(sg, _include_header=False)
                 if chunk.strip():
                     lines.append(chunk.rstrip('\n'))
-            text = '\n'.join(lines) + ('\n' if lines else '')
+            text = header + '\n'.join(lines) + ('\n' if lines else '')
 
         else:  # trig12
             from starlight.serializers.turtle12 import serialize_turtle12
 
             all_prefix_lines: set[str] = set()
+            has_version = False
             graph_entries: list[tuple] = []
 
             for sg in self.contexts():
@@ -331,6 +334,8 @@ class StarlightDataset(Dataset):
                 for ln in turtle_text.splitlines():
                     if ln.startswith('@prefix'):
                         all_prefix_lines.add(ln)
+                    elif ln.startswith('@version'):
+                        has_version = True
                     else:
                         body_lines.append(ln)
                 body = '\n'.join(body_lines).strip()
@@ -338,6 +343,8 @@ class StarlightDataset(Dataset):
                     graph_entries.append((sg.identifier, body))
 
             blocks: list[str] = []
+            if has_version:
+                blocks.append('@version "1.2" .')
             if all_prefix_lines:
                 blocks.append('\n'.join(sorted(all_prefix_lines)))
 

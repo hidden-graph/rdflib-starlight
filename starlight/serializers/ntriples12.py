@@ -102,13 +102,14 @@ def serialize_ntriples12(g) -> str:
     One triple per line: ``subject predicate object .``
     Triple terms are written as ``<<( s p o )>>``.
     """
+    header = 'VERSION "1.2"\n' if getattr(g, '_tt_nodes', None) else ''
     lines = []
     for s, p, o in sorted(g.triples((None, None, None)), key=_triple_sort_key):
         lines.append(f'{_node_to_nt(s)} {_node_to_nt(p)} {_node_to_nt(o)} .')
-    return '\n'.join(lines) + ('\n' if lines else '')
+    return header + '\n'.join(lines) + ('\n' if lines else '')
 
 
-def serialize_nquads12(g, graph_uri=None) -> str:
+def serialize_nquads12(g, graph_uri=None, _include_header: bool = True) -> str:
     """Serialize a StarlightGraph to N-Quads 1.2 text.
 
     One quad per line: ``subject predicate object graph .``
@@ -118,6 +119,7 @@ def serialize_nquads12(g, graph_uri=None) -> str:
         graph_uri = g.identifier
     g_term = _node_to_nt(graph_uri) if not isinstance(graph_uri, BNode) else None
 
+    header = 'VERSION "1.2"\n' if (_include_header and getattr(g, '_tt_nodes', None)) else ''
     lines = []
     for s, p, o in sorted(g.triples((None, None, None)), key=_triple_sort_key):
         s_t = _node_to_nt(s)
@@ -127,4 +129,4 @@ def serialize_nquads12(g, graph_uri=None) -> str:
             lines.append(f'{s_t} {p_t} {o_t} {g_term} .')
         else:
             lines.append(f'{s_t} {p_t} {o_t} .')
-    return '\n'.join(lines) + ('\n' if lines else '')
+    return header + '\n'.join(lines) + ('\n' if lines else '')

@@ -69,7 +69,7 @@ def split_statements(data):
         at_line_start = (i == 0 or data[i-1] in ('\n', '\r'))
         if at_line_start:
             found_directive = False
-            for kw in ('@prefix', 'prefix', '@base', 'base'):
+            for kw in ('@version', '@prefix', 'prefix', '@base', 'base', 'version'):
                 if data[i:i+len(kw)].lower() == kw:
                     line_end = data.find('\n', i)
                     if line_end == -1:
@@ -134,11 +134,13 @@ def split_statements(data):
 
 
 def classify_statement(stmt):
-    """Return 'prefix', 'base', or 'triple'."""
-    s = stmt.strip()
-    if s.lower().startswith('@prefix') or s.lower().startswith('prefix'):
+    """Return 'version', 'prefix', 'base', or 'triple'."""
+    s = stmt.strip().lower()
+    if s.startswith('@version') or s.startswith('version'):
+        return 'version'
+    if s.startswith('@prefix') or s.startswith('prefix'):
         return 'prefix'
-    if s.lower().startswith('@base') or s.lower().startswith('base'):
+    if s.startswith('@base') or s.startswith('base'):
         return 'base'
     return 'triple'
 

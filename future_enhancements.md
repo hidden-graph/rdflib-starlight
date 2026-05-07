@@ -2,7 +2,7 @@
 
 ## Open Design Questions
 
-- **RDF version declaration** — Should serialized output include a version marker (e.g. a comment or magic token) so consumers know they are reading RDF 1.2? No standard mechanism exists yet.
+- **RDF version declaration** — All four RDF 1.2 formats now emit a version hint when triple terms are present (`@version "1.2" .` for Turtle/TriG; `VERSION "1.2"` for N-Triples/N-Quads) and their parsers silently skip the declaration. No open items remain here.
 - **Annotation syntax in serializer** — Emit the compact `{| |}` annotation shorthand or always use explicit `rdf:reifies` triples? The compact form is more readable but requires pattern-matching at serialize time (see Serializer section).
 - **Backend database integration** — How to persist the tt:HASH encoding and TripleTerm registry in a triple store (e.g. GraphDB, Stardog, Apache Jena Fuseki). Custom IRI prefix conventions or named-graph sidecars are candidate approaches.  (Note - need to determine whehter the backend supprots rdf1.2 or not.  if it does not, then we write and query 1.1 trasnforamtions.  if it does, then we have the opportunity to write and query 1.2 with quoted triples.)
 
@@ -19,14 +19,19 @@
 | `nq12` | `nquads` | ✅ | ✅ | N-Quads 1.2; StarlightDataset |
 | `trig12` | `trig` | ✅ | ✅ | Named GRAPH blocks; StarlightDataset |
 | `jsonld12` | `json-ld`, `application/ld+json` | ✅ | ✅ | tt:HASH nodes; rdflib JSON-LD parser used for input |
+| `longturtle12` | `longturtle` | ✅ | ✅ | One triple per line; no subject/predicate grouping; parses via `turtle12` |
 
 ### Formats not yet extended to RDF 1.2
 
 **N3 / Notation3** (`n3`, `text/n3`) — Effort: Very Low
-N3 is a superset of Turtle. Our Turtle 1.2 parser already handles any triple-term syntax that appears there. The extra N3 constructs (formulae `{ }`, `@forAll`, `@forSome`) are outside RDF 1.2 scope. A lightweight `n3-12` alias that routes to `turtle12` (with a caveat that formulae are unsupported) gives full coverage at near-zero cost.
+N3 is a superset of Turtle. Our Turtle 1.2 parser already handles any triple-term syntax that appears there. The extra N3 constructs — formulae (`{ }`), `@forAll`, and `@forSome` — are outside RDF 1.2 scope and are not part of the RDF standard; they add first-order logic / reasoning capabilities that RDF deliberately omits. rdflib's own `n3` parser can read these constructs and stores formulae as embedded `Graph` objects, but does not execute the rules.
 
-**longturtle** (`longturtle`) — Effort: Very Low
-rdflib's verbose Turtle variant (one triple per line, no grouping). A `longturtle12` serializer is a thin wrapper over `serialize_turtle12` that disables subject grouping and predicate folding. Parsing already works via `turtle12`.
+A lightweight `n3-12` alias that routes to `turtle12` gives full coverage for N3 files that are effectively Turtle with RDF 1.2 features at near-zero cost. For files that use genuine N3 logic constructs, we could fall back to rdflib's native `n3` parser and then import the resulting plain triples into a StarlightGraph — this would silently drop formulae but would allow Starlight to accept any file rdflib can accept.
+
+*Note: decide whether we want a graceful rdflib fallback path so Starlight can parse any file rdflib handles, even when it cannot round-trip the N3-specific constructs.*
+
+**longturtle** (`longturtle`) — ✅ Implemented as `longturtle12`
+One triple per line; no subject or predicate grouping; `@version` and `@prefix` handling identical to `turtle12`. Parse routes to the Turtle 1.2 parser (longturtle is valid Turtle).
 
 **RDF/XML** (`xml`, `application/rdf+xml`, `pretty-xml`) — Effort: High
 The RDF 1.2 spec defines XML serialization for triple terms via a new `rdf:TripleTerm` element and a `rdf:reifies` attribute on property elements. rdflib's existing `rdf+xml` plugin does not support these constructs; a custom XML parser/serializer is needed. RDF/XML remains widely used for OWL ontologies.
@@ -80,11 +85,8 @@ The parser records `@base` declarations but does not fully resolve relative IRIs
 
 ### Graph API
 
-**`StarlightGraph.triples()` wildcard triple-term patterns**
-`(None, EX.mentions, (None, None, None))` should match any triple whose object is a triple term. Currently a tuple in the pattern position is collapsed to `None`. Implementing this requires iterating known tt: URIRefs and doing a union query.
-
 **`subjects()` / `objects()` with triple-term wildcards**
-Same as above — e.g. `g.objects(EX.s, predicate=(None, EX.knows, None))` should find all objects of triples whose subject matches a triple-term pattern.
+`g.objects(subject, predicate=(None, EX.knows, None))` — `triples()` now supports wildcard tuple patterns, but the convenience methods `subjects()`, `objects()`, and `predicates()` delegate to rdflib's implementation which does not pass tuple patterns through. These would need thin overrides.
 
 **`from_rdflib` zero-copy variant**
 `from_rdflib()` currently copies all triples into a new graph. A zero-copy variant would wrap the source graph's store directly, useful for large graphs loaded by rdflib tooling.

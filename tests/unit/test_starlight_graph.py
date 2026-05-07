@@ -229,3 +229,93 @@ class TestStatements:
     def test_statement_len(self, sg):
         sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
         assert len(sg) == 1  # only rdf:reifies triple visible; 3 encoding triples hidden
+
+
+# ---------------------------------------------------------------------------
+# Wildcard triple-term patterns in triples()
+# ---------------------------------------------------------------------------
+
+class TestTripleWildcards:
+    """triples() with tuple patterns containing None — partial wildcard matching."""
+
+    @pytest.fixture
+    def sg_two_tts(self):
+        g = StarlightGraph()
+        g.add((URIRef(EX + 'stmt1'), RDF_REIFIES,
+               TripleTerm(URIRef(EX + 'alice'), URIRef(EX + 'knows'), URIRef(EX + 'bob'))))
+        g.add((URIRef(EX + 'stmt2'), RDF_REIFIES,
+               TripleTerm(URIRef(EX + 'bob'),   URIRef(EX + 'likes'), URIRef(EX + 'carol'))))
+        g.add((URIRef(EX + 's'), URIRef(EX + 'p'), Literal('plain')))
+        return g
+
+    # --- object position ---
+
+    def test_full_wildcard_object_matches_only_triple_terms(self, sg_two_tts):
+        results = list(sg_two_tts.triples((None, None, (None, None, None))))
+        assert len(results) == 2
+        assert all(isinstance(o, TripleTerm) for _, _, o in results)
+
+    def test_full_wildcard_object_excludes_plain_literals(self, sg_two_tts):
+        results = list(sg_two_tts.triples((None, None, (None, None, None))))
+        assert all(not isinstance(o, Literal) for _, _, o in results)
+
+    def test_partial_wildcard_object_subject_filter(self, sg_two_tts):
+        """(alice, None, None) as object should match only the alice/knows/bob triple term."""
+        results = list(sg_two_tts.triples(
+            (None, RDF_REIFIES, (URIRef(EX + 'alice'), None, None))))
+        assert len(results) == 1
+        assert results[0][2] == TripleTerm(
+            URIRef(EX + 'alice'), URIRef(EX + 'knows'), URIRef(EX + 'bob'))
+
+    def test_partial_wildcard_object_predicate_filter(self, sg_two_tts):
+        """(None, likes, None) as object should match only the bob/likes/carol triple term."""
+        results = list(sg_two_tts.triples(
+            (None, RDF_REIFIES, (None, URIRef(EX + 'likes'), None))))
+        assert len(results) == 1
+        assert results[0][2] == TripleTerm(
+            URIRef(EX + 'bob'), URIRef(EX + 'likes'), URIRef(EX + 'carol'))
+
+    def test_partial_wildcard_object_no_match_returns_empty(self, sg_two_tts):
+        results = list(sg_two_tts.triples(
+            (None, RDF_REIFIES, (URIRef(EX + 'nobody'), None, None))))
+        assert results == []
+
+    # --- subject position ---
+
+    def test_full_wildcard_subject_matches_only_triple_terms(self):
+        g = StarlightGraph()
+        tt = TripleTerm(URIRef(EX + 'x'), URIRef(EX + 'y'), URIRef(EX + 'z'))
+        g.add((tt, URIRef(EX + 'weight'), Literal('0.9')))
+        g.add((URIRef(EX + 'plain'), URIRef(EX + 'weight'), Literal('1.0')))
+        results = list(g.triples(((None, None, None), None, None)))
+        assert len(results) == 1
+        assert isinstance(results[0][0], TripleTerm)
+
+    def test_partial_wildcard_subject_filter(self):
+        g = StarlightGraph()
+        tt1 = TripleTerm(URIRef(EX + 'x'), URIRef(EX + 'y'), URIRef(EX + 'z'))
+        tt2 = TripleTerm(URIRef(EX + 'a'), URIRef(EX + 'b'), URIRef(EX + 'c'))
+        g.add((tt1, URIRef(EX + 'weight'), Literal('0.9')))
+        g.add((tt2, URIRef(EX + 'weight'), Literal('0.5')))
+        results = list(g.triples(((URIRef(EX + 'x'), None, None), None, None)))
+        assert len(results) == 1
+        assert results[0][0] == tt1
+
+    # --- both positions ---
+
+    def test_wildcard_both_subject_and_object(self):
+        g = StarlightGraph()
+        tt_s = TripleTerm(URIRef(EX + 'x'), URIRef(EX + 'y'), URIRef(EX + 'z'))
+        tt_o = TripleTerm(URIRef(EX + 'a'), URIRef(EX + 'b'), URIRef(EX + 'c'))
+        g.add((tt_s, URIRef(EX + 'rel'), tt_o))
+        results = list(g.triples(((None, None, None), None, (None, None, None))))
+        assert len(results) == 1
+        assert isinstance(results[0][0], TripleTerm)
+        assert isinstance(results[0][2], TripleTerm)
+
+    # --- no duplicates ---
+
+    def test_no_duplicate_results(self, sg_two_tts):
+        results = list(sg_two_tts.triples((None, None, (None, None, None))))
+        keys = [(str(s), str(p), str(o)) for s, p, o in results]
+        assert len(keys) == len(set(keys))

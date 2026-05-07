@@ -428,7 +428,9 @@ class StarlightTurtleParser:
         for stmt in _syntax.split_statements(data_clean):
             typ = _syntax.classify_statement(stmt)
             fields = _syntax.extract_fields(stmt, typ, blank_counter)
-            if typ == 'prefix' and 'prefix' in fields and 'iri' in fields:
+            if typ == 'version':
+                pass  # informational hint; no data to extract
+            elif typ == 'prefix' and 'prefix' in fields and 'iri' in fields:
                 canonical['prefixes'].append({'prefix': fields['prefix'], 'iri': fields['iri']})
             elif typ == 'base' and 'iri' in fields:
                 canonical['bases'].append({'iri': fields['iri']})
