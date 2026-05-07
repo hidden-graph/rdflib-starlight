@@ -20,6 +20,8 @@
 | `trig12` | `trig` | ✅ | ✅ | Named GRAPH blocks; StarlightDataset |
 | `jsonld12` | `json-ld`, `application/ld+json` | ✅ | ✅ | tt:HASH nodes; rdflib JSON-LD parser used for input |
 | `longturtle12` | `longturtle` | ✅ | ✅ | One triple per line; no subject/predicate grouping; parses via `turtle12` |
+| `trix12` | `trix`, `application/trix` | ✅ | ✅ | XML `<graph>/<triple>` blocks; `<tripleTerm>` for RDF 1.2; StarlightDataset |
+| `rdfxml12` | `xml`, `application/rdf+xml` | ✅ | ✅ | `<rdf:TripleTerm>` elements; inline for objects, nodeID for subjects |
 
 ### Formats not yet extended to RDF 1.2
 
@@ -33,11 +35,11 @@ A lightweight `n3-12` alias that routes to `turtle12` gives full coverage for N3
 **longturtle** (`longturtle`) — ✅ Implemented as `longturtle12`
 One triple per line; no subject or predicate grouping; `@version` and `@prefix` handling identical to `turtle12`. Parse routes to the Turtle 1.2 parser (longturtle is valid Turtle).
 
-**RDF/XML** (`xml`, `application/rdf+xml`, `pretty-xml`) — Effort: High
-The RDF 1.2 spec defines XML serialization for triple terms via a new `rdf:TripleTerm` element and a `rdf:reifies` attribute on property elements. rdflib's existing `rdf+xml` plugin does not support these constructs; a custom XML parser/serializer is needed. RDF/XML remains widely used for OWL ontologies.
+**RDF/XML** (`xml`, `application/rdf+xml`, `pretty-xml`) — ✅ Implemented as `rdfxml12`
+rdflib's XML parser already handles `<rdf:TripleTerm>` (produces bnode encoding). A thin conversion step (`_convert_bnodes`) turns those bnodes into TripleTerm objects. The serializer uses ElementTree: inline `<rdf:TripleTerm>` for object-position terms, top-level `<rdf:TripleTerm rdf:nodeID="...">` for subject-position terms. Nested triple terms are handled recursively. Predicate IRIs must be QName-splittable at `#` or `/`.
 
-**TriX** (`trix`, `application/trix`) — Effort: Medium-High
-XML-based named-graph format. Extending to RDF 1.2 follows the same pattern as RDF/XML. Less widely deployed but useful for XML-native toolchains.
+**TriX** (`trix`, `application/trix`) — ✅ Implemented as `trix12`
+Custom ElementTree parser/serializer. `<tripleTerm>` extension handles triple terms in both subject and object positions. Full StarlightDataset support preserving named-graph structure.
 
 ### Not applicable
 

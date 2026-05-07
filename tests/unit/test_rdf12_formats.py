@@ -507,3 +507,415 @@ class TestVersionDeclarationTriG12:
         g.add((ex('stmt1'), RDF_REIFIES, tt))
         _, g2 = round_trip(g, 'trig12')
         assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+
+
+# ---------------------------------------------------------------------------
+# TriX 1.2 — StarlightGraph (single graph)
+# ---------------------------------------------------------------------------
+
+class TestTriX12Parse:
+    def test_plain_triple(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<TriX xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            '<graph>'
+            f'<triple><uri>{EX}s</uri><uri>{EX}p</uri><uri>{EX}o</uri></triple>'
+            '</graph></TriX>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='trix12')
+        assert (ex('s'), ex('p'), ex('o')) in g
+
+    def test_literal_plain(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<TriX xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            '<graph>'
+            f'<triple><uri>{EX}s</uri><uri>{EX}p</uri>'
+            '<plainLiteral>hello</plainLiteral></triple>'
+            '</graph></TriX>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='trix12')
+        objs = list(g.objects(ex('s'), ex('p')))
+        assert Literal('hello') in objs
+
+    def test_typed_literal(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<TriX xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            '<graph>'
+            f'<triple><uri>{EX}s</uri><uri>{EX}p</uri>'
+            '<typedLiteral datatype="http://www.w3.org/2001/XMLSchema#integer">42</typedLiteral>'
+            '</triple></graph></TriX>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='trix12')
+        from rdflib.namespace import XSD as XSD2
+        assert (ex('s'), ex('p'), Literal(42, datatype=XSD2.integer)) in g
+
+    def test_triple_term_as_object(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<TriX xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            '<graph>'
+            f'<triple><uri>{EX}stmt</uri>'
+            '<uri>http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies</uri>'
+            f'<tripleTerm><uri>{EX}alice</uri><uri>{EX}knows</uri><uri>{EX}bob</uri></tripleTerm>'
+            '</triple></graph></TriX>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='trix12')
+        assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+
+    def test_triple_term_as_subject(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<TriX xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            '<graph>'
+            f'<triple>'
+            f'<tripleTerm><uri>{EX}alice</uri><uri>{EX}knows</uri><uri>{EX}bob</uri></tripleTerm>'
+            f'<uri>{EX}claimedBy</uri><uri>{EX}news</uri>'
+            '</triple></graph></TriX>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='trix12')
+        assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        assert (tt, ex('claimedBy'), ex('news')) in g
+
+    def test_named_graph_triples_merged(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<TriX xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            f'<graph><uri>{EX}g1</uri>'
+            f'<triple><uri>{EX}a</uri><uri>{EX}b</uri><uri>{EX}c</uri></triple>'
+            '</graph>'
+            f'<graph><uri>{EX}g2</uri>'
+            f'<triple><uri>{EX}x</uri><uri>{EX}y</uri><uri>{EX}z</uri></triple>'
+            '</graph></TriX>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='trix12')
+        assert (ex('a'), ex('b'), ex('c')) in g
+        assert (ex('x'), ex('y'), ex('z')) in g
+
+
+class TestTriX12Serialize:
+    def test_plain_triple(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        out = g.serialize(format='trix12')
+        assert f'{EX}s' in out
+        assert f'{EX}p' in out
+        assert f'{EX}o' in out
+        assert '<triple>' in out
+
+    def test_triple_term_as_object(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        out = g.serialize(format='trix12')
+        assert '<tripleTerm>' in out
+        assert f'{EX}alice' in out
+
+    def test_triple_term_as_subject(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((tt, ex('claimedBy'), ex('news')))
+        out = g.serialize(format='trix12')
+        assert '<tripleTerm>' in out
+
+    def test_named_graph_identifier_in_output(self):
+        g = StarlightGraph(identifier=ex('mygraph'))
+        g.add((ex('s'), ex('p'), ex('o')))
+        out = g.serialize(format='trix12')
+        assert f'{EX}mygraph' in out
+        assert '<uri>' in out
+
+    def test_xml_declaration(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        out = g.serialize(format='trix12')
+        assert out.startswith('<?xml')
+
+    def test_trix_namespace(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        out = g.serialize(format='trix12')
+        assert 'http://www.w3.org/2004/03/trix/trix-1/' in out
+
+
+class TestTriX12RoundTrip:
+    def test_plain_triple(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        _, g2 = round_trip(g, 'trix12')
+        assert (ex('s'), ex('p'), ex('o')) in g2
+
+    def test_triple_term_object(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        _, g2 = round_trip(g, 'trix12')
+        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+        assert tt in list(g2.objects(ex('stmt'), RDF_REIFIES))
+
+    def test_triple_term_subject(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((tt, ex('claimedBy'), ex('news')))
+        _, g2 = round_trip(g, 'trix12')
+        assert (tt, ex('claimedBy'), ex('news')) in g2
+
+    def test_nested_triple_term(self):
+        g = StarlightGraph()
+        inner = TripleTerm(ex('a'), ex('b'), ex('c'))
+        outer = TripleTerm(inner, ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, outer))
+        _, g2 = round_trip(g, 'trix12')
+        objs = list(g2.objects(ex('stmt'), RDF_REIFIES))
+        assert outer in objs
+
+    def test_literal_types_preserved(self):
+        from rdflib.namespace import XSD as XSD2
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p1'), Literal('hello', lang='en')))
+        g.add((ex('s'), ex('p2'), Literal(42, datatype=XSD2.integer)))
+        _, g2 = round_trip(g, 'trix12')
+        assert (ex('s'), ex('p1'), Literal('hello', lang='en')) in g2
+        assert (ex('s'), ex('p2'), Literal(42, datatype=XSD2.integer)) in g2
+
+    def test_length_preserved(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        g.add((ex('stmt'), ex('confidence'), Literal('0.9')))
+        g.add((ex('s'), ex('p'), ex('o')))
+        _, g2 = round_trip(g, 'trix12')
+        assert len(g2) == len(g)
+
+
+# ---------------------------------------------------------------------------
+# TriX 1.2 — StarlightDataset (named graphs)
+# ---------------------------------------------------------------------------
+
+class TestTriX12Dataset:
+    def _make_ds(self):
+        from starlight.graph import StarlightDataset
+        ds = StarlightDataset()
+        g1 = StarlightGraph(identifier=ex('g1'))
+        g1.add((ex('s'), ex('p'), ex('o')))
+        g2 = StarlightGraph(identifier=ex('g2'))
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g2.add((ex('stmt'), RDF_REIFIES, tt))
+        ds.add_graph(g1)
+        ds.add_graph(g2)
+        return ds
+
+    def test_serialize_contains_both_graphs(self):
+        ds = self._make_ds()
+        out = ds.serialize(format='trix12')
+        assert f'{EX}g1' in out
+        assert f'{EX}g2' in out
+
+    def test_serialize_triple_term_present(self):
+        ds = self._make_ds()
+        out = ds.serialize(format='trix12')
+        assert '<tripleTerm>' in out
+
+    def test_parse_preserves_graph_count(self):
+        from starlight.graph import StarlightDataset
+        ds = self._make_ds()
+        out = ds.serialize(format='trix12')
+        ds2 = StarlightDataset()
+        ds2.parse(data=out, format='trix12')
+        non_empty = [sg for sg in ds2.contexts() if len(sg) > 0]
+        assert len(non_empty) == 2
+
+    def test_parse_triple_term_survives_dataset_roundtrip(self):
+        from starlight.graph import StarlightDataset
+        ds = self._make_ds()
+        out = ds.serialize(format='trix12')
+        ds2 = StarlightDataset()
+        ds2.parse(data=out, format='trix12')
+        g2 = ds2.get_context(ex('g2'))
+        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+
+
+# ---------------------------------------------------------------------------
+# RDF/XML 1.2
+# ---------------------------------------------------------------------------
+
+class TestRDFXML12Parse:
+    def test_plain_triple(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            f' xmlns:ex="{EX}">'
+            f'<rdf:Description rdf:about="{EX}s">'
+            f'<ex:p rdf:resource="{EX}o"/>'
+            '</rdf:Description></rdf:RDF>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='rdfxml12')
+        assert (ex('s'), ex('p'), ex('o')) in g
+
+    def test_triple_term_as_object(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            f' xmlns:ex="{EX}">'
+            f'<rdf:Description rdf:about="{EX}stmt">'
+            '<rdf:reifies>'
+            '<rdf:TripleTerm>'
+            f'<rdf:subject rdf:resource="{EX}alice"/>'
+            f'<rdf:predicate rdf:resource="{EX}knows"/>'
+            f'<rdf:object rdf:resource="{EX}bob"/>'
+            '</rdf:TripleTerm>'
+            '</rdf:reifies>'
+            '</rdf:Description></rdf:RDF>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='rdfxml12')
+        assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+
+    def test_triple_term_as_subject(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            f' xmlns:ex="{EX}">'
+            '<rdf:TripleTerm rdf:nodeID="tt0">'
+            f'<rdf:subject rdf:resource="{EX}alice"/>'
+            f'<rdf:predicate rdf:resource="{EX}knows"/>'
+            f'<rdf:object rdf:resource="{EX}bob"/>'
+            f'<ex:claimedBy rdf:resource="{EX}news"/>'
+            '</rdf:TripleTerm></rdf:RDF>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='rdfxml12')
+        assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        assert (tt, ex('claimedBy'), ex('news')) in g
+
+    def test_typed_literal(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            f' xmlns:ex="{EX}"'
+            ' xmlns:xsd="http://www.w3.org/2001/XMLSchema#">'
+            f'<rdf:Description rdf:about="{EX}s">'
+            '<ex:age rdf:datatype="http://www.w3.org/2001/XMLSchema#integer">42</ex:age>'
+            '</rdf:Description></rdf:RDF>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='rdfxml12')
+        assert (ex('s'), ex('age'), Literal(42, datatype=XSD.integer)) in g
+
+
+class TestRDFXML12Serialize:
+    def test_plain_triple_in_output(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        out = g.serialize(format='rdfxml12')
+        assert f'{EX}s' in out
+        assert f'{EX}o' in out
+
+    def test_xml_declaration(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        out = g.serialize(format='rdfxml12')
+        assert out.startswith('<?xml')
+
+    def test_rdf_namespace_declared(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        out = g.serialize(format='rdfxml12')
+        assert 'http://www.w3.org/1999/02/22-rdf-syntax-ns#' in out
+
+    def test_triple_term_object_emitted(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        out = g.serialize(format='rdfxml12')
+        assert 'rdf:TripleTerm' in out
+        assert f'{EX}alice' in out
+
+    def test_triple_term_subject_gets_nodeid(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((tt, ex('claimedBy'), ex('news')))
+        out = g.serialize(format='rdfxml12')
+        assert 'rdf:nodeID' in out
+        assert 'rdf:TripleTerm' in out
+
+    def test_triple_term_both_roles_uses_nodeid_reference(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((tt, ex('claimedBy'), ex('news')))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        out = g.serialize(format='rdfxml12')
+        # nodeID must appear at least twice: definition + reference
+        assert out.count('nodeID') >= 2
+
+
+class TestRDFXML12RoundTrip:
+    def test_plain_triple(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), ex('o')))
+        _, g2 = round_trip(g, 'rdfxml12')
+        assert (ex('s'), ex('p'), ex('o')) in g2
+
+    def test_triple_term_object(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        _, g2 = round_trip(g, 'rdfxml12')
+        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+        assert tt in list(g2.objects(ex('stmt'), RDF_REIFIES))
+
+    def test_triple_term_subject(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((tt, ex('claimedBy'), ex('news')))
+        _, g2 = round_trip(g, 'rdfxml12')
+        assert (tt, ex('claimedBy'), ex('news')) in g2
+
+    def test_triple_term_both_roles(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        g.add((tt, ex('claimedBy'), ex('news')))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        _, g2 = round_trip(g, 'rdfxml12')
+        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+        assert (tt, ex('claimedBy'), ex('news')) in g2
+        assert tt in list(g2.objects(ex('stmt'), RDF_REIFIES))
+
+    def test_nested_triple_term(self):
+        g = StarlightGraph()
+        inner = TripleTerm(ex('a'), ex('b'), ex('c'))
+        outer = TripleTerm(inner, ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, outer))
+        _, g2 = round_trip(g, 'rdfxml12')
+        assert outer in list(g2.objects(ex('stmt'), RDF_REIFIES))
+
+    def test_typed_literal(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), Literal(42, datatype=XSD.integer)))
+        _, g2 = round_trip(g, 'rdfxml12')
+        assert (ex('s'), ex('p'), Literal(42, datatype=XSD.integer)) in g2
+
+    def test_lang_literal(self):
+        g = StarlightGraph()
+        g.add((ex('s'), ex('p'), Literal('bonjour', lang='fr')))
+        _, g2 = round_trip(g, 'rdfxml12')
+        assert (ex('s'), ex('p'), Literal('bonjour', lang='fr')) in g2
+
+    def test_length_preserved(self):
+        g = StarlightGraph()
+        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
+        g.add((ex('stmt'), RDF_REIFIES, tt))
+        g.add((ex('stmt'), ex('confidence'), Literal('0.9')))
+        g.add((ex('s'), ex('p'), ex('o')))
+        _, g2 = round_trip(g, 'rdfxml12')
+        assert len(g2) == len(g)

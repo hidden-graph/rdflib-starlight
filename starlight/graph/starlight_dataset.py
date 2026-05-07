@@ -176,11 +176,12 @@ class StarlightDataset(Dataset):
     ) -> 'StarlightDataset':
         """Parse RDF data into named-graph contexts.
 
-        format='trig12' — TriG 1.2; each GRAPH block becomes a StarlightGraph.
+        format='trig12'  — TriG 1.2; each GRAPH block becomes a StarlightGraph.
         format='nq12'   — N-Quads 1.2; each distinct graph name becomes a StarlightGraph.
+        format='trix12' — TriX 1.2 XML; each <graph> block becomes a StarlightGraph.
         All other formats delegate to rdflib (no triple-term support).
         """
-        if format not in ('trig12', 'nq12'):
+        if format not in ('trig12', 'nq12', 'trix12'):
             return super().parse(
                 source=source, publicID=publicID, format=format,
                 location=location, file=file, data=data, **kwargs,
@@ -206,6 +207,15 @@ class StarlightDataset(Dataset):
                 key = graph_id if graph_id is not None else DATASET_DEFAULT_GRAPH_ID
                 by_graph[key].append((s, p, o))
             for identifier, triples in by_graph.items():
+                sg = self._load_context(identifier)
+                for triple in triples:
+                    sg.add(triple)
+                self._sg_cache[str(identifier)] = sg
+
+        elif format == 'trix12':
+            from starlight.parsers.trix12 import parse_trix12_named
+            for graph_id, triples in parse_trix12_named(text):
+                identifier = DATASET_DEFAULT_GRAPH_ID if graph_id is None else graph_id
                 sg = self._load_context(identifier)
                 for triple in triples:
                     sg.add(triple)
@@ -299,11 +309,12 @@ class StarlightDataset(Dataset):
     def serialize(self, destination=None, format='trig', **kwargs) -> str | None:
         """Serialize this dataset.
 
-        format='trig12' — TriG 1.2 with GRAPH blocks and <<( )>> triple terms.
+        format='trig12'  — TriG 1.2 with GRAPH blocks and <<( )>> triple terms.
         format='nq12'   — N-Quads 1.2 with <<( )>> triple terms; one quad per line.
+        format='trix12' — TriX 1.2 XML with <graph> blocks and <tripleTerm> elements.
         All other formats delegate to rdflib.
         """
-        if format not in ('trig12', 'nq12'):
+        if format not in ('trig12', 'nq12', 'trix12'):
             return super().serialize(destination=destination, format=format, **kwargs)
 
         if format == 'nq12':
@@ -318,6 +329,10 @@ class StarlightDataset(Dataset):
                 if chunk.strip():
                     lines.append(chunk.rstrip('\n'))
             text = header + '\n'.join(lines) + ('\n' if lines else '')
+
+        elif format == 'trix12':
+            from starlight.serializers.trix12 import serialize_trix12_dataset
+            text = serialize_trix12_dataset(self)
 
         else:  # trig12
             from starlight.serializers.turtle12 import serialize_turtle12

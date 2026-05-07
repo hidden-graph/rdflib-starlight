@@ -430,13 +430,15 @@ class StarlightGraph(Graph):
               location=None, file=None, data=None, **kwargs):
         """Parse RDF data into the graph.
 
-        format='turtle12' — Turtle 1.2 with <<( )>>, {| |}, ~ reifier syntax
-        format='nt12'     — N-Triples 1.2 with <<( )>> triple terms
-        format='nq12'     — N-Quads 1.2 (all named graphs merged into this graph)
-        format='trig12'   — TriG 1.2 (all named graphs merged into this graph)
+        format='turtle12'  — Turtle 1.2 with <<( )>>, {| |}, ~ reifier syntax
+        format='nt12'      — N-Triples 1.2 with <<( )>> triple terms
+        format='nq12'      — N-Quads 1.2 (all named graphs merged into this graph)
+        format='trig12'    — TriG 1.2 (all named graphs merged into this graph)
+        format='trix12'    — TriX 1.2 XML (all named graphs merged into this graph)
+        format='rdfxml12'  — RDF/XML 1.2 with <rdf:TripleTerm> elements
         All other formats delegate to rdflib (no triple-term support).
         """
-        if format in ('turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'jsonld12'):
+        if format in ('turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'trix12', 'rdfxml12', 'jsonld12'):
             from pathlib import Path
             if data is not None:
                 text = data
@@ -481,6 +483,16 @@ class StarlightGraph(Graph):
                 for triple in parse_trig12(text):
                     super().add(triple)
                 self._build_registry_from_store()
+
+            elif format == 'trix12':
+                from starlight.parsers.trix12 import parse_trix12
+                for triple in parse_trix12(text):
+                    self.add(triple)
+
+            elif format == 'rdfxml12':
+                from starlight.parsers.rdfxml12 import parse_rdfxml12
+                for triple in parse_rdfxml12(text):
+                    self.add(triple)
 
             elif format == 'jsonld12':
                 # Delegate to rdflib's JSON-LD parser (handles @context expansion);
@@ -798,9 +810,10 @@ class StarlightGraph(Graph):
         format='nt12'         — N-Triples 1.2 with <<( )>> triple terms
         format='nq12'         — N-Quads 1.2 (graph name from self.identifier)
         format='trig12'       — TriG 1.2 (GRAPH block wrapper around Turtle 1.2)
+        format='trix12'       — TriX 1.2 XML (<graph> block with <triple> elements)
         All other formats delegate to rdflib (internal tt: encoding visible).
         """
-        _RDF12_FORMATS = {'turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'jsonld12'}
+        _RDF12_FORMATS = {'turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'trix12', 'rdfxml12', 'jsonld12'}
         if format in _RDF12_FORMATS:
             if format == 'turtle12':
                 from starlight.serializers.turtle12 import serialize_turtle12
@@ -817,6 +830,12 @@ class StarlightGraph(Graph):
             elif format == 'trig12':
                 from starlight.serializers.trig12 import serialize_trig12
                 text = serialize_trig12(self)
+            elif format == 'trix12':
+                from starlight.serializers.trix12 import serialize_trix12
+                text = serialize_trix12(self)
+            elif format == 'rdfxml12':
+                from starlight.serializers.rdfxml12 import serialize_rdfxml12
+                text = serialize_rdfxml12(self)
             elif format == 'jsonld12':
                 from starlight.serializers.jsonld12 import serialize_jsonld12
                 text = serialize_jsonld12(self)
