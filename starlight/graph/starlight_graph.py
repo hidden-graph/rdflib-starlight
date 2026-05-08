@@ -757,7 +757,39 @@ class StarlightGraph(Graph):
                 initNs=initNs, initBindings=initBindings,
                 use_store_provided=use_store_provided, **kwargs,
             )
-        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+        from starlight.query.sparql12_to_11 import (
+            rewrite_sparql12_to_11, rewrite_sparql12_simplified, inject_tt_vars_into_select,
+        )
+        import re as _re
+
+        # Registry-based path: replace <<( )>> with plain vars, run 1 SQL query,
+        # then resolve TT components from the in-memory registry.  This avoids
+        # the N×M SQL round-trip that the encoding path triggers (one SQL call per
+        # result row per encoding triple pattern).
+        if (isinstance(query_object, str)
+                and '<<(' in query_object
+                and _re.search(r'\bSELECT\b', query_object, _re.IGNORECASE)):
+            simplified = rewrite_sparql12_simplified(query_object)
+            if simplified is not None:
+                simplified_query, descriptors = simplified
+                tt_vars = [d.var for d in descriptors]
+                expanded = inject_tt_vars_into_select(simplified_query, tt_vars)
+                raw = Graph(store=self.store, identifier=self.identifier)
+                for prefix, ns in self.namespaces():
+                    raw.bind(prefix, ns)
+                r = raw.query(expanded, processor=processor, result=result,
+                              initNs=initNs, initBindings=initBindings,
+                              use_store_provided=use_store_provided, **kwargs)
+                if r.type == 'SELECT':
+                    r.bindings = self._apply_tt_registry(r.bindings, r.vars, descriptors)
+                    internal = {d.var for d in descriptors}
+                    r.vars = [v for v in r.vars if str(v) not in internal]
+                elif r.type == 'CONSTRUCT':
+                    r.graph = StarlightGraph.from_rdflib(r.graph)
+                return r
+
+        # Encoding fallback: expand <<( )>> to rdf:subject/predicate/object patterns.
+        # Used for non-SELECT queries, prefixed-name TT components, and nested TTs.
         if isinstance(query_object, str):
             query_object = rewrite_sparql12_to_11(query_object)
         raw = Graph(store=self.store, identifier=self.identifier)
@@ -775,6 +807,66 @@ class StarlightGraph(Graph):
         elif r.type == 'CONSTRUCT':
             r.graph = StarlightGraph.from_rdflib(r.graph)
         return r
+
+    def _apply_tt_registry(self, bindings, vars_, descriptors):
+        """Post-process SELECT results from the registry-based simplified path.
+
+        For each result row:
+          - Look up ?__ttN in self._tt_nodes (URIRef → TripleTerm) to get the TripleTerm object
+          - Bind component variables (?s, ?p, ?o) from the TripleTerm
+          - Filter rows where a fixed-IRI spec doesn't match the actual component
+          - Remove internal ?__ttN vars from the output
+        """
+        from rdflib import URIRef, Variable
+
+        internal = {d.var for d in descriptors}
+        output_vars = [v for v in vars_ if str(v) not in internal]
+        result = []
+
+        for row in bindings:
+            new_row = dict(row)
+            skip = False
+
+            for desc in descriptors:
+                tt_key = Variable(desc.var[1:])
+                tt_val = row.get(tt_key)
+                if tt_val is None:
+                    continue
+
+                tt_obj = self._tt_nodes.get(tt_val)
+                if tt_obj is None:
+                    skip = True
+                    break
+
+                for spec, component in (
+                    (desc.s_spec, tt_obj.subject),
+                    (desc.p_spec, tt_obj.predicate),
+                    (desc.o_spec, tt_obj.object),
+                ):
+                    if spec.startswith('?'):
+                        var_key = Variable(spec[1:])
+                        existing = new_row.get(var_key)
+                        if existing is None:
+                            new_row[var_key] = component
+                        elif existing != component:
+                            skip = True
+                            break
+                    else:
+                        # Full IRI: <http://...>
+                        if component != URIRef(spec[1:-1]):
+                            skip = True
+                            break
+
+                if skip:
+                    break
+
+            if not skip:
+                result.append({
+                    var: self._restore(new_row.get(var)) if new_row.get(var) is not None else None
+                    for var in output_vars
+                })
+
+        return result
 
     def update(self, update_object, processor='sparql',
               initNs=None, initBindings=None, use_store_provided=True, **kwargs):
