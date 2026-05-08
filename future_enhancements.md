@@ -113,5 +113,21 @@ rdflib's `Memory` store stores the actual `StarlightGraph` Python objects as con
 
 ### Backends
 
+**File-backed in-memory persistence mode**
+A `StarlightGraph` persistence model that separates storage from query execution: the graph lives entirely in memory (fast queries, no SQL round-trip overhead) but serializes to and loads from a file on disk (Turtle 1.2 or N-Triples 1.2) for durability. The motivating use case is temporal queries — e.g. "all reified triples effective between two dates" — which require joining a TT pattern with two additional date predicates. Against a SQL backend, that query triggers N SQL round-trips per pattern (rdflib's SPARQL evaluator cannot push joins into SQL); against an in-memory store the same query runs in a single SPARQL pass.
+
+The core capability already exists: `StarlightGraph().parse('graph.ttl')` loads into memory; `g.serialize('graph.ttl')` writes back. What is missing is a first-class lifecycle API:
+
+```python
+g = StarlightGraph.open('graph.ttl')    # load into memory, remember path
+g.add(triple)                           # mutate in-memory
+g.save()                                # write back to same path
+g.close()                               # optional: clear memory
+```
+
+Possible extensions: `auto_save=True` flag to write on every mutation; async/periodic flush for long-running processes; atomic write (write to `.tmp`, then rename) to avoid corruption on crash.
+
+Trade-offs vs SQLite: startup cost is loading the full file (vs SQLite's registry-only rebuild); no concurrent multi-process access; all data must fit in RAM. Appropriate when the graph fits in memory and query performance matters more than write-through durability.
+
 **Direct `pyoxigraph` embedded backend**
 `pyoxigraph` (Rust bindings) provides a `Store` object with native RDF 1.2 support — no HTTP server required. `Store()` is in-memory (fast, good for unit tests); `Store(path=...)` is RocksDB-backed and persistent. A new backend mode (e.g. `'oxigraph-embedded'`) would call `pyoxigraph.Store` directly instead of the `http_*` HTTP functions, eliminating the Docker/server dependency entirely and enabling fast in-process testing against a real RDF 1.2 store. The main integration cost is translating between `pyoxigraph` term types and rdflib `URIRef`/`Literal`/`BNode`/`TripleTerm`.

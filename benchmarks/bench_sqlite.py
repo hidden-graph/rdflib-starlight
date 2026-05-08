@@ -40,7 +40,7 @@ RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 EX_CONF     = URIRef(EX + 'confidence')
 GRAPH_URI   = URIRef(EX + 'bench')
 
-SCALES  = [50_000]
+SCALES  = [10_000, 100_000]
 REPEATS = 3
 
 

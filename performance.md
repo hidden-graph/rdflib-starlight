@@ -1,11 +1,33 @@
 # StarlightGraph Performance
 
+## Executive Summary
+
+### In-memory
+
+The fully in-memory mode is the simplest and fastest option for most workloads. There is no setup, no server, and all queries run at Python dict speed. It is the right default and scales further than you might expect for plain triples — a performant laptop (16 GB RAM) can comfortably hold several million plain triples and answer complex SPARQL queries in milliseconds.
+
+
+The practical limits are lower once triple terms are involved. Each triple term requires roughly four times the storage of a plain triple — it stores one visible triple plus three internal encoding triples, plus registry entries. On a 16 GB laptop, at 100,000 triple term triples, memory starts to be an issue with hard-limits at approximately 1.5 mllion triple term triples. 
+
+
+Query performance depends on the shape of the query. Selective queries — find annotations about a specific subject, predicate, or object — are fast at any scale (~1–2ms) because the store's own index resolves the lookup directly. The slow case is **wildcard queries** that retrieve all annotated facts at once: ~600ms at 50K triple terms, ~1.3s at 100K, ~7s at 250K. If your application frequently needs to scan the full annotation set, in-memory becomes impractical above roughly 50–100K triple terms.
+
+
+**Important caveat: an in-memory graph does not persist.** When the process ends, the data is gone. Applications using in-memory mode must reload from an external source (a file, a database, an API) on every start. For use cases that can afford that startup cost, this is often an acceptable trade-off.  
+
+### SQLite
+
+**SQLite is not a query backend — it is storage with a query-shaped interface.** The rdflib-sqlalchemy adapter executes SPARQL step by step: it receives individual triple pattern lookups from rdflib's SPARQL evaluator, translates each one to a SQL SELECT, and returns rows. It never sees the full WHERE clause and has no opportunity to generate a SQL JOIN. For a query with two triple patterns and 5K matching rows, that is 5K+1 SQL round-trips rather than the single joined SELECT a native SQL query planner would produce. This makes SQLite appropriate only for write-dominated workloads or simple single-pattern lookups — not for the complex multi-predicate TT queries (e.g. temporal range queries over annotated facts) that are a primary use case for StarlightGraph.
+
+---
+
 This document summarizes observed performance characteristics across
 StarlightGraph's backend modes, to guide decisions about which backend
 to use at different scales and workload types.
 
-Benchmarks are in `benchmarks/bench_inmemory.py` (Phase 1) and
-`benchmarks/bench_http.py` (Phase 2).
+Benchmarks are in `benchmarks/bench_inmemory.py` (Phase 1),
+`benchmarks/bench_http.py` (Phase 2), and
+`benchmarks/bench_comparison.py` (head-to-head in-memory vs SQLite).
 
 ---
 
@@ -46,16 +68,17 @@ Benchmarks are in `benchmarks/bench_inmemory.py` (Phase 1) and
 
 ### Triple-term workload (reification + SPARQL TT pattern)
 
-_Updated after registry-path optimization (see Root Cause notes below)._
+_SPARQL TT column: fully wildcard `<<( ?s ?p ?o )>>` returning all results. Selective queries with a bound component (subject, predicate, or object) take ~1–2ms at any scale via the store's POS index._
 
-| N | Insert | t/s | SPARQL TT | Registry rebuild | Mem peak |
-|--:|-------:|----:|----------:|-----------------:|---------:|
-| 100 | 2.3 ms | 44K | 2.1 ms | 0.1 ms | 1.4 MiB |
-| 1,000 | 12.3 ms | 82K | 12.8 ms | 0.7 ms | 12.5 MiB |
-| 5,000 | 62.2 ms | 80K | 56.4 ms | 3.6 ms | 65.5 MiB |
-| 10,000 | 127.8 ms | 78K | 115.8 ms | 8.1 ms | 108.3 MiB |
-| 50,000 | 1,578 ms | 32K | 597.9 ms | 43.2 ms | 498.5 MiB |
-| 100,000 | 3,671 ms | 27K | 1,221 ms | 90.5 ms | 989.3 MiB |
+| N | Insert | t/s | SPARQL TT (wildcard) | Registry rebuild | Mem peak |
+|--:|-------:|----:|---------------------:|-----------------:|---------:|
+| 100 | 2.4 ms | 41K | 2.2 ms | 0.1 ms | 1.4 MiB |
+| 1,000 | 12.4 ms | 81K | 12.8 ms | 0.7 ms | 12.5 MiB |
+| 5,000 | 62.2 ms | 80K | 57.7 ms | 3.6 ms | 65.5 MiB |
+| 10,000 | 132.1 ms | 76K | 115.8 ms | 8.1 ms | 108.3 MiB |
+| 50,000 | 1,637 ms | 31K | 609.1 ms | 44.2 ms | 498.5 MiB |
+| 100,000 | 3,687 ms | 27K | 1,256 ms | 100.6 ms | 989.3 MiB |
+| 250,000 | 15,545 ms | 16K | 7,255 ms | — | 1,118 MiB |
 
 ### Phase 1 observations
 
@@ -76,22 +99,20 @@ The practical multiplier on memory depends on what fraction of facts are reified
 
 The observed memory ratio (plain: 2.7 MiB/1K → TT: 10 MiB/1K) reflects the ~4× encoding overhead applied to a fully-reified workload.
 
-#### SPARQL TT query post-processing is the architectural differentiator
+#### SPARQL TT query performance
 
-Even with the registry-path optimization (which eliminated the N×M SQL round-trip problem for persistent backends), there remains a structural gap between StarlightGraph and native SPARQL engines:
+All TT patterns are rewritten to SPARQL 1.1 encoding triple patterns and evaluated by the SPARQL engine. Two cases:
 
-- **Native backend (Fuseki, Oxigraph):** `<<( ?s ?p ?o )>>` is evaluated natively in compiled code — one pass, no post-processing.
-- **StarlightGraph (any store):** 1 SPARQL query over the encoded representation → result set returned to Python → N Python dict lookups per result row to bind TT components.
+- **Wildcard** `<<( ?s ?p ?o )>>`: the SPARQL engine evaluates all four encoding patterns (rdf:reifies + rdf:subject/predicate/object) for every matching TT. This is O(N) over the result set. At 100K TTs: ~1.3s. At 250K: ~7s.
+- **Bound component** `<<( <uri> ?p ?o )>>`: the SPARQL engine uses the store's POS index on `rdf:subject <uri>` to locate the specific TT hash in O(1), then resolves the remaining patterns. Result: ~1–2ms at any scale.
 
-For queries returning large result sets, the N Python dict lookups accumulate regardless of how fast the underlying store is. At 100K TTs (full wildcard query returning all results), this is 1.2 seconds even with the registry-path fix. A native SPARQL engine would answer the same query in milliseconds.
-
-This is the correct framing of the scaling limit: **the bottleneck is the post-processing layer in Python, not storage capacity or query planning**. Switching to a native backend removes this layer entirely.
+The wildcard case is the practical limit. Native backends (Fuseki, Oxigraph) evaluate TT patterns natively in compiled code and return results in milliseconds regardless of graph size — that is the motivation for supporting them.
 
 #### Other observations
 
 **Insert throughput — plain triples** stays flat at ~300–370K t/s through 100K. `addN` is marginally faster (~7%) due to reduced call overhead.
 
-**Insert throughput — reification** holds at ~80K t/s through 10K, then collapses to 27–32K t/s at 50K+. Each TT add writes 4 physical triples and updates two registry dicts. This is roughly 4–11× slower than plain triple inserts at the same scale.
+**Insert throughput — reification** holds at ~80K t/s through 10K, then collapses progressively: 31K t/s at 50K, 27K t/s at 100K, 16K t/s at 250K. Each TT add writes 4 physical triples and updates two registry dicts; as those Python dicts grow large, resizing and GC overhead compound. At 250K TTs the insert time reaches ~16 seconds — likely impractical as a startup cost for an in-memory graph.
 
 **Contains (point lookup)** is hash-based and stays essentially O(1): 5 µs at 100 triples, 25 µs at 100K.
 
@@ -295,6 +316,54 @@ TT component are practical.
 layer interacting with rdflib's SPARQL evaluation strategy, not an intrinsic SQLite
 limitation. A native TT-aware SQL schema (or a native backend like rdf-star/Fuseki) would
 not have this problem.
+
+---
+
+## Targeted Comparison — In-memory vs SQLite at 50K TTs
+
+**Methodology**: Both backends loaded the same 60K-triple dataset (50K TTs, 5K reifications at 10% rate, 5K confidence annotations). Benchmark: `benchmarks/bench_comparison.py`. Median of 3 query runs.
+
+### Results
+
+| Metric | In-memory | SQLite |
+|---|--:|--:|
+| **Load (addN)** | 211 ms  (285K t/s) | 577 ms  (104K t/s) |
+| **Client memory** | 73 MiB peak | ~0 MiB  (36 MiB on disk) |
+| **All reified TTs** `<<( ?s ?p ?o )>>` | **78 ms** | **102 ms** |
+| **TT + join** `<<( )>> + confidence > 0.7` | **202 ms** | **3,720 ms** |
+| **Partial TT match** `<<( ?s <pred> ?o )>>` | **64 ms** | **90 ms** |
+
+_(5,000 rows returned for all-reified; 2,500 for confidence filter; 25 for partial match)_
+
+### What the numbers show
+
+**The registry-path fix brought TT SPARQL to near-parity for single-pattern queries**: 78ms (in-memory) vs 102ms (SQLite) for all reified TTs. Both backends now execute 1 query + 5K in-memory dict lookups. The gap is small and SQLite's lower client memory is a real advantage at this scale.
+
+**Multi-pattern SPARQL queries expose SQLite's structural weakness.** The confidence filter query has two triple patterns plus a FILTER:
+
+```sparql
+?stmt rdf:reifies <<( ?s ?p ?o )>> .
+?stmt ex:confidence ?c .          ← this join is the problem
+FILTER(xsd:decimal(?c) > 0.7)
+```
+
+After the TT pattern is handled by the registry path, rdflib's SPARQL engine still evaluates `?stmt ex:confidence ?c` as a nested-loop join — one SQL query per result row from the first pattern. For 5K reification statements, that is **5K SQL round-trips at ~0.7ms each = 3.5 seconds**. This is the same N×M round-trip problem as before, but now for ordinary triple pattern joins rather than TT encoding patterns.
+
+In-memory evaluates the same join with Python dict lookups (~1 µs each) — 5K lookups is negligible, leaving only the SPARQL evaluation overhead.
+
+**This is not fixable by the registry path alone.** The root cause is that rdflib's Python SPARQL evaluator was not designed to translate multi-pattern joins into SQL JOINs. Each additional triple pattern in a WHERE clause costs N SQL queries when run against a SQL store.
+
+### When to use each backend at this scale
+
+| Need | In-memory | SQLite |
+|---|:---:|:---:|
+| Multi-pattern SPARQL (most real queries) | ✓ fast | ✗ slow |
+| Single TT pattern query | ✓ fast | ✓ comparable |
+| Client memory budget | ✗ 73 MiB+ | ✓ near-zero |
+| Persistence across restarts | ✗ | ✓ |
+| Write throughput | ✓ 285K t/s | ~104K t/s |
+
+**Practical conclusion**: For query-heavy workloads with multi-pattern SPARQL, SQLite with rdflib-sqlalchemy is worse than in-memory at every scale tested — not because of the TT encoding overhead (which the registry path eliminated), but because rdflib's SPARQL evaluator cannot push joins into SQL. SQLite's value is exclusively persistence + zero client memory, and only when queries are simple single-pattern lookups or the workload is write-dominated.
 
 ---
 
