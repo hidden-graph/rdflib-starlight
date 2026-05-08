@@ -30,6 +30,14 @@ Fuseki requires running a server (Docker or a standalone jar).
 
 The rdf-star mode stores annotated facts as native quoted triples rather than as sets of component triples. This reduces the amount of data stored in Fuseki by 20%, and gives Fuseki's query engine a more direct representation to work with. The result is a consistent 20–40% improvement in query speed across all query types: the same 250K scan drops from 580ms to 460ms, and a combined scan-and-filter query drops from 525ms to 317ms. At 500K facts the full-annotation scan is 1.0 second versus 1.2 seconds in rdf-1.1 mode.
 
+### Oxigraph (rdf-1.2): the fastest backend
+
+Oxigraph is a Rust-based RDF 1.2 store. Running in in-memory mode, it is the fastest backend for broad queries at every scale tested. At 250K annotated facts, the full-annotation scan takes 168ms — 4.8× faster than in-memory Python, 2.7× faster than rdf-star/Fuseki. The combined scan-and-filter query takes 122ms, versus 317ms in Fuseki and 1.49 seconds in memory. The advantage comes from Oxigraph's compiled Rust SPARQL engine, native RDF 1.2 quoted-triple storage, and zero JVM overhead.
+
+The only case where Oxigraph does not win is point lookups (finding all annotations for a specific subject or object), where Python's in-memory dict lookup at ~4ms beats Oxigraph's 30–100ms HTTP round-trip. For workloads dominated by broad scans or joins, Oxigraph is the clear choice. Like Fuseki, it requires running a server.
+
+Oxigraph also ships as `pyoxigraph`, a Python extension that embeds the Rust library in-process with no HTTP overhead. This was not benchmarked here: users choosing direct-mode Oxigraph will generally not be using rdflib or StarlightGraph, since pyoxigraph exposes its own query API rather than the rdflib `Graph` interface.
+
 ---
 
 This document summarizes observed performance characteristics across
@@ -254,8 +262,8 @@ would differ materially with a tmpfs-backed or RAM-disk location. Fuseki used
 | Multi-pattern SPARQL over TTs (any scale) | in-memory or Fuseki | SQLite N×M round-trips: 50–70× penalty; rdflib cannot push joins to SQL |
 | Write-heavy, read-light, needs persistence | SQLite | 100K t/s bulk load; simple single-pattern queries acceptable |
 | Persistence / multi-process access | rdf-1.1/Fuseki or rdf-star/Fuseki | In-memory is process-lifetime only |
-| RDF 1.2 native syntax, small graphs | rdf-1.2/Oxigraph | Only spec-compliant backend; use in-memory Oxigraph config |
-| RDF 1.2 native syntax, large graphs | rdf-1.2/Oxigraph (tmpfs) | Persistent RocksDB shows severe scan degradation at scale |
+| Fastest broad queries, any scale | rdf-1.2/Oxigraph (in-memory) | 168ms wildcard at 250K TTs — 4.8× faster than in-memory Python, 2.7× faster than Fuseki rdf-star |
+| RDF 1.2 native syntax, any size | rdf-1.2/Oxigraph (in-memory) | Only spec-compliant backend; in-memory mode avoids RocksDB scan degradation |
 | Jena ecosystem / inference | rdf-star/Fuseki | Jena rules, OWL reasoning, federation |
 | Unit / integration tests | in-memory (rdf-1.1) | Zero setup cost; full suite in <1 s |
 | Bulk load (write-once, read-many) | any HTTP + `addN` | Use `addN` to reduce per-call overhead |
@@ -497,6 +505,48 @@ _(rows: 5K/2.5K/25 at 50K; 25K/12.5K/125 at 250K; 50K/25K/250 at 500K)_
 **Both Fuseki modes scale O(N) with result count** — no superlinear degradation. Going 10× in scale (50K→500K), rdf-star wildcard grows 8.4× (114ms→959ms). rdf-1.1 wildcard grows 9.1× (134ms→1.22s). Both are well-behaved.
 
 **rdf-star beats in-memory from ~50K TTs up for broad queries**, and the advantage widens: wildcard 115ms vs 164ms at 50K (1.4×), 457ms vs 814ms at 250K (1.8×), 959ms vs 1.71s at 500K (1.8×). Join queries show a larger advantage: 59ms vs 290ms at 50K (5×), 317ms vs 1.49s at 250K (4.7×). In-memory retains its advantage for selective (bound-component) lookups where no HTTP overhead is tolerable.
+
+---
+
+## Phase 6 — rdf-1.2/Oxigraph (in-memory) at Scale
+
+**Methodology**: Oxigraph running in in-memory mode (`docker run ... ghcr.io/oxigraph/oxigraph serve --bind 0.0.0.0:7878`, no `--location` flag). TripleTerms written as native RDF 1.2 `<<( s p o )>>` quoted triples. Queries sent directly to Oxigraph's HTTP endpoint using final RDF 1.2 syntax; results converted from Oxigraph's `type: "triple"` JSON format back to TripleTerm objects. Same dataset and scale points as Phases 4–5. Benchmark: `benchmarks/bench_oxigraph.py`.
+
+### Results
+
+| Metric | 50K TTs | 250K TTs | 500K TTs |
+|---|--:|--:|--:|
+| **Physical triples in Oxigraph** | 60K | 300K | 600K |
+| **Load (batched INSERT DATA)** | 390 ms  (154K t/s) | 2.21 s  (136K t/s) | 4.58 s  (131K t/s) |
+| **All reified TTs** `<<( ?s ?p ?o )>>` | **42.8 ms** | **168 ms** | **357 ms** |
+| **TT + join** `<<( )>> + confidence > 0.7` | **23.5 ms** | **122 ms** | **235 ms** |
+| **Partial TT match** `<<( ?s <pred> ?o )>>` | 7.9 ms | 33.8 ms | 97.9 ms |
+
+_(rows: 5K/2.5K/25 at 50K; 25K/12.5K/125 at 250K; 50K/25K/250 at 500K)_
+
+### All-backends comparison at 250K TTs
+
+| Query | In-memory | rdf-1.1/Fuseki | rdf-star/Fuseki | rdf-1.2/Oxigraph |
+|---|--:|--:|--:|--:|
+| Wildcard TT | 807 ms | 584 ms | 457 ms | **168 ms** |
+| TT + join | 1,490 ms | 525 ms | 317 ms | **122 ms** |
+| Bound predicate | **4.5 ms** | 61 ms | 38 ms | 34 ms |
+
+### What the numbers show
+
+**Oxigraph is the fastest backend at every scale for broad queries.** At 250K TTs, Oxigraph delivers the wildcard scan in 168ms — 4.8× faster than in-memory (807ms), 2.7× faster than rdf-star/Fuseki (457ms). The join query (wildcard + confidence filter) is even more dramatic: 122ms vs 1,490ms in-memory (12.2×) and 317ms in rdf-star/Fuseki (2.6×).
+
+**The speed advantage comes from Oxigraph's Rust-based execution engine** combined with native RDF 1.2 quoted-triple storage. There is no encoding layer, no Python SPARQL evaluation, and no Java GC overhead. Oxigraph evaluates the entire SPARQL query — including joins and filters — in compiled Rust code and returns the result set in a single HTTP response.
+
+**Scaling is well-behaved.** Going 10× (50K→500K TTs): wildcard 8.3× (43ms→357ms), join 10×, bound predicate 12.4×. All linear with result count.
+
+**Load throughput** (~131–154K t/s via batched HTTP INSERT DATA) is 2–4× faster than Fuseki at the same scale (22–27K t/s), despite both using HTTP. Oxigraph's Rust HTTP server and storage engine ingests batches faster than Fuseki's Java-based engine.
+
+**Bound-predicate queries**: in-memory retains its advantage (~4.5ms at 250K) due to Python dict lookup with zero network overhead. Oxigraph adds ~30ms of HTTP round-trip cost for these tiny result sets. For applications where selective lookups dominate, in-memory remains the right choice.
+
+**Oxigraph vs rdf-star/Fuseki**: Oxigraph wins consistently — 2.6× faster on joins at 250K TTs. Both use native quoted-triple storage, but Oxigraph's Rust engine and absence of JVM overhead give a clear advantage for query-heavy workloads.
+
+**Note on pyoxigraph (direct mode, not tested)**: Oxigraph also ships as `pyoxigraph`, a Python extension that embeds the Rust library in-process with no HTTP server. This would eliminate the network round-trip cost visible on bound-predicate queries and likely push Oxigraph ahead of in-memory on point lookups as well. It was not benchmarked here because pyoxigraph exposes its own query API rather than the rdflib `Graph` interface — users choosing direct-mode Oxigraph will generally not be using rdflib or StarlightGraph.
 
 ---
 
