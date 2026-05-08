@@ -474,10 +474,14 @@ class StarlightTurtleParser:
         prefix_map.setdefault('rdf', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#')
         prefix_map.setdefault('sl',  SL_NS)   # needed for intermediate sl:TripleTerm triples
 
-        # Add sl:Reification markers so _skolemize_encoding can find reifier bnodes
-        reif_subjects = {t['subject'] for t in expanded if t['predicate'] == 'rdf:reifies'}
-        for subj in reif_subjects:
-            expanded.append({'subject': subj, 'predicate': 'rdf:type', 'object': 'sl:Reification'})
+        # Add sl:Reification markers so _skolemize_encoding can find reifier bnodes.
+        # Carry _base_uri from the rdf:reifies triple so relative subjects resolve correctly.
+        reif_subjects = {
+            (t['subject'], t.get('_base_uri'))
+            for t in expanded if t['predicate'] == 'rdf:reifies'
+        }
+        for subj, base in reif_subjects:
+            expanded.append({'subject': subj, 'predicate': 'rdf:type', 'object': 'sl:Reification', '_base_uri': base})
 
         g = Graph()
         for prefix, iri in prefix_map.items():
