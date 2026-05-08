@@ -68,15 +68,6 @@ class TestNT12Parse:
         g.parse(data=nt, format='nt12')
         assert len(g) == 1
 
-    def test_triple_term_subject(self):
-        nt = f'<<( <{EX}s> <{EX}p> <{EX}o> )>> <{EX}claimedBy> <{EX}alice> .\n'
-        g = StarlightGraph()
-        g.parse(data=nt, format='nt12')
-        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
-        assert g.has_triple_term(ex('s'), ex('p'), ex('o'))
-        subjs = list(g.subjects(ex('claimedBy'), ex('alice')))
-        assert tt in subjs
-
     def test_triple_term_object(self):
         nt = f'<{EX}stmt1> <{RDF_REIFIES}> <<( <{EX}alice> <{EX}knows> <{EX}bob> )>> .\n'
         g = StarlightGraph()
@@ -85,17 +76,6 @@ class TestNT12Parse:
         tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
         objs = list(g.objects(ex('stmt1'), RDF_REIFIES))
         assert tt in objs
-
-    def test_nested_triple_term(self):
-        nt = (
-            f'<{EX}stmt1> <{RDF_REIFIES}> '
-            f'<<( <<( <{EX}a> <{EX}b> <{EX}c> )>> <{EX}p> <{EX}o> )>> .\n'
-        )
-        g = StarlightGraph()
-        g.parse(data=nt, format='nt12')
-        inner_tt = TripleTerm(ex('a'), ex('b'), ex('c'))
-        outer_tt = TripleTerm(inner_tt, ex('p'), ex('o'))
-        assert outer_tt in list(g.objects(ex('stmt1'), RDF_REIFIES))
 
     def test_comment_lines_ignored(self):
         nt = f'# This is a comment\n<{EX}p> <{EX}q> <{EX}r> .\n'
@@ -124,14 +104,6 @@ class TestNT12Serialize:
         assert f'<{EX}p>' in text
         assert f'<{EX}o>' in text
         assert text.endswith('\n')
-
-    def test_triple_term_as_subject(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('a'), ex('b'), ex('c'))
-        g.add((tt, ex('claimedBy'), ex('alice')))
-        text = g.serialize(format='nt12')
-        assert '<<(' in text
-        assert f'<{EX}a>' in text
 
     def test_triple_term_as_object(self):
         g = StarlightGraph()
@@ -167,15 +139,6 @@ class TestNT12RoundTrip:
         _, g2 = round_trip(g, 'nt12')
         assert (ex('s'), ex('p'), ex('o')) in g2
 
-    def test_triple_term_subject_roundtrip(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        g.add((tt, ex('claimedBy'), ex('news')))
-        _, g2 = round_trip(g, 'nt12')
-        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
-        subjs = list(g2.subjects(ex('claimedBy'), ex('news')))
-        assert tt in subjs
-
     def test_triple_term_object_roundtrip(self):
         g = StarlightGraph()
         tt = TripleTerm(ex('s'), ex('p'), ex('o'))
@@ -183,15 +146,6 @@ class TestNT12RoundTrip:
         _, g2 = round_trip(g, 'nt12')
         objs = list(g2.objects(ex('stmt1'), RDF_REIFIES))
         assert tt in objs
-
-    def test_nested_triple_term_roundtrip(self):
-        g = StarlightGraph()
-        inner = TripleTerm(ex('a'), ex('b'), ex('c'))
-        outer = TripleTerm(inner, ex('p'), ex('o'))
-        g.add((ex('stmt'), RDF_REIFIES, outer))
-        _, g2 = round_trip(g, 'nt12')
-        objs = list(g2.objects(ex('stmt'), RDF_REIFIES))
-        assert outer in objs
 
     def test_length_preserved(self):
         g = StarlightGraph()
@@ -568,22 +522,6 @@ class TestTriX12Parse:
         g.parse(data=xml, format='trix12')
         assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
 
-    def test_triple_term_as_subject(self):
-        xml = (
-            '<?xml version="1.0"?>'
-            '<TriX xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
-            '<graph>'
-            f'<triple>'
-            f'<tripleTerm><uri>{EX}alice</uri><uri>{EX}knows</uri><uri>{EX}bob</uri></tripleTerm>'
-            f'<uri>{EX}claimedBy</uri><uri>{EX}news</uri>'
-            '</triple></graph></TriX>'
-        )
-        g = StarlightGraph()
-        g.parse(data=xml, format='trix12')
-        assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        assert (tt, ex('claimedBy'), ex('news')) in g
-
     def test_named_graph_triples_merged(self):
         xml = (
             '<?xml version="1.0"?>'
@@ -619,13 +557,6 @@ class TestTriX12Serialize:
         assert '<tripleTerm>' in out
         assert f'{EX}alice' in out
 
-    def test_triple_term_as_subject(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        g.add((tt, ex('claimedBy'), ex('news')))
-        out = g.serialize(format='trix12')
-        assert '<tripleTerm>' in out
-
     def test_named_graph_identifier_in_output(self):
         g = StarlightGraph(identifier=ex('mygraph'))
         g.add((ex('s'), ex('p'), ex('o')))
@@ -660,22 +591,6 @@ class TestTriX12RoundTrip:
         _, g2 = round_trip(g, 'trix12')
         assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
         assert tt in list(g2.objects(ex('stmt'), RDF_REIFIES))
-
-    def test_triple_term_subject(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        g.add((tt, ex('claimedBy'), ex('news')))
-        _, g2 = round_trip(g, 'trix12')
-        assert (tt, ex('claimedBy'), ex('news')) in g2
-
-    def test_nested_triple_term(self):
-        g = StarlightGraph()
-        inner = TripleTerm(ex('a'), ex('b'), ex('c'))
-        outer = TripleTerm(inner, ex('p'), ex('o'))
-        g.add((ex('stmt'), RDF_REIFIES, outer))
-        _, g2 = round_trip(g, 'trix12')
-        objs = list(g2.objects(ex('stmt'), RDF_REIFIES))
-        assert outer in objs
 
     def test_literal_types_preserved(self):
         from rdflib.namespace import XSD as XSD2
@@ -780,24 +695,6 @@ class TestRDFXML12Parse:
         g.parse(data=xml, format='rdfxml12')
         assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
 
-    def test_triple_term_as_subject(self):
-        xml = (
-            '<?xml version="1.0"?>'
-            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
-            f' xmlns:ex="{EX}">'
-            '<rdf:TripleTerm rdf:nodeID="tt0">'
-            f'<rdf:subject rdf:resource="{EX}alice"/>'
-            f'<rdf:predicate rdf:resource="{EX}knows"/>'
-            f'<rdf:object rdf:resource="{EX}bob"/>'
-            f'<ex:claimedBy rdf:resource="{EX}news"/>'
-            '</rdf:TripleTerm></rdf:RDF>'
-        )
-        g = StarlightGraph()
-        g.parse(data=xml, format='rdfxml12')
-        assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        assert (tt, ex('claimedBy'), ex('news')) in g
-
     def test_typed_literal(self):
         xml = (
             '<?xml version="1.0"?>'
@@ -841,23 +738,6 @@ class TestRDFXML12Serialize:
         assert 'rdf:TripleTerm' in out
         assert f'{EX}alice' in out
 
-    def test_triple_term_subject_gets_nodeid(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        g.add((tt, ex('claimedBy'), ex('news')))
-        out = g.serialize(format='rdfxml12')
-        assert 'rdf:nodeID' in out
-        assert 'rdf:TripleTerm' in out
-
-    def test_triple_term_both_roles_uses_nodeid_reference(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        g.add((tt, ex('claimedBy'), ex('news')))
-        g.add((ex('stmt'), RDF_REIFIES, tt))
-        out = g.serialize(format='rdfxml12')
-        # nodeID must appear at least twice: definition + reference
-        assert out.count('nodeID') >= 2
-
 
 class TestRDFXML12RoundTrip:
     def test_plain_triple(self):
@@ -873,31 +753,6 @@ class TestRDFXML12RoundTrip:
         _, g2 = round_trip(g, 'rdfxml12')
         assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
         assert tt in list(g2.objects(ex('stmt'), RDF_REIFIES))
-
-    def test_triple_term_subject(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        g.add((tt, ex('claimedBy'), ex('news')))
-        _, g2 = round_trip(g, 'rdfxml12')
-        assert (tt, ex('claimedBy'), ex('news')) in g2
-
-    def test_triple_term_both_roles(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        g.add((tt, ex('claimedBy'), ex('news')))
-        g.add((ex('stmt'), RDF_REIFIES, tt))
-        _, g2 = round_trip(g, 'rdfxml12')
-        assert g2.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
-        assert (tt, ex('claimedBy'), ex('news')) in g2
-        assert tt in list(g2.objects(ex('stmt'), RDF_REIFIES))
-
-    def test_nested_triple_term(self):
-        g = StarlightGraph()
-        inner = TripleTerm(ex('a'), ex('b'), ex('c'))
-        outer = TripleTerm(inner, ex('p'), ex('o'))
-        g.add((ex('stmt'), RDF_REIFIES, outer))
-        _, g2 = round_trip(g, 'rdfxml12')
-        assert outer in list(g2.objects(ex('stmt'), RDF_REIFIES))
 
     def test_typed_literal(self):
         g = StarlightGraph()

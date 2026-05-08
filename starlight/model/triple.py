@@ -22,6 +22,11 @@ class TripleTerm:
     _IMMUTABLE = frozenset({'subject', 'predicate', 'object'})
 
     def __init__(self, subject, predicate, obj):
+        if isinstance(subject, TripleTerm):
+            raise ValueError(
+                "RDF 1.2: the subject of a triple term must be an IRI or blank node, "
+                "not a triple term. Triple terms are only permitted in object position."
+            )
         self.subject = subject
         self.predicate = predicate
         self.object = obj

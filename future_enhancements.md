@@ -1,10 +1,12 @@
 # Starlight Future Enhancements
 
+Analyze code for inefficiencie and memory problems.
+
 ## Open Design Questions
 
 - **RDF version declaration** — All four RDF 1.2 formats now emit a version hint when triple terms are present (`@version "1.2" .` for Turtle/TriG; `VERSION "1.2"` for N-Triples/N-Quads) and their parsers silently skip the declaration. No open items remain here.
 - **Annotation syntax in serializer** — Emit the compact `{| |}` annotation shorthand or always use explicit `rdf:reifies` triples? The compact form is more readable but requires pattern-matching at serialize time (see Serializer section).
-- **Backend database integration** — How to persist the tt:HASH encoding and TripleTerm registry in a triple store (e.g. GraphDB, Stardog, Apache Jena Fuseki). Custom IRI prefix conventions or named-graph sidecars are candidate approaches.  (Note - need to determine whehter the backend supprots rdf1.2 or not.  if it does not, then we write and query 1.1 trasnforamtions.  if it does, then we have the opportunity to write and query 1.2 with quoted triples.)
+- **Backend database integration** — Two cases: (1) RDF 1.1 backend — encode TripleTerms as `tt:HASH`, rewrite SPARQL 1.2 → 1.1 before sending, restore `tt:HASH` URIRefs on return. (2) RDF 1.2 native backend — write native quoted triples, pass SPARQL 1.2 through as-is, convert the store's quoted-triple result format → `TripleTerm` on return. Target for Case 2 is **Oxigraph** (Rust-based, strong RDF 1.2 support); integration via `pyoxigraph` directly or the `rdflib-oxigraph` Store plugin — to be evaluated.
 
 ---
 
@@ -97,8 +99,8 @@ rdflib's `subjects()`, `objects()`, and `predicates()` all call `self.triples()`
 
 ### Multi-graph (StarlightDataset)
 
-**`query()` copies all triples per call**
-`_build_raw_execution_graph()` constructs a fresh plain `Dataset` on each `query()` call to ensure encoding triples are visible to the SPARQL engine's `GRAPH ?g` enumeration. For large datasets this is expensive. A cached raw graph that is invalidated on `update()` / `parse()` would reduce this to an amortized cost.
+**`query()` raw execution graph** — ✅ Cached
+rdflib's `Memory` store stores the actual `StarlightGraph` Python objects as context keys. When the SPARQL engine evaluates `GRAPH ?g { }` it calls `contexts()` and then `triples()` on each returned object — which invokes `StarlightGraph.triples()` and filters encoding triples, breaking the rewritten SPARQL 1.1 patterns. A separate plain `Dataset` with unoverridden `Graph` contexts is required. `_build_raw_execution_graph()` now caches that plain `Dataset` and invalidates it only on `parse()` or `update()`, so the copy is paid at most once per mutation cycle.
 
 ---
 

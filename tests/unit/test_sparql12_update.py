@@ -299,55 +299,6 @@ class TestU7:
         assert len(reifies) == 1
 
 class TestU6:
-    def test_insert_template_tt_subject_from_asserted_triple(self, g):
-        """Ground TT in INSERT template: fires when WHERE matches at least one row."""
-        g.update("""
-            PREFIX :   <http://example.org/>
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            INSERT { <<( :alice :knows :bob )>> :annotated :true }
-            WHERE  { :stmt2 rdf:reifies <<( :alice :knows :bob )>> }
-        """)
-        from starlight.model.triple import TripleTerm
-        from rdflib import URIRef
-        tt = TripleTerm(URIRef(EX + 'alice'), URIRef(EX + 'knows'), URIRef(EX + 'bob'))
-        results = list(g.triples((tt, URIRef(EX + 'annotated'), None)))
-        assert len(results) == 1
-        assert results[0][2] == URIRef(EX + 'true')
-
-    def test_insert_template_tt_subject_variables_from_where(self, g):
-        """<<( ?s ?p ?o )>> in template bound from WHERE triple-term pattern."""
-        # WHERE uses <<( )>> pattern — finds the TT via encoding; template creates
-        # a new annotation for that same TT.
-        g.update("""
-            PREFIX :   <http://example.org/>
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            INSERT { <<( ?s ?p ?o )>> :processedBy :Workflow }
-            WHERE  { ?r rdf:reifies <<( ?s ?p ?o )>> ; :confidence ?c }
-        """)
-        from starlight.model.triple import TripleTerm
-        from rdflib import URIRef
-        # stmt1 reifies (:bob :knows :carol) with confidence — should be annotated
-        tt = TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))
-        results = list(g.triples((tt, URIRef(EX + 'processedBy'), None)))
-        assert len(results) == 1
-        assert results[0][2] == URIRef(EX + 'Workflow')
-
-    def test_insert_template_multiple_annotations_via_semicolon(self, g):
-        """<<( ?s ?p ?o )>> :p1 :v1 ; :p2 :v2 in template creates two triples."""
-        g.update("""
-            PREFIX :   <http://example.org/>
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            INSERT { <<( ?s ?p ?o )>> :tag :A ; :tag :B }
-            WHERE  { :stmt2 rdf:reifies <<( ?s ?p ?o )>> }
-        """)
-        from starlight.model.triple import TripleTerm
-        from rdflib import URIRef
-        # stmt2 reifies (:alice :knows :bob); that TT should have both tags
-        tt = TripleTerm(URIRef(EX + 'alice'), URIRef(EX + 'knows'), URIRef(EX + 'bob'))
-        tags = {o for _, _, o in g.triples((tt, URIRef(EX + 'tag'), None))}
-        assert URIRef(EX + 'A') in tags
-        assert URIRef(EX + 'B') in tags
-
     def test_insert_template_tt_registered_after_insert(self, g):
         """New TT created via INSERT template must be registered in the graph."""
         g.update("""

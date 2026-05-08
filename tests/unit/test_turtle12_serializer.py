@@ -137,13 +137,6 @@ class TestRoundTrip:
         )
         assert isomorphic(raw1, raw2)
 
-    def test_nested_tt(self):
-        raw1, raw2, _ = _roundtrip(
-            '@prefix : <http://example/> .\n'
-            ':r rdf:reifies <<( <<( :a :b :c )>> :p :o )>> .\n'
-        )
-        assert isomorphic(raw1, raw2)
-
     def test_plain_turtle_unchanged(self):
         raw1, raw2, _ = _roundtrip(
             '@prefix : <http://example/> .\n'

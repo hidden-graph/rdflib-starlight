@@ -28,12 +28,13 @@ Typical usage::
 
 from __future__ import annotations
 
+import weakref
 from pathlib import Path
 from rdflib import Dataset, Graph, URIRef, BNode
 from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 from rdflib.namespace import RDF
 
-from starlight.graph.starlight_graph import StarlightGraph, _raw_triples
+from starlight.graph.starlight_graph import StarlightGraph, VALID_BACKENDS, _raw_triples
 from starlight.model.encoding import TT_NS
 
 _ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
@@ -64,13 +65,60 @@ class StarlightDataset(Dataset):
                                       TripleTerms restored; encoding triples filtered
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, backend: str = 'rdf-1.1', **kwargs):
+        if backend not in VALID_BACKENDS:
+            raise ValueError(f"backend must be one of {sorted(VALID_BACKENDS)}, got {backend!r}")
         super().__init__(*args, **kwargs)
+        self._backend = backend
         self._sg_cache: dict[str, StarlightGraph] = {}
+        self._raw_execution_graph: Dataset | None = None
+
+    # ------------------------------------------------------------------
+    # Persistent store lifecycle
+    # ------------------------------------------------------------------
+
+    def open(self, configuration, create: bool = False):
+        """Open a persistent store and rebuild all per-context TripleTerm registries.
+
+        The store backend is not a Starlight dependency — install and configure
+        it separately, then pass store='StoreName' to the constructor.
+
+        Example::
+
+            ds = StarlightDataset(store='Sleepycat')
+            ds.open('/path/to/db', create=True)
+        """
+        result = super().open(configuration, create)
+        self._sg_cache.clear()
+        self._raw_execution_graph = None
+        for ctx in super(Dataset, self).contexts():
+            self.get_context(ctx.identifier)
+        return result
+
+    def close(self, commit_pending_transaction: bool = False):
+        """Close the underlying store, optionally committing pending writes."""
+        self.store.close(commit_pending_transaction=commit_pending_transaction)
 
     # ------------------------------------------------------------------
     # Context access
     # ------------------------------------------------------------------
+
+    def _register_sg(self, sg: StarlightGraph) -> StarlightGraph:
+        """Cache a StarlightGraph context and wire its invalidation callback.
+
+        The callback uses a weakref so the dataset is not kept alive by its
+        own contexts.
+        """
+        ds_ref = weakref.ref(self)
+
+        def _invalidate():
+            ds = ds_ref()
+            if ds is not None:
+                ds._raw_execution_graph = None
+
+        sg._invalidate_callback = _invalidate
+        self._sg_cache[str(sg.identifier)] = sg
+        return sg
 
     def get_context(self, identifier, quoted: bool = False, base=None) -> StarlightGraph:
         """Return the StarlightGraph for the named graph with the given identifier.
@@ -85,9 +133,10 @@ class StarlightDataset(Dataset):
                 store=self.store,
                 identifier=identifier,
                 namespace_manager=self.namespace_manager,
+                backend=self._backend,
             )
             sg._build_registry_from_store()
-            self._sg_cache[key] = sg
+            self._register_sg(sg)
         return self._sg_cache[key]
 
     def contexts(self, triple=None):
@@ -154,6 +203,7 @@ class StarlightDataset(Dataset):
             store=self.store,
             identifier=identifier,
             namespace_manager=self.namespace_manager,
+            backend=self._backend,
         )
         for prefix, ns in namespaces:
             sg.bind(prefix, ns)
@@ -197,7 +247,7 @@ class StarlightDataset(Dataset):
                 for triple in triples:
                     _raw_graph_add(sg, triple)
                 sg._build_registry_from_store()
-                self._sg_cache[str(identifier)] = sg
+                self._register_sg(sg)
 
         elif format == 'nq12':
             from starlight.parsers.ntriples12 import parse_nquads12
@@ -210,7 +260,7 @@ class StarlightDataset(Dataset):
                 sg = self._load_context(identifier)
                 for triple in triples:
                     sg.add(triple)
-                self._sg_cache[str(identifier)] = sg
+                self._register_sg(sg)
 
         elif format == 'trix12':
             from starlight.parsers.trix12 import parse_trix12_named
@@ -219,8 +269,9 @@ class StarlightDataset(Dataset):
                 sg = self._load_context(identifier)
                 for triple in triples:
                     sg.add(triple)
-                self._sg_cache[str(identifier)] = sg
+                self._register_sg(sg)
 
+        self._raw_execution_graph = None
         return self
 
     # ------------------------------------------------------------------
@@ -238,15 +289,19 @@ class StarlightDataset(Dataset):
         return node
 
     def _build_raw_execution_graph(self) -> Dataset:
-        """Build a plain Dataset containing all raw triples including encoding triples.
+        """Build (and cache) a plain Dataset containing all raw triples including encoding triples.
 
-        When the SPARQL engine evaluates ``GRAPH ?g { }`` with a variable graph, it
-        calls ``store.contexts()`` then ``context.triples()`` on each context.
-        Because the store holds ``StarlightGraph`` instances as context objects,
-        ``triples()`` would filter encoding triples and break triple-term patterns.
-        Running the rewritten query against a plain ``Dataset`` built here
-        (whose context objects are plain ``Graph`` instances) sidesteps this.
+        rdflib's Memory store stores the actual StarlightGraph Python objects as
+        context keys.  When the SPARQL engine evaluates GRAPH ?g it calls
+        contexts() and then triples() on each returned object — which would
+        invoke StarlightGraph.triples() and filter encoding triples, breaking
+        the rewritten SPARQL 1.1 triple-term patterns.  A separate Dataset with
+        plain Graph contexts sidesteps this.
+
+        The result is cached and reused until the next parse() or update() call.
         """
+        if self._raw_execution_graph is not None:
+            return self._raw_execution_graph
         raw = Dataset()
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
@@ -254,6 +309,7 @@ class StarlightDataset(Dataset):
             raw_ctx = raw.get_context(sg.identifier)
             for t in _raw_triples(sg, (None, None, None)):
                 raw_ctx.add(t)
+        self._raw_execution_graph = raw
         return raw
 
     def query(self, query_object, processor='sparql', result='sparql',
@@ -304,6 +360,7 @@ class StarlightDataset(Dataset):
                    use_store_provided=use_store_provided, **kwargs)
         for sg in self._sg_cache.values():
             sg._build_registry_from_store()
+        self._raw_execution_graph = None
         return None
 
     def serialize(self, destination=None, format='trig', **kwargs) -> str | None:

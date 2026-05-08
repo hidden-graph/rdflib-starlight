@@ -312,42 +312,6 @@ class TestQ8:
 
 
 # ---------------------------------------------------------------------------
-# Q9 — Nested triple term
-# ---------------------------------------------------------------------------
-
-NESTED_DATASET = DATASET + """
-:verifStmt rdf:reifies <<( <<( :bob :knows :dave )>> :believedBy :alice )>> .
-"""
-
-
-@pytest.fixture
-def g9():
-    sg = StarlightGraph()
-    sg.parse(data=NESTED_DATASET, format='turtle12')
-    return sg
-
-
-class TestQ9:
-    def test_nested_components_bind(self, g9):
-        r = g9.query("""
-            PREFIX :   <http://example.org/>
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            SELECT ?stmt ?innerS ?innerP ?innerO ?outerP ?outerO WHERE {
-              ?stmt rdf:reifies <<( <<( ?innerS ?innerP ?innerO )>> ?outerP ?outerO )>> .
-            }
-        """)
-        assert len(r.bindings) == 1
-        row = r.bindings[0]
-        vs = r.vars
-        assert row[vs[0]] == URIRef(EX + 'verifStmt')
-        assert row[vs[1]] == URIRef(EX + 'bob')
-        assert row[vs[2]] == URIRef(EX + 'knows')
-        assert row[vs[3]] == URIRef(EX + 'dave')
-        assert row[vs[4]] == URIRef(EX + 'believedBy')
-        assert row[vs[5]] == URIRef(EX + 'alice')
-
-
-# ---------------------------------------------------------------------------
 # Q10 — Reifier and triple term as a unit
 # ---------------------------------------------------------------------------
 

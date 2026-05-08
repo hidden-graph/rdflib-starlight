@@ -137,15 +137,6 @@ class TestParseTriG12:
         g1 = ds.get_context(G1)
         assert len(g1) == 3  # s/p/o, stmt1/reifies/TT, stmt1/confidence/0.9
 
-    def test_nested_triple_term(self):
-        ds = StarlightDataset()
-        ds.parse(data=TRIG_NESTED_TT, format='trig12')
-        g1 = ds.get_context(G1)
-        inner = TripleTerm(ex('a'), ex('b'), ex('c'))
-        outer = TripleTerm(inner, ex('p'), ex('o'))
-        objs = list(g1.objects(ex('stmt'), RDF_REIFIES))
-        assert outer in objs
-
 
 # ---------------------------------------------------------------------------
 # StarlightGraph API on named contexts
@@ -425,3 +416,133 @@ class TestNQ12MultiGraph:
         ds2.parse(data=out, format='trig12')
         assert ds2.get_context(G1).has_triple_term(ex('alice'), ex('knows'), ex('bob'))
         assert ds2.get_context(G2).has_triple_term(ex('bob'), ex('likes'), ex('carol'))
+
+
+# ---------------------------------------------------------------------------
+# Persistent store lifecycle — open() / close()
+# ---------------------------------------------------------------------------
+
+TRIG_TWO_GRAPHS = f"""\
+@prefix ex: <{EX}> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+GRAPH <{EX}graph1> {{
+  ex:stmt1 rdf:reifies <<( ex:alice ex:knows ex:bob )>> .
+}}
+
+GRAPH <{EX}graph2> {{
+  ex:stmt2 rdf:reifies <<( ex:bob ex:likes ex:carol )>> .
+}}
+"""
+
+
+class TestDatasetStoreLifecycle:
+    """Verify open()/close() API using the built-in Memory store.
+
+    The Memory store's open() is a no-op so these tests exercise the API
+    contract (registries rebuilt, contexts accessible) without requiring an
+    external backend package.
+    """
+
+    def test_open_populates_sg_cache(self):
+        """open() discovers all contexts and caches StarlightGraph instances."""
+        ds = StarlightDataset()
+        ds.parse(data=TRIG_TWO_GRAPHS, format='trig12')
+        ds._sg_cache.clear()
+        ds.open('')
+        assert str(G1) in ds._sg_cache
+        assert str(G2) in ds._sg_cache
+
+    def test_open_rebuilds_tt_registries(self):
+        """open() restores TripleTerm registries in each context."""
+        ds = StarlightDataset()
+        ds.parse(data=TRIG_TWO_GRAPHS, format='trig12')
+        for sg in list(ds._sg_cache.values()):
+            sg._tt_nodes.clear()
+            sg._tt_registry.clear()
+        ds._sg_cache.clear()
+        ds.open('')
+        assert ds.get_context(G1).has_triple_term(
+            URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob')
+        )
+        assert ds.get_context(G2).has_triple_term(
+            URIRef(EX+'bob'), URIRef(EX+'likes'), URIRef(EX+'carol')
+        )
+
+    def test_open_invalidates_raw_cache(self):
+        """open() clears the raw execution graph cache."""
+        ds = StarlightDataset()
+        ds.parse(data=TRIG_TWO_GRAPHS, format='trig12')
+        _ = ds._build_raw_execution_graph()
+        assert ds._raw_execution_graph is not None
+        ds.open('')
+        assert ds._raw_execution_graph is None
+
+    def test_close_does_not_raise(self):
+        ds = StarlightDataset()
+        ds.open('')
+        ds.close()
+
+    def test_close_with_commit(self):
+        ds = StarlightDataset()
+        ds.open('')
+        ds.close(commit_pending_transaction=True)
+
+
+# ---------------------------------------------------------------------------
+# Raw execution graph cache invalidation on context mutation
+# ---------------------------------------------------------------------------
+
+class TestRawCacheInvalidation:
+    """add()/addN()/remove() on a context must invalidate the dataset's raw cache."""
+
+    def _ds_with_cache(self):
+        ds = StarlightDataset()
+        ds.parse(data=TRIG_TWO_GRAPHS, format='trig12')
+        _ = ds._build_raw_execution_graph()   # warm the cache
+        assert ds._raw_execution_graph is not None
+        return ds
+
+    def test_add_invalidates_cache(self):
+        ds = self._ds_with_cache()
+        sg = ds.get_context(G1)
+        sg.add((URIRef(EX+'x'), URIRef(EX+'p'), URIRef(EX+'y')))
+        assert ds._raw_execution_graph is None
+
+    def test_add_triple_term_invalidates_cache(self):
+        ds = self._ds_with_cache()
+        sg = ds.get_context(G1)
+        sg.add((URIRef(EX+'s'), RDF_REIFIES,
+                TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))))
+        assert ds._raw_execution_graph is None
+
+    def test_addN_invalidates_cache(self):
+        ds = self._ds_with_cache()
+        sg = ds.get_context(G1)
+        sg.addN([(URIRef(EX+'x'), URIRef(EX+'p'), URIRef(EX+'y'), sg)])
+        assert ds._raw_execution_graph is None
+
+    def test_remove_invalidates_cache(self):
+        ds = self._ds_with_cache()
+        sg = ds.get_context(G1)
+        sg.remove((URIRef(EX+'stmt1'), RDF_REIFIES, None))
+        assert ds._raw_execution_graph is None
+
+    def test_cache_rebuilt_on_next_query(self):
+        """After invalidation, the next query rebuilds the cache with fresh data."""
+        ds = self._ds_with_cache()
+        sg = ds.get_context(G1)
+        new_triple = (URIRef(EX+'x'), URIRef(EX+'p'), URIRef(EX+'y'))
+        sg.add(new_triple)
+        assert ds._raw_execution_graph is None   # invalidated
+        # query forces rebuild
+        q = f'SELECT ?s ?p ?o WHERE {{ GRAPH <{EX}graph1> {{ ?s ?p ?o }} }}'
+        rows = list(ds.query(q))
+        assert ds._raw_execution_graph is not None  # rebuilt
+        assert any(str(r[0]) == EX+'x' for r in rows)
+
+    def test_unregistered_sg_has_no_callback(self):
+        """A StarlightGraph not part of a dataset has no callback — no error."""
+        sg = StarlightGraph()
+        assert sg._invalidate_callback is None
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))  # must not raise

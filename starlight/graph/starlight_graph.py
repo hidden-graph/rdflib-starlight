@@ -22,6 +22,9 @@ SL_TRIPLE_TERM  = URIRef(SL_NS + 'TripleTerm')   # kept for export / backward co
 SL_REIFICATION  = URIRef(SL_NS + 'Reification')  # kept for export / backward compat
 RDF_REIFIES     = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 
+# Valid backend mode identifiers
+VALID_BACKENDS = frozenset({'rdf-1.1', 'rdf-star', 'rdf-1.2'})
+
 # Predicates used in the internal TripleTerm URIRef encoding
 _ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
 
@@ -54,13 +57,125 @@ class StarlightGraph(Graph):
     serialization, etc.) are inherited and work without modification.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, backend: str = 'rdf-1.1', **kwargs):
+        if backend not in VALID_BACKENDS:
+            raise ValueError(f"backend must be one of {sorted(VALID_BACKENDS)}, got {backend!r}")
         super().__init__(*args, **kwargs)
-        self._tt_registry: dict = {}   # canonical (s_key, p, o_key) -> URIRef
-        self._tt_nodes: dict = {}      # URIRef -> TripleTerm
+        self._backend = backend
+        self._tt_registry: dict = {}   # canonical (s_key, p, o_key) -> URIRef (rdf-1.1 only)
+        self._tt_nodes: dict = {}      # URIRef -> TripleTerm (rdf-1.1 only)
+        self._invalidate_callback = None  # set by StarlightDataset to clear raw query cache
+
+    @property
+    def _is_native(self) -> bool:
+        """True when using a native RDF 1.2 backend (no tt:HASH encoding)."""
+        return self._backend in ('rdf-star', 'rdf-1.2')
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Native backend (rdf-star / rdf-1.2)
+    # ------------------------------------------------------------------
+
+    def _store_http(self) -> tuple:
+        """Return (query_url, update_url, extra_headers) from the backing store.
+
+        SPARQLUpdateStore pre-encodes credentials as an Authorization header
+        in store.kwargs['headers'] rather than exposing a raw auth tuple.
+        Raises RuntimeError if the store does not expose HTTP endpoints
+        (e.g. in-memory stores).
+        """
+        store = self.store
+        q = getattr(store, 'query_endpoint', None)
+        u = getattr(store, 'update_endpoint', None)
+        if not q or not u:
+            raise RuntimeError(
+                f"backend={self._backend!r} requires a store with query_endpoint "
+                f"and update_endpoint (e.g. SPARQLUpdateStore); "
+                f"got {type(store).__name__}"
+            )
+        extra_headers = getattr(store, 'kwargs', {}).get('headers', {})
+        return q, u, extra_headers
+
+    def _native_add(self, s, p, obj) -> None:
+        from starlight.backends.native import sparql_term, http_update
+        from starlight.model.triple import TripleTerm as _TT
+        q_url, u_url, hdrs = self._store_http()
+        s_str = sparql_term(s,   self._backend)
+        p_str = sparql_term(p,   self._backend)
+        o_str = sparql_term(obj, self._backend)
+        # INSERT DATA disallows triple terms in subject position and nested
+        # triple terms in some stores (SPARQL 1.2 restriction); INSERT...WHERE
+        # with an empty WHERE is equivalent but unrestricted.
+        has_tt = isinstance(s, _TT) or isinstance(obj, _TT)
+        if has_tt:
+            sparql = (
+                f'INSERT {{ GRAPH <{self.identifier}> '
+                f'{{ {s_str} {p_str} {o_str} . }} }} WHERE {{}}'
+            )
+        else:
+            sparql = (
+                f'INSERT DATA {{ GRAPH <{self.identifier}> '
+                f'{{ {s_str} {p_str} {o_str} . }} }}'
+            )
+        http_update(u_url, sparql, hdrs)
+
+    def _native_triples(self, triple):
+        from starlight.backends.native import sparql_term, http_select, http_ask
+        q_url, _, hdrs = self._store_http()
+        s, p, o = triple
+
+        free = []
+        def _slot(node, var: str) -> str:
+            if node is None:
+                free.append(var)
+                return f'?{var}'
+            return sparql_term(node, self._backend)
+
+        s_str = _slot(s, 's')
+        p_str = _slot(p, 'p')
+        o_str = _slot(o, 'o')
+        pattern = f'{s_str} {p_str} {o_str}'
+        graph_clause = f'GRAPH <{self.identifier}>'
+
+        if not free:
+            sparql = f'ASK {{ {graph_clause} {{ {pattern} . }} }}'
+            if http_ask(q_url, sparql, hdrs):
+                yield (s, p, o)
+            return
+
+        sel = ' '.join(f'?{v}' for v in free)
+        sparql = f'SELECT {sel} WHERE {{ {graph_clause} {{ {pattern} . }} }}'
+        vars_, bindings = http_select(q_url, sparql, hdrs)
+        from rdflib.term import Variable
+        for row in bindings:
+            yield (
+                row.get(Variable('s'), s) if 's' in free else s,
+                row.get(Variable('p'), p) if 'p' in free else p,
+                row.get(Variable('o'), o) if 'o' in free else o,
+            )
+
+    def _native_query(self, query_object, processor='sparql', result='sparql',
+                      initNs=None, initBindings=None, use_store_provided=True, **kwargs):
+        from starlight.backends.native import (
+            rewrite_12_to_backend, http_select, http_ask, build_result,
+        )
+        q_url, _, hdrs = self._store_http()
+
+        if isinstance(query_object, str):
+            query_object = rewrite_12_to_backend(query_object, self._backend)
+
+        sparql = query_object
+        ql = sparql.strip().upper()
+        if ql.startswith('ASK'):
+            from rdflib.query import Result as RDFResult
+            r = RDFResult('ASK')
+            r.askAnswer = http_ask(q_url, sparql, hdrs)
+            return r
+
+        vars_, bindings = http_select(q_url, sparql, hdrs)
+        return build_result(vars_, bindings)
+
+    # ------------------------------------------------------------------
+    # Internal helpers (rdf-1.1 encoding layer)
     # ------------------------------------------------------------------
 
     def _coerce_tt(self, node):
@@ -181,9 +296,11 @@ class StarlightGraph(Graph):
     def _build_registry_from_store(self):
         """Scan the underlying store for TT_NS URIRefs and populate the registry.
 
-        Used by from_rdflib() after bulk-copying an existing parsed graph.
-        Handles nested triple terms by reconstructing inner TTs first.
+        No-op for native backends (rdf-star, rdf-1.2) which store triple terms
+        directly in the backend rather than via tt:HASH encoding.
         """
+        if self._is_native:
+            return
         tt_uris = set(
             s for s, p, o in _raw_triples(self, (None, RDF.subject, None))
             if isinstance(s, URIRef) and str(s).startswith(TT_NS)
@@ -206,6 +323,35 @@ class StarlightGraph(Graph):
             reconstruct(uri)
 
     # ------------------------------------------------------------------
+    # Persistent store lifecycle
+    # ------------------------------------------------------------------
+
+    def open(self, configuration, create: bool = False):
+        """Open a persistent store and rebuild the TripleTerm registry.
+
+        Delegates to rdflib's Graph.open() then scans the store for any
+        existing tt:HASH encoding triples so TripleTerms are immediately
+        usable without a separate rebuild call.
+
+        The store backend (e.g. Sleepycat, rdflib-sqlalchemy) is not a
+        Starlight dependency — install and configure it separately, then
+        pass store='StoreName' to the constructor before calling open().
+
+        Example::
+
+            sg = StarlightGraph(store='Sleepycat')
+            sg.open('/path/to/db', create=True)
+        """
+        result = super().open(configuration, create)
+        if not self._is_native:
+            self._build_registry_from_store()
+        return result
+
+    def close(self, commit_pending_transaction: bool = False):
+        """Close the underlying store, optionally committing pending writes."""
+        self.store.close(commit_pending_transaction=commit_pending_transaction)
+
+    # ------------------------------------------------------------------
     # Overridden rdflib.Graph methods
     # ------------------------------------------------------------------
 
@@ -222,19 +368,100 @@ class StarlightGraph(Graph):
             s, p, obj = s_or_triple
         else:
             s = s_or_triple
+        if isinstance(s, TripleTerm):
+            raise ValueError(
+                "RDF 1.2: triple terms are not permitted in subject position of a triple."
+            )
+        if self._is_native:
+            self._native_add(s, p, obj)
+            if self._invalidate_callback:
+                self._invalidate_callback()
+            return
         super().add((self._coerce_tt(s), p, self._coerce_tt(obj)))
+        if self._invalidate_callback:
+            self._invalidate_callback()
 
     def addN(self, quads):
-        """Add multiple quads. Coerces TripleTerms in subject/object positions."""
-        super().addN([(self._coerce_tt(s), p, self._coerce_tt(o), ctx) for s, p, o, ctx in quads])
+        """Add multiple quads, encoding all TripleTerms in one store.addN() call.
+
+        Unlike the default Graph.addN() → store.addN() path, this override
+        collects encoding triples (rdf:subject/predicate/object for each
+        TripleTerm) together with the main triples so that all inserts are
+        submitted to the store in a single batch.  On transaction-aware
+        backends (SQLAlchemy, Sleepycat) this means one commit instead of
+        three per triple term, which is significantly faster for bulk loads.
+        """
+        if self._is_native:
+            for s, p, o, c in quads:
+                if isinstance(c, Graph) and c.identifier is self.identifier:
+                    if isinstance(s, TripleTerm):
+                        raise ValueError(
+                            "RDF 1.2: triple terms are not permitted in subject position of a triple."
+                        )
+                    self._native_add(s, p, o)
+            if self._invalidate_callback:
+                self._invalidate_callback()
+            return self
+
+        all_quads: list = []
+
+        def _collect(tt: TripleTerm) -> URIRef:
+            key = tt._key()
+            if key in self._tt_registry:
+                return self._tt_registry[key]
+            s_n = _collect(tt.subject) if isinstance(tt.subject, TripleTerm) else \
+                  (_collect(TripleTerm(*tt.subject))
+                   if isinstance(tt.subject, tuple) and len(tt.subject) == 3 else tt.subject)
+            o_n = _collect(tt.object) if isinstance(tt.object, TripleTerm) else \
+                  (_collect(TripleTerm(*tt.object))
+                   if isinstance(tt.object, tuple) and len(tt.object) == 3 else tt.object)
+            s_key = str(self._tt_registry.get(tt.subject._key(), s_n)
+                        if isinstance(tt.subject, TripleTerm) else s_n)
+            o_key = str(self._tt_registry.get(tt.object._key(),  o_n)
+                        if isinstance(tt.object,  TripleTerm) else o_n)
+            uri = URIRef(TT_NS + tt_hash(s_key, str(tt.predicate), o_key))
+            self._tt_registry[key] = uri
+            self._tt_nodes[uri] = tt
+            all_quads.append((uri, RDF.subject,   s_n,          self))
+            all_quads.append((uri, RDF.predicate, tt.predicate, self))
+            all_quads.append((uri, RDF.object,    o_n,          self))
+            return uri
+
+        def _enc(node):
+            if isinstance(node, TripleTerm):
+                return _collect(node)
+            if isinstance(node, tuple) and len(node) == 3 and all(x is not None for x in node):
+                return _collect(TripleTerm(*node))
+            return node
+
+        for s, p, o, c in quads:
+            if not (isinstance(c, Graph) and c.identifier is self.identifier):
+                continue
+            if isinstance(s, TripleTerm):
+                raise ValueError(
+                    "RDF 1.2: triple terms are not permitted in subject position of a triple."
+                )
+            all_quads.append((_enc(s), p, _enc(o), self))
+
+        self.store.addN(all_quads)
+        if self._invalidate_callback:
+            self._invalidate_callback()
+        return self
 
     def remove(self, triple):
         """Remove a triple. Returns immediately if a TripleTerm in the pattern is not registered."""
         s, p, obj = triple
+        if self._is_native:
+            super().remove((s, p, obj))
+            if self._invalidate_callback:
+                self._invalidate_callback()
+            return
         s_n, o_n = self._coerce_tt_read(s), self._coerce_tt_read(obj)
         if s_n is _TT_NOT_FOUND or o_n is _TT_NOT_FOUND:
             return
         super().remove((s_n, p, o_n))
+        if self._invalidate_callback:
+            self._invalidate_callback()
 
     def triples(self, triple):
         """Iterate triples matching the pattern. Filters internal encoding triples.
@@ -248,6 +475,9 @@ class StarlightGraph(Graph):
         is EX.alice.  The fan-out is O(k) where k is the number of registered
         triple terms that match the pattern.
         """
+        if self._is_native:
+            yield from self._native_triples(triple)
+            return
         s, p, obj = triple
         s_wild = self._is_tt_wildcard(s)
         o_wild = self._is_tt_wildcard(obj)
@@ -315,6 +545,8 @@ class StarlightGraph(Graph):
     def __contains__(self, triple):
         """Test triple membership. Returns False if a TripleTerm in the pattern is not registered."""
         s, p, obj = triple
+        if self._is_native:
+            return any(True for _ in self._native_triples((s, p, obj)))
         s_n, o_n = self._coerce_tt_read(s), self._coerce_tt_read(obj)
         if s_n is _TT_NOT_FOUND or o_n is _TT_NOT_FOUND:
             return False
@@ -515,7 +747,16 @@ class StarlightGraph(Graph):
         that encoding triples (rdf:subject/predicate/object on tt: URIRefs) are
         visible to the SPARQL engine. Results are post-processed to restore tt:HASH
         URIRefs back to TripleTerm objects.
+
+        For native backends (rdf-star, rdf-1.2) the query is routed through
+        _native_query which uses the backend's own triple-term syntax.
         """
+        if self._is_native:
+            return self._native_query(
+                query_object, processor=processor, result=result,
+                initNs=initNs, initBindings=initBindings,
+                use_store_provided=use_store_provided, **kwargs,
+            )
         from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
         if isinstance(query_object, str):
             query_object = rewrite_sparql12_to_11(query_object)
@@ -539,12 +780,20 @@ class StarlightGraph(Graph):
               initNs=None, initBindings=None, use_store_provided=True, **kwargs):
         """Execute a SPARQL UPDATE. Triple-term patterns are rewritten to SPARQL 1.1.
 
-        Supported:
+        For native backends (rdf-star, rdf-1.2) this raises NotImplementedError
+        until the native write path is implemented.
+
+        Supported (rdf-1.1 path):
         - ``<<( )>>`` in WHERE clauses (DELETE/INSERT WHERE forms)
         - Ground ``<<( )>>`` in INSERT DATA / DELETE DATA blocks
         - ``<<( )>>`` in INSERT/DELETE templates (subject position): evaluated
           via a post-processing SELECT pass against the same WHERE clause
         """
+        if self._is_native:
+            raise NotImplementedError(
+                f'SPARQL UPDATE on native backend {self._backend!r} not yet implemented; '
+                'use add() / addN() / remove() instead.'
+            )
         from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
         if isinstance(update_object, str):
             update_object = self._preprocess_data_updates(update_object)

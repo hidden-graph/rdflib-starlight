@@ -119,15 +119,6 @@ class TestParse:
         objs = list(g2.objects(ex('stmt1'), RDF_REIFIES))
         assert tt in objs
 
-    def test_triple_term_as_subject_roundtrip(self):
-        g = StarlightGraph()
-        tt = TripleTerm(ex('s'), ex('p'), ex('o'))
-        g.add((tt, ex('claimedBy'), ex('alice')))
-        _, g2 = round_trip(g)
-        assert g2.has_triple_term(ex('s'), ex('p'), ex('o'))
-        subjs = list(g2.subjects(ex('claimedBy'), ex('alice')))
-        assert tt in subjs
-
     def test_encoding_triples_not_visible_after_parse(self):
         g = StarlightGraph()
         tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
@@ -172,15 +163,6 @@ class TestParse:
         _, g2 = round_trip(g)
         objs = list(g2.objects(ex('s'), ex('age')))
         assert any(str(o) == '42' for o in objs)
-
-    def test_nested_triple_term_roundtrip(self):
-        g = StarlightGraph()
-        inner = TripleTerm(ex('a'), ex('b'), ex('c'))
-        outer = TripleTerm(inner, ex('p'), ex('o'))
-        g.add((ex('stmt'), RDF_REIFIES, outer))
-        _, g2 = round_trip(g)
-        objs = list(g2.objects(ex('stmt'), RDF_REIFIES))
-        assert outer in objs
 
     def test_multiple_triple_terms_roundtrip(self):
         g = StarlightGraph()
