@@ -45,10 +45,10 @@ RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 EX_CONF     = URIRef(EX + 'confidence')
 GRAPH_URI   = URIRef(EX + 'bench')
 
-N_TT        = 50_000
-N_REIF      = N_TT // 10   # 5,000
+N_TT        = 250_000
+N_REIF      = N_TT // 10   # 25,000
 REPEATS     = 3
-PRED_BOUND  = URIRef(f'{EX}n50000')  # predicate shared by i=0,200,400,... → ~250 TTs in reif set
+PRED_BOUND  = URIRef(f'{EX}n50000')  # predicate shared by i=0,200,400,... → N/200 TTs in reif set
 
 # ---------------------------------------------------------------------------
 # Dataset

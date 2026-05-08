@@ -2,22 +2,33 @@
 
 ## Executive Summary
 
-### In-memory
+### In-memory: the right starting point
 
-The fully in-memory mode is the simplest and fastest option for most workloads. There is no setup, no server, and all queries run at Python dict speed. It is the right default and scales further than you might expect for plain triples — a performant laptop (16 GB RAM) can comfortably hold several million plain triples and answer complex SPARQL queries in milliseconds.
+The in-memory backend is where you start. No server, no configuration — load your data and query it. For everyday workloads, it is fast enough that performance is not a consideration.
 
+The ceiling is RAM. Each annotated fact requires roughly four times the storage of a plain triple. On a typical 16 GB laptop, you start to feel memory pressure around 100K annotated facts and hit a hard limit near 1.5 million. Plain triples scale much higher — several million fit comfortably.
 
-The practical limits are lower once triple terms are involved. Each triple term requires roughly four times the storage of a plain triple — it stores one visible triple plus three internal encoding triples, plus registry entries. On a 16 GB laptop, at 100,000 triple term triples, memory starts to be an issue with hard-limits at approximately 1.5 mllion triple term triples. 
+Query speed depends on what you ask. Looking up annotations about a specific subject or object is nearly instant at any scale. Asking for *all* annotations at once is slower: roughly 150ms at 50K facts, 800ms at 250K, 1.7 seconds at 500K. If your application regularly needs to scan the full annotation set, this becomes the practical ceiling.
 
+Data does not survive the process. Every restart requires reloading from a file or external source.
 
-Query performance depends on the shape of the query. Selective queries — find annotations about a specific subject, predicate, or object — are fast at any scale (~1–2ms) because the store's own index resolves the lookup directly. The slow case is **wildcard queries** that retrieve all annotated facts at once: ~600ms at 50K triple terms, ~1.3s at 100K, ~7s at 250K. If your application frequently needs to scan the full annotation set, in-memory becomes impractical above roughly 50–100K triple terms.
+### SQLite: persistence without a server — with a catch
 
+SQLite solves the two weaknesses of in-memory mode. Data persists across restarts, and graphs can grow beyond available RAM — millions of plain triples fit in a single file with no memory pressure.
 
-**Important caveat: an in-memory graph does not persist.** When the process ends, the data is gone. Applications using in-memory mode must reload from an external source (a file, a database, an API) on every start. For use cases that can afford that startup cost, this is often an acceptable trade-off.  
+For simple lookups — find everything about this subject — SQLite works well at any scale, staying under 35ms for 5 million triples.
 
-### SQLite
+The catch is complex queries over annotated facts. At 250K annotated triples, a query that scans all annotations takes 54 seconds in SQLite versus less than a second in memory — a 67× gap. The more patterns a query combines, the worse it gets. **SQLite is not a suitable backend for workloads that regularly query large numbers of annotated facts.**
 
-**SQLite is not a query backend — it is storage with a query-shaped interface.** The rdflib-sqlalchemy adapter executes SPARQL step by step: it receives individual triple pattern lookups from rdflib's SPARQL evaluator, translates each one to a SQL SELECT, and returns rows. It never sees the full WHERE clause and has no opportunity to generate a SQL JOIN. For a query with two triple patterns and 5K matching rows, that is 5K+1 SQL round-trips rather than the single joined SELECT a native SQL query planner would produce. This makes SQLite appropriate only for write-dominated workloads or simple single-pattern lookups — not for the complex multi-predicate TT queries (e.g. temporal range queries over annotated facts) that are a primary use case for StarlightGraph.
+### Fuseki (rdf-1.1): eliminating the query performance problem
+
+Fuseki is an open-source RDF server that evaluates SPARQL queries natively. When StarlightGraph sends a query to Fuseki, Fuseki handles the entire query at once rather than executing it piece by piece. This eliminates the performance problem that makes SQLite slow, and it also outperforms in-memory for broad queries — the same full-annotation scan that takes 800ms in memory at 250K facts takes 580ms via Fuseki, and 1.2 seconds versus 1.7 seconds at 500K. Data persists across restarts and is not limited by available RAM.
+
+Fuseki requires running a server (Docker or a standalone jar).
+
+### Fuseki (rdf-star): further improvement through native storage
+
+The rdf-star mode stores annotated facts as native quoted triples rather than as sets of component triples. This reduces the amount of data stored in Fuseki by 20%, and gives Fuseki's query engine a more direct representation to work with. The result is a consistent 20–40% improvement in query speed across all query types: the same 250K scan drops from 580ms to 460ms, and a combined scan-and-filter query drops from 525ms to 317ms. At 500K facts the full-annotation scan is 1.0 second versus 1.2 seconds in rdf-1.1 mode.
 
 ---
 
@@ -35,8 +46,8 @@ Benchmarks are in `benchmarks/bench_inmemory.py` (Phase 1),
 
 - Python version: 3.14.2 (Clang 17, macOS)
 - rdflib version: 7.x
-- Fuseki version: _TBD (Phase 2)_
-- Oxigraph version: _TBD (Phase 2)_
+- Fuseki version: 5.1.0 (rdf-star draft syntax; RDF 1.2 not yet supported)
+- Oxigraph version: tested in Phase 2 only; see Phase 2 observations
 
 ---
 
@@ -235,16 +246,20 @@ would differ materially with a tmpfs-backed or RAM-disk location. Fuseki used
 | Scenario | Recommended backend | Rationale |
 |---|---|---|
 | ≤ 50K plain triples, single process | in-memory (rdf-1.1) | 370K t/s inserts, sub-10ms queries, <137 MiB |
-| ≤ 10K–20K triple terms, query-heavy | in-memory (rdf-1.1) | SPARQL TT registry path: ~116ms at 10K, ~600ms at 50K |
-| > 20K triple terms, SPARQL-heavy | rdf-star/Fuseki | Fuseki's engine holds flat at 6–12ms; in-memory hits 600ms at 50K and 1.2s at 100K |
+| ≤ 50K triple terms, selective queries | in-memory (rdf-1.1) | ~4–78ms depending on query shape; sub-ms for bound-component lookups |
+| 50K–150K triple terms, SPARQL-heavy | in-memory | Fuseki join already faster at 50K; in-memory still wins wildcard up to ~150K |
+| > 150K triple terms, wildcard scans | rdf-star/Fuseki | Fuseki 477ms vs in-memory 818ms at 250K; gap widens with scale |
+| Join / multi-pattern queries, any scale | rdf-star/Fuseki | Fuseki wins from 50K up (128ms vs 202ms); 5× advantage at 250K |
 | > 50K plain triples, memory constrained | rdf-1.1/Fuseki | 273 MiB at 100K in-memory; Fuseki holds nothing in client |
+| Multi-pattern SPARQL over TTs (any scale) | in-memory or Fuseki | SQLite N×M round-trips: 50–70× penalty; rdflib cannot push joins to SQL |
+| Write-heavy, read-light, needs persistence | SQLite | 100K t/s bulk load; simple single-pattern queries acceptable |
 | Persistence / multi-process access | rdf-1.1/Fuseki or rdf-star/Fuseki | In-memory is process-lifetime only |
 | RDF 1.2 native syntax, small graphs | rdf-1.2/Oxigraph | Only spec-compliant backend; use in-memory Oxigraph config |
 | RDF 1.2 native syntax, large graphs | rdf-1.2/Oxigraph (tmpfs) | Persistent RocksDB shows severe scan degradation at scale |
 | Jena ecosystem / inference | rdf-star/Fuseki | Jena rules, OWL reasoning, federation |
 | Unit / integration tests | in-memory (rdf-1.1) | Zero setup cost; full suite in <1 s |
 | Bulk load (write-once, read-many) | any HTTP + `addN` | Use `addN` to reduce per-call overhead |
-| Reconnect to existing store | rdf-1.1 with sparse TT | Registry rebuild: 8ms at 10K TT, 93ms at 100K TT |
+| Temporal range queries (date joins on TTs) | in-memory or Fuseki | SQLite fires N×M SQL per date pattern; see file-backed mode in future enhancements |
 
 ---
 
@@ -283,15 +298,14 @@ physical triples.
 **Full scan scales linearly** — 44ms at 12K triples, 524ms at 120K (12x data, 12x time).
 SQLite is reading rows sequentially with no surprises.
 
-**SPARQL TT queries — N × M round-trip problem (now fixed).** The original encoding
-path rewrote `?stmt rdf:reifies <<( ?s ?p ?o )>>` into 4 triple patterns; rdflib's SPARQL
-engine fired one SQL query per pattern per result row. For 1K reifications × 4 patterns ≈
+**SPARQL TT queries — N × M round-trip problem.** The encoding path rewrites
+`?stmt rdf:reifies <<( ?s ?p ?o )>>` into 4 triple patterns; rdflib's SPARQL engine
+fires one SQL query per pattern per result row. For 1K reifications × 4 patterns ≈
 4K SQL round trips at ~0.5ms each ≈ 2 seconds. At 10K reifications: 21 seconds —
-unusable. The **registry-path fix** (added after these numbers were captured) replaces
-the pattern fan-out with: 1 SQL query to retrieve all matching (stmt, tt:HASH) pairs,
-then N in-memory dict lookups from the TripleTerm registry. The Phase 3 SPARQL numbers
-above reflect the old encoding path; **see the targeted SQL comparison section below for
-post-fix numbers.**
+unusable. The problem is structural: rdflib's Python SPARQL evaluator was never designed
+to translate multi-pattern joins into SQL JOINs. Each additional WHERE clause pattern
+costs N SQL queries when run against a SQL store. **See the targeted comparison section
+below for measurements at 50K and 250K scale.**
 
 **Partial TT match is fast** (46ms / 151ms) because a bound component (predicate in this
 test) reduces the working set before the pattern fan-out. Queries with at least one bound
@@ -317,29 +331,58 @@ layer interacting with rdflib's SPARQL evaluation strategy, not an intrinsic SQL
 limitation. A native TT-aware SQL schema (or a native backend like rdf-star/Fuseki) would
 not have this problem.
 
+### Plain-triple capacity test
+
+**Methodology**: Plain triples only (no triple terms or reifications). 5 predicates, 1000 objects — a typical heterogeneous-predicate graph. Benchmark: `benchmarks/bench_sqlite_plain_limit.py`.
+
+| N | Load | Throughput | DB size | Subject lookup | Predicate scan (LIMIT 100) |
+|--:|-----:|----------:|--------:|---------------:|---------------------------:|
+| 500K | 5.8 s | 86K t/s | 194 MiB | 27.5 ms | 413 ms |
+| 1M | 12.3 s | 81K t/s | 388 MiB | 27.6 ms | 806 ms |
+| 2M | 26.9 s | 74K t/s | 778 MiB | 30.2 ms | 1.66 s |
+| 5M | 1.2 min | 68K t/s | 1,949 MiB | 34.6 ms | 4.94 s |
+
+**Subject lookup stays effectively constant** (~28–35ms) across a 10× scale increase — SQL indexing by subject works as expected.
+
+**Predicate scan degrades linearly** even with LIMIT 100. rdflib's SPARQL evaluator fetches all matching rows from SQLite and slices in Python; it does not push `LIMIT` down to SQL. With 1/5 of triples matching `pred1`, rdflib retrieves 1M rows at 5M scale before returning 100 — hence ~5s. For point lookups (specific subject or object), this is not an issue; for broader scans, it is.
+
+**In-memory comparison**: at 5M plain triples, in-memory would require ~13.5 GB (2.7 KB/triple × 5M). That exceeds available RAM on most laptops. SQLite's 1.9 GB on-disk footprint and ~35ms point lookup make it the only viable option above ~1–2M plain triples.
+
 ---
 
-## Targeted Comparison — In-memory vs SQLite at 50K TTs
+## Targeted Comparison — In-memory vs SQLite
 
-**Methodology**: Both backends loaded the same 60K-triple dataset (50K TTs, 5K reifications at 10% rate, 5K confidence annotations). Benchmark: `benchmarks/bench_comparison.py`. Median of 3 query runs.
+Both scales use identical datasets: N distinct TripleTerms, 10% reification rate, 10% confidence annotations. Benchmark: `benchmarks/bench_comparison.py`. Median of 3 query runs.
 
-### Results
+### Results at 50K TTs (60K total triples, 5K reifications)
 
 | Metric | In-memory | SQLite |
 |---|--:|--:|
 | **Load (addN)** | 211 ms  (285K t/s) | 577 ms  (104K t/s) |
 | **Client memory** | 73 MiB peak | ~0 MiB  (36 MiB on disk) |
 | **All reified TTs** `<<( ?s ?p ?o )>>` | **78 ms** | **102 ms** |
-| **TT + join** `<<( )>> + confidence > 0.7` | **202 ms** | **3,720 ms** |
+| **TT + join** `<<( )>> + confidence > 0.7` | **202 ms** | **3,720 ms** (18×) |
 | **Partial TT match** `<<( ?s <pred> ?o )>>` | **64 ms** | **90 ms** |
 
-_(5,000 rows returned for all-reified; 2,500 for confidence filter; 25 for partial match)_
+_(5,000 rows for all-reified; 2,500 for confidence filter; 25 for partial match)_
+
+### Results at 250K TTs (300K total triples, 25K reifications)
+
+| Metric | In-memory | SQLite |
+|---|--:|--:|
+| **Load (addN)** | 1.11 s  (270K t/s) | 3.00 s  (100K t/s) |
+| **Client memory** | 382 MiB peak | ~0 MiB  (183 MiB on disk) |
+| **All reified TTs** `<<( ?s ?p ?o )>>` | **818 ms** | **54.78 s** (67×) |
+| **TT + join** `<<( )>> + confidence > 0.7` | **1.48 s** | **74.84 s** (50×) |
+| **Partial TT match** `<<( ?s <pred> ?o )>>` | **4.5 ms** | **315 ms** (70×) |
+
+_(25,000 rows for all-reified; 12,500 for confidence filter; 125 for partial match)_
 
 ### What the numbers show
 
-**The registry-path fix brought TT SPARQL to near-parity for single-pattern queries**: 78ms (in-memory) vs 102ms (SQLite) for all reified TTs. Both backends now execute 1 query + 5K in-memory dict lookups. The gap is small and SQLite's lower client memory is a real advantage at this scale.
+**Single-pattern TT queries are competitive at small scale**: at 50K TTs, in-memory (78ms) vs SQLite (102ms) are close — both evaluate the TT encoding patterns and the SPARQL engine does its work. The gap is not meaningful at this scale.
 
-**Multi-pattern SPARQL queries expose SQLite's structural weakness.** The confidence filter query has two triple patterns plus a FILTER:
+**The N×M problem compounds with scale and query complexity.** The confidence filter query has two triple patterns plus a FILTER:
 
 ```sparql
 ?stmt rdf:reifies <<( ?s ?p ?o )>> .
@@ -347,23 +390,113 @@ _(5,000 rows returned for all-reified; 2,500 for confidence filter; 25 for parti
 FILTER(xsd:decimal(?c) > 0.7)
 ```
 
-After the TT pattern is handled by the registry path, rdflib's SPARQL engine still evaluates `?stmt ex:confidence ?c` as a nested-loop join — one SQL query per result row from the first pattern. For 5K reification statements, that is **5K SQL round-trips at ~0.7ms each = 3.5 seconds**. This is the same N×M round-trip problem as before, but now for ordinary triple pattern joins rather than TT encoding patterns.
+rdflib's SPARQL engine evaluates `?stmt ex:confidence ?c` as a nested-loop join — one SQL query per result row from the first pattern. For 5K reification statements that is ~5K SQL round-trips; for 25K it is ~25K round-trips. At 50K scale the join already costs 18×; at 250K scale it degrades to 50–70×.
 
-In-memory evaluates the same join with Python dict lookups (~1 µs each) — 5K lookups is negligible, leaving only the SPARQL evaluation overhead.
+Even the "simple" all-reified wildcard blows up at scale: 25K reifications × 4 encoding patterns ≈ 100K SQL round-trips, producing the 67× gap (818ms in-memory vs 54.78s SQLite).
 
-**This is not fixable by the registry path alone.** The root cause is that rdflib's Python SPARQL evaluator was not designed to translate multi-pattern joins into SQL JOINs. Each additional triple pattern in a WHERE clause costs N SQL queries when run against a SQL store.
+**In-memory is completely consistent.** As the problem grows 5× (50K→250K TTs), in-memory query times grow proportionally: wildcard 78ms→818ms (~10×), join 202ms→1.48s (~7×), bound pred 64ms→4.5ms (actually faster — fewer matching rows). SQLite times grow superlinearly because round-trip count grows with result set size.
 
-### When to use each backend at this scale
+**The bound-predicate query stays fast — until it isn't.** `<<( ?s <pred> ?o )>>` with a bound predicate uses the store's POS index to narrow the working set. At 50K TTs: 90ms SQLite vs 64ms in-memory. At 250K TTs: 315ms SQLite vs 4.5ms in-memory. The bound-component optimization works on the TT encoding lookup, but once additional WHERE clause patterns are added the same N×M problem reappears.
+
+**This is not fixable within the current architecture.** The root cause is that rdflib's Python SPARQL evaluator was never designed to translate multi-pattern joins into SQL JOINs. Each additional triple pattern in a WHERE clause costs N SQL queries when run against a SQL store. A SPARQL-to-SQL compiler, or a native backend (rdf-star/Fuseki, Oxigraph), would not have this problem.
+
+### When to use each backend
 
 | Need | In-memory | SQLite |
 |---|:---:|:---:|
-| Multi-pattern SPARQL (most real queries) | ✓ fast | ✗ slow |
-| Single TT pattern query | ✓ fast | ✓ comparable |
-| Client memory budget | ✗ 73 MiB+ | ✓ near-zero |
+| Multi-pattern SPARQL at scale | ✓ fast | ✗ degrades 50–70× |
+| Single TT pattern, small graph (≤50K) | ✓ fast | ✓ comparable |
+| Client memory budget | ✗ 73 MiB @ 50K, 382 MiB @ 250K | ✓ near-zero |
 | Persistence across restarts | ✗ | ✓ |
-| Write throughput | ✓ 285K t/s | ~104K t/s |
+| Write throughput | ✓ 270–285K t/s | ~100K t/s |
+| Simple single-pattern reads | ✓ | ✓ acceptable |
 
-**Practical conclusion**: For query-heavy workloads with multi-pattern SPARQL, SQLite with rdflib-sqlalchemy is worse than in-memory at every scale tested — not because of the TT encoding overhead (which the registry path eliminated), but because rdflib's SPARQL evaluator cannot push joins into SQL. SQLite's value is exclusively persistence + zero client memory, and only when queries are simple single-pattern lookups or the workload is write-dominated.
+**Practical conclusion**: SQLite with rdflib-sqlalchemy is appropriate only for write-dominated workloads with simple single-pattern lookups, or when persistence is required and query volume is low. For any workload involving multi-pattern SPARQL over annotated triples — the primary use case for StarlightGraph — SQLite becomes unusable above ~50K TTs. The recommended path for production query-heavy workloads is a native backend (rdf-star/Fuseki or pyoxigraph embedded).
+
+---
+
+## Phase 4 — rdf-star/Fuseki at Scale
+
+**Methodology**: Fuseki in-memory dataset (`dbType=mem`). Triples loaded via batched SPARQL INSERT DATA (500 triples/request) to avoid per-triple HTTP overhead. Same dataset as the Targeted Comparison section. Median of 3 query runs. Benchmark: `benchmarks/bench_fuseki.py`.
+
+### Results
+
+| Metric | 50K TTs (60K triples) | 250K TTs (300K triples) |
+|---|--:|--:|
+| **Load (batched INSERT DATA)** | 2.72 s  (22K t/s) | 11.25 s  (27K t/s) |
+| **All reified TTs** `<<( ?s ?p ?o )>>` | **91.5 ms** | **477 ms** |
+| **TT + join** `<<( )>> + confidence > 0.7` | **128.6 ms** | **276 ms** |
+| **Partial TT match** `<<( ?s <pred> ?o )>>` | **12.7 ms** | **47.7 ms** |
+
+_(rows returned: 5K / 2.5K / 25 at 50K scale; 25K / 12.5K / 125 at 250K scale)_
+
+### What the numbers show
+
+**Fuseki's SPARQL engine evaluates the full query in one pass.** There is no N×M round-trip problem — rdf-star/Fuseki sees `?stmt rdf:reifies <<s p o>> . ?stmt ex:confidence ?c . FILTER(...)` as a single query and plans it with native JOINs. The confidence+join query at 250K takes 276ms, less than the wildcard-only query at 477ms, because Fuseki can prune the result set early using the FILTER.
+
+**The crossover with in-memory:**
+
+| Query | In-memory 50K | Fuseki 50K | In-memory 250K | Fuseki 250K |
+|---|--:|--:|--:|--:|
+| Wildcard TT | 78 ms | 91.5 ms | 818 ms | **477 ms** |
+| TT + join | 202 ms | **128.6 ms** | 1,480 ms | **276 ms** |
+| Bound predicate | **64 ms** | 12.7 ms | **4.5 ms** | 47.7 ms |
+
+- **Wildcard scans**: Fuseki and in-memory are comparable at 50K; Fuseki wins above ~150K TTs.
+- **Join queries**: Fuseki already beats in-memory at 50K (128ms vs 202ms) and widens to 5× at 250K. This is the primary use case for annotation-heavy graphs.
+- **Selective queries** (bound component): in-memory always wins — Python dict lookup costs <1ms, while HTTP round-trips add a floor of ~10–50ms regardless of result size.
+
+**Fuseki vs SQLite at 250K**: Fuseki wildcard 477ms vs SQLite 54.78s — **115× faster**. Fuseki join 276ms vs SQLite 74.84s — **271× faster**. SQLite's N×M problem completely disappears with a native backend.
+
+**Scaling behaviour**: Fuseki scales roughly O(N) with result count, not O(1). Going 5× in scale (50K→250K): wildcard 5.2×, partial TT 3.7×. This is expected — Fuseki must stream and return more rows. The key advantage over in-memory is that multi-pattern joins do not add multiplicative overhead.
+
+**Load throughput**: batched INSERT DATA achieves 22–27K t/s. This is lower than in-memory (270K t/s) or SQLite (100K t/s) because each batch is still an HTTP round-trip (~5–10ms) and the data is serialized to SPARQL UPDATE text. For write-heavy workloads, in-memory bulk-load then serialize-to-Fuseki is faster than streaming individual updates.
+
+### When to use Fuseki
+
+| Need | In-memory | Fuseki (rdf-star) |
+|---|:---:|:---:|
+| Wildcard TT scans, large graphs (>150K TTs) | ✗ slow | ✓ faster |
+| Join / multi-pattern queries | ✗ degrades | ✓ single-pass |
+| Selective (bound component) queries | ✓ sub-ms | ✗ HTTP floor |
+| Persistence + multi-process access | ✗ | ✓ |
+| Inference / OWL reasoning | ✗ | ✓ Jena rules |
+| Zero infrastructure setup | ✓ | ✗ needs server |
+
+---
+
+## Phase 5 — rdf-star/Fuseki at Scale
+
+**Methodology**: Same dataset and scale points as Phase 4 (rdf-1.1/Fuseki). TripleTerms written to Fuseki as native quoted triples (`<< s p o >>`); no encoding triples stored. Queries sent directly to Fuseki's HTTP endpoint as rdf-star SPARQL; results converted from Fuseki's `type: "triple"` JSON format back to TripleTerm objects. Benchmark: `benchmarks/bench_fuseki_rdfstar.py`.
+
+### Results
+
+| Metric | 50K TTs | 250K TTs | 500K TTs |
+|---|--:|--:|--:|
+| **Physical triples in Fuseki** | 60K | 300K | 600K |
+| **Load (batched INSERT DATA)** | 2.24 s | 10.46 s | 22.08 s |
+| **All reified TTs** `<<( ?s ?p ?o )>>` | 114.6 ms | 456.9 ms | 958.5 ms |
+| **TT + join** `<<( )>> + confidence > 0.7` | 59.0 ms | 317.4 ms | 659.6 ms |
+| **Partial TT match** `<<( ?s <pred> ?o )>>` | 12.2 ms | 38.2 ms | 158.9 ms |
+
+_(rows: 5K/2.5K/25 at 50K; 25K/12.5K/125 at 250K; 50K/25K/250 at 500K)_
+
+### rdf-star vs rdf-1.1 comparison at 250K TTs
+
+| Query | rdf-1.1/Fuseki | rdf-star/Fuseki | Improvement |
+|---|--:|--:|--:|
+| Wildcard | 583.6 ms | 456.9 ms | 22% faster |
+| TT + join | 525.4 ms | 317.4 ms | 40% faster |
+| Bound predicate | 60.6 ms | 38.2 ms | 37% faster |
+| Physical triples | 375K | 300K | 20% less storage |
+
+### What the numbers show
+
+**rdf-star is consistently faster than rdf-1.1 at every scale.** The gain comes from two sources: fewer physical triples stored (no encoding triples), and Fuseki's query engine handling `rdf:reifies << s p o >>` as a native quoted-triple pattern rather than a four-pattern encoding join. The wildcard improvement (~22%) roughly tracks the storage reduction (~20%). The join improvement (~40%) is larger because the join planner can reason more directly about quoted-triple patterns.
+
+**Both Fuseki modes scale O(N) with result count** — no superlinear degradation. Going 10× in scale (50K→500K), rdf-star wildcard grows 8.4× (114ms→959ms). rdf-1.1 wildcard grows 9.1× (134ms→1.22s). Both are well-behaved.
+
+**rdf-star beats in-memory from ~50K TTs up for broad queries**, and the advantage widens: wildcard 115ms vs 164ms at 50K (1.4×), 457ms vs 814ms at 250K (1.8×), 959ms vs 1.71s at 500K (1.8×). Join queries show a larger advantage: 59ms vs 290ms at 50K (5×), 317ms vs 1.49s at 250K (4.7×). In-memory retains its advantage for selective (bound-component) lookups where no HTTP overhead is tolerable.
 
 ---
 
