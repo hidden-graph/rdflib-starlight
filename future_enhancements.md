@@ -51,27 +51,16 @@ A lightweight `n3-12` alias that routes to `turtle12` gives full coverage for N3
 
 ### Serializer
 
-**Annotation folding (`{| |}` syntax)**
-Currently annotations serialize as separate `rdf:reifies` blocks:
-```turtle
-:s :p :o .
-_:b0 :ann :val ;
-    rdf:reifies <<( :s :p :o )>> .
-```
-A smarter serializer detects this pattern and folds it into inline annotation syntax:
-```turtle
-:s :p :o {| :ann :val |} .
-```
-Requires recognizing that a reification bnode's only non-annotation triple is `rdf:reifies`, and that the triple term matches an asserted triple in the graph.
-
-**Named reifier folding (`~ :id` syntax)**
-Same as annotation folding but for named reifiers. When a named URI is the reifier, emit:
-```turtle
-:s :p :o ~ :stmt {| :ann :val |} .
-```
+**Annotation folding (`{| |}` syntax)** — ✅ Done
+All five reification cases are handled by `_build_fold_map()` in `serialize_turtle12()`:
+1. Asserted triple, anonymous reifier → `{| ann val |}` inline syntax
+2. Asserted triple, named reifier → `~ :r {| ann val |}` tilde syntax
+3. Unasserted triple, anonymous reifier(s) → `<<( s p o )>>` used as subject (multiple anonymous reifiers on same TT are merged)
+4. Unasserted triple, named reifier → explicit subject (identity preserved, no compact form)
+5. Many-to-one (NYT pattern: one reifier, multiple TTs) → explicit subject
 
 **Reification shorthand as subject (`<< s p o >>` syntax)**
-When a reification node appears only as subject (never as object), the RDF 1.2 Turtle grammar allows the `<< s p o >>` subject shorthand rather than a separate triple.
+When a reification node appears only as subject (never as object), the RDF 1.2 Turtle grammar allows the `<< s p o >>` subject shorthand (without parens) rather than a separate triple. Currently not implemented — `<<( s p o )>>` with parens is always used.
 
 ---
 
