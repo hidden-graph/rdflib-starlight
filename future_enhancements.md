@@ -12,20 +12,11 @@
 | `longturtle12` | `longturtle` | ✅ | ✅ | One triple per line; no subject/predicate grouping |
 | `trix12` | `trix`, `application/trix` | ✅ | ✅ | XML `<graph>/<triple>` blocks; `<tripleTerm>` for RDF 1.2 |
 | `rdfxml12` | `xml`, `application/rdf+xml` | ✅ | ✅ | `<rdf:TripleTerm>` elements; inline for objects, nodeID for subjects |
-| `n3` / `n3-12` / `text/n3` | — | ✅* | — | Routes to `turtle12`; covers N3 files that use Turtle-compatible syntax |
-
-*N3 files using genuine logic constructs (`@forAll`, formulae) are not supported. Decide whether to add a graceful rdflib fallback that silently drops formulae.
+| `n3` / `n3-12` / `text/n3` | — | ✅ | — | Routes to `turtle12`; N3 logic constructs (formulae, `@forAll`) are out of scope for RDF 1.2 |
 
 ---
 
 ## Open Items
-
-### Graph API
-
-**`from_rdflib` zero-copy variant**
-`from_rdflib()` currently copies all triples into a new graph. A zero-copy variant would wrap the source graph's store directly, useful for large graphs already loaded by rdflib tooling.
-
----
 
 ### Backends
 
