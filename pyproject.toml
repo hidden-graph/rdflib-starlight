@@ -40,6 +40,9 @@ Issues = "https://github.com/johnclements/rdflib-starlight/issues"
 [tool.setuptools.packages.find]
 include = ["starlight*"]
 
+[tool.setuptools.package-data]
+starlight = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
