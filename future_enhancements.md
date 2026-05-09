@@ -59,8 +59,8 @@ All five reification cases are handled by `_build_fold_map()` in `serialize_turt
 4. Unasserted triple, named reifier → explicit subject (identity preserved, no compact form)
 5. Many-to-one (NYT pattern: one reifier, multiple TTs) → explicit subject
 
-**Reification shorthand as subject (`<< s p o >>` syntax)**
-When a reification node appears only as subject (never as object), the RDF 1.2 Turtle grammar allows the `<< s p o >>` subject shorthand (without parens) rather than a separate triple. Currently not implemented — `<<( s p o )>>` with parens is always used.
+**Reification shorthand as subject (`<< s p o >>` syntax)** — ✅ Done
+`<<( s p o )>>` (triple term, with parens) is now rejected in Turtle subject position — `SyntaxError` is raised by the parser. The serializer emits `<< s p o >>` (no parens, reification shorthand) when a TripleTerm appears as a subject in the output. In SPARQL patterns, `<< s p o >>` in subject position uses the annotation-subject rewriter (Pass 3) to match via a reifier variable; `<<( s p o )>>` in SPARQL subject position still rewrites to bind the triple term bnode directly (valid SPARQL 1.2 syntax, though it will not match RDF data where the reifier is the actual subject).
 
 ---
 

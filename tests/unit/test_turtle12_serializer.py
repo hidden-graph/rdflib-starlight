@@ -48,12 +48,22 @@ class TestTtl12Notation:
         assert ':c' in out
 
     def test_tt_as_subject_written_with_angle_brackets(self, parser):
+        # << >> (no parens) is the reification shorthand in subject position
         raw = parser.parse(
             '@prefix : <http://example/> .\n'
-            '<<( :a :b :c )>> :p :o .\n'
+            '<< :a :b :c >> :p :o .\n'
         )
         out = serialize_turtle12(raw)
-        assert '<<(' in out
+        assert '<< ' in out
+        assert '<<(' not in out
+
+    def test_tt_term_as_subject_rejected(self, parser):
+        # <<( )>> in subject position is a syntax error per RDF 1.2
+        with pytest.raises((SyntaxError, Exception)):
+            parser.parse(
+                '@prefix : <http://example/> .\n'
+                '<<( :a :b :c )>> :p :o .\n'
+            )
 
     def test_no_sl_tripleTerm_type_in_output(self, parser):
         raw = parser.parse(
@@ -95,9 +105,10 @@ class TestRoundTrip:
         assert isomorphic(raw1, raw2)
 
     def test_tt_as_subject(self):
+        # << >> (no parens) is the reification shorthand; serializer round-trips it
         raw1, raw2, _ = _roundtrip(
             '@prefix : <http://example/> .\n'
-            '<<( :a :b :c )>> :p :o .\n'
+            '<< :a :b :c >> :p :o .\n'
         )
         assert isomorphic(raw1, raw2)
 
@@ -124,15 +135,13 @@ class TestRoundTrip:
 
     def test_shared_tt(self):
         # Two anonymous reifiers on the same unasserted TT are merged into one
-        # <<( )>> subject block — no Turtle 1.2 syntax can express multiple
-        # anonymous unasserted reifiers in a single statement, and the parser
-        # resolves all <<( )>> subject occurrences to the same TripleTerm node.
+        # << >> subject block — the serializer emits reification shorthand (no parens).
         _, raw2, out = _roundtrip(
             '@prefix : <http://example/> .\n'
             '[] rdf:reifies <<( :a :b :c )>> ; :p :o .\n'
             '[] rdf:reifies <<( :a :b :c )>> ; :p1 :o1 .\n'
         )
-        assert '<<(' in out
+        assert '<< ' in out
         assert 'rdf:reifies' not in out
         from rdflib import URIRef
         tt_triples = [(p, o) for s, p, o in raw2.triples((None, None, None))]
@@ -141,9 +150,10 @@ class TestRoundTrip:
         assert 'http://example/p1' in preds
 
     def test_tt_as_subject_with_property(self):
+        # << >> (reification shorthand) in subject position round-trips
         raw1, raw2, _ = _roundtrip(
             '@prefix : <http://example/> .\n'
-            '<<( :a :b :c )>> :funny true .\n'
+            '<< :a :b :c >> :funny true .\n'
         )
         assert isomorphic(raw1, raw2)
 
@@ -156,15 +166,14 @@ class TestRoundTrip:
         assert isomorphic(raw1, raw2)
 
     def test_ex1_full(self):
-        # Two anonymous reifiers + direct TT property all merge into one
-        # <<( )>> subject block.
+        # Two anonymous reifiers + direct TT property all merge into one << >> subject block.
         _, raw2, out = _roundtrip(
             '@prefix : <http://example/> .\n'
             '[] :p :o ; rdf:reifies <<( :a :b :c )>> .\n'
             '[] :p1 :o1 ; rdf:reifies <<( :a :b :c )>> .\n'
-            '<<( :a :b :c )>> :funny true .\n'
+            '<< :a :b :c >> :funny true .\n'
         )
-        assert '<<(' in out
+        assert '<< ' in out
         assert 'rdf:reifies' not in out
         preds = {str(p) for _, p, _ in raw2.triples((None, None, None))}
         assert 'http://example/p' in preds

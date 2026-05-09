@@ -26,7 +26,7 @@ DATASET = """
 
 :bob :knows :carol {| :since "2020" ; :via :LinkedIn |} .
 
-<<( :bob :knows :carol )>> :verifiedBy :ResearchTeam .
+<< :bob :knows :carol >> :verifiedBy :ResearchTeam .
 """
 
 
@@ -66,7 +66,7 @@ class TestQ1:
             }
         """)
         stmts = _uris(r.bindings, r.vars[0])
-        assert len(stmts) == 2
+        assert len(stmts) == 3  # stmt1 (named) + anon from {| |} + anon from << >>
 
     def test_no_result_for_unknown_triple_term(self, g):
         r = g.query("""
@@ -85,10 +85,11 @@ class TestQ1:
 
 class TestQ2:
     def test_triple_term_as_subject(self, g):
+        # << >> (reification shorthand) in SPARQL subject position matches via reifier
         r = g.query("""
             PREFIX :   <http://example.org/>
             SELECT ?who WHERE {
-              <<( :bob :knows :carol )>> :verifiedBy ?who .
+              << :bob :knows :carol >> :verifiedBy ?who .
             }
         """)
         who = {row[r.vars[0]] for row in r.bindings}
@@ -138,7 +139,7 @@ class TestQ4:
               ?stmt rdf:reifies <<( ?s ?p ?o )>> .
             }
         """)
-        assert len(r.bindings) == 2
+        assert len(r.bindings) == 3  # stmt1 + anon from {| |} + anon from << >>
 
 
 # ---------------------------------------------------------------------------
@@ -303,12 +304,13 @@ class TestQ8:
               FILTER(?pred != rdf:reifies)
             }
         """)
-        assert len(r.bindings) == 4
+        assert len(r.bindings) == 5  # 2 from stmt1 + 2 from {| |} + 1 from << >> reifier
         preds = {row[r.vars[1]] for row in r.bindings}
-        assert URIRef(EX + 'since')      in preds
-        assert URIRef(EX + 'via')        in preds
-        assert URIRef(EX + 'confidence') in preds
-        assert URIRef(EX + 'source')     in preds
+        assert URIRef(EX + 'since')       in preds
+        assert URIRef(EX + 'via')         in preds
+        assert URIRef(EX + 'confidence')  in preds
+        assert URIRef(EX + 'source')      in preds
+        assert URIRef(EX + 'verifiedBy')  in preds
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +341,7 @@ class TestQ10:
               ?stmt rdf:reifies ?tt .
             }
         """)
-        assert len(r.bindings) == 2
+        assert len(r.bindings) == 3  # stmt1 + anon from {| |} + anon from << >>
 
 
 # ---------------------------------------------------------------------------
@@ -348,10 +350,11 @@ class TestQ10:
 
 class TestQ11:
     def test_ask_true(self, g):
+        # << >> (reification shorthand) in SPARQL matches via reifier of the triple
         r = g.query("""
             PREFIX :   <http://example.org/>
             ASK {
-              <<( :bob :knows :carol )>> :verifiedBy :ResearchTeam .
+              << :bob :knows :carol >> :verifiedBy :ResearchTeam .
             }
         """)
         assert r.askAnswer is True
@@ -360,7 +363,7 @@ class TestQ11:
         r = g.query("""
             PREFIX :   <http://example.org/>
             ASK {
-              <<( :bob :knows :carol )>> :verifiedBy :nobody .
+              << :bob :knows :carol >> :verifiedBy :nobody .
             }
         """)
         assert r.askAnswer is False

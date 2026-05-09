@@ -272,8 +272,10 @@ class _Expander:
         extras = []
 
         if _is_qt_term(s):
-            s, e = self.qt_to_json(s)
-            extras.extend(e)
+            raise SyntaxError(
+                "Triple term <<( )>> is not valid in subject position (RDF 1.2). "
+                "Use << s p o >> (no parentheses) for a reification shorthand."
+            )
         elif _has_reifier(s):
             tt_str, reif = _get_reifier_parts(s)
             tb, e = self.qt_to_json(tt_str)

@@ -57,11 +57,19 @@ def _node_to_ttl(node, ns_mgr):
 
 
 def _tt_to_str(tt, ns_mgr):
-    """Recursively format a TripleTerm as <<( s p o )>>."""
-    s = _tt_to_str(tt.subject,  ns_mgr) if isinstance(tt.subject,  TripleTerm) else _node_to_ttl(tt.subject,  ns_mgr)
+    """Recursively format a TripleTerm as <<( s p o )>> (object position)."""
+    s = _node_to_ttl(tt.subject,  ns_mgr)
     p = _node_to_ttl(tt.predicate, ns_mgr)
-    o = _tt_to_str(tt.object,   ns_mgr) if isinstance(tt.object,   TripleTerm) else _node_to_ttl(tt.object,   ns_mgr)
+    o = _tt_to_str(tt.object, ns_mgr) if isinstance(tt.object, TripleTerm) else _node_to_ttl(tt.object, ns_mgr)
     return f'<<( {s} {p} {o} )>>'
+
+
+def _tt_to_reif_str(tt, ns_mgr):
+    """Format a TripleTerm as << s p o >> (reification shorthand, subject position)."""
+    s = _node_to_ttl(tt.subject,  ns_mgr)
+    p = _node_to_ttl(tt.predicate, ns_mgr)
+    o = _tt_to_str(tt.object, ns_mgr) if isinstance(tt.object, TripleTerm) else _node_to_ttl(tt.object, ns_mgr)
+    return f'<< {s} {p} {o} >>'
 
 
 def _fmt(node, ns_mgr):
@@ -219,7 +227,11 @@ def serialize_turtle12(graph) -> str:
 
     triple_lines = []
     for subj in sorted(by_subj.keys(), key=_sort_key):
-        s_str = _fmt_collect(subj, ns_mgr)
+        if isinstance(subj, TripleTerm):
+            _collect_tt(subj)
+            s_str = _tt_to_reif_str(subj, ns_mgr)
+        else:
+            s_str = _fmt_collect(subj, ns_mgr)
         pred_items = sorted(by_subj[subj].items(), key=lambda x: str(x[0]))
         n_preds = len(pred_items)
 
