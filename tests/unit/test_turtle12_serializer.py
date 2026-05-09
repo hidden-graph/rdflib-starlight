@@ -123,12 +123,22 @@ class TestRoundTrip:
         assert isomorphic(raw1, raw2)
 
     def test_shared_tt(self):
-        raw1, raw2, _ = _roundtrip(
+        # Two anonymous reifiers on the same unasserted TT are merged into one
+        # <<( )>> subject block — no Turtle 1.2 syntax can express multiple
+        # anonymous unasserted reifiers in a single statement, and the parser
+        # resolves all <<( )>> subject occurrences to the same TripleTerm node.
+        _, raw2, out = _roundtrip(
             '@prefix : <http://example/> .\n'
             '[] rdf:reifies <<( :a :b :c )>> ; :p :o .\n'
             '[] rdf:reifies <<( :a :b :c )>> ; :p1 :o1 .\n'
         )
-        assert isomorphic(raw1, raw2)
+        assert '<<(' in out
+        assert 'rdf:reifies' not in out
+        from rdflib import URIRef
+        tt_triples = [(p, o) for s, p, o in raw2.triples((None, None, None))]
+        preds = {str(p) for p, _ in tt_triples}
+        assert 'http://example/p' in preds
+        assert 'http://example/p1' in preds
 
     def test_tt_as_subject_with_property(self):
         raw1, raw2, _ = _roundtrip(
@@ -146,13 +156,20 @@ class TestRoundTrip:
         assert isomorphic(raw1, raw2)
 
     def test_ex1_full(self):
-        raw1, raw2, _ = _roundtrip(
+        # Two anonymous reifiers + direct TT property all merge into one
+        # <<( )>> subject block.
+        _, raw2, out = _roundtrip(
             '@prefix : <http://example/> .\n'
             '[] :p :o ; rdf:reifies <<( :a :b :c )>> .\n'
             '[] :p1 :o1 ; rdf:reifies <<( :a :b :c )>> .\n'
             '<<( :a :b :c )>> :funny true .\n'
         )
-        assert isomorphic(raw1, raw2)
+        assert '<<(' in out
+        assert 'rdf:reifies' not in out
+        preds = {str(p) for _, p, _ in raw2.triples((None, None, None))}
+        assert 'http://example/p' in preds
+        assert 'http://example/p1' in preds
+        assert 'http://example/funny' in preds
 
 
 # ---------------------------------------------------------------------------

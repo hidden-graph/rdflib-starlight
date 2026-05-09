@@ -79,17 +79,86 @@ def _sort_key(node):
     return (2, str(getattr(node, '_key', lambda: node)()))
 
 
+_RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
+
+
+def _build_fold_map(sg):
+    """Return (fold_map, folded_reifiers, tt_subj_map, tt_subj_reifiers).
+
+    fold_map: (s, p, o) -> list of (reifier, anns, is_named)
+        Asserted base triple. Anonymous reifiers → {| |}; named → ~ :r {| |}.
+    folded_reifiers: reifier nodes suppressed as explicit subjects (asserted fold).
+    tt_subj_map: TripleTerm -> {pred: [obj]}
+        Unasserted base triple, anonymous reifier → <<( )>> used as subject.
+    tt_subj_reifiers: reifier nodes suppressed as explicit subjects (unasserted fold).
+
+    Not foldable (stay as explicit subjects):
+    - Reifier annotates multiple triples (e.g. NYT reported X and Y).
+    - Reifier appears as an object elsewhere.
+    - Unasserted base triple with a named reifier (identity must be preserved).
+    """
+    fold_map: dict = defaultdict(list)
+    folded_reifiers: set = set()
+    tt_subj_map: dict = defaultdict(lambda: defaultdict(list))
+    tt_subj_reifiers: set = set()
+
+    objects_elsewhere = {o for _, _, o in sg.triples((None, None, None))}
+
+    reifies_count: dict = defaultdict(int)
+    for reifier, _, _ in sg.triples((None, _RDF_REIFIES, None)):
+        reifies_count[reifier] += 1
+
+    for reifier, _, tt in sg.triples((None, _RDF_REIFIES, None)):
+        if not isinstance(tt, TripleTerm):
+            continue
+        if reifies_count[reifier] > 1:
+            continue
+        if reifier in objects_elsewhere:
+            continue
+
+        is_named = isinstance(reifier, URIRef) and not str(reifier).startswith(RR_NS)
+        base = (tt.subject, tt.predicate, tt.object)
+        base_asserted = sg.__contains__((base[0], base[1], base[2]))
+
+        anns = sorted(
+            [(p, o) for _, p, o in sg.triples((reifier, None, None))
+             if p != _RDF_REIFIES],
+            key=lambda x: str(x[0]),
+        )
+
+        if base_asserted:
+            # Asserted: anonymous → {| |}  /  named → ~ :r {| |}
+            fold_map[base].append((reifier, anns, is_named))
+            folded_reifiers.add(reifier)
+        elif not is_named:
+            # Unasserted anonymous → <<( s p o )>> as subject.
+            # Multiple anonymous reifiers on the same TT are merged: there is
+            # no Turtle 1.2 syntax for multiple unasserted anonymous reifiers
+            # in a single statement, and the parser resolves all <<( )>>
+            # subject occurrences to the same TripleTerm node anyway.
+            for ann_p, ann_o in anns:
+                tt_subj_map[tt][ann_p].append(ann_o)
+            tt_subj_reifiers.add(reifier)
+        # Otherwise → stays as explicit subject
+
+    return fold_map, folded_reifiers, tt_subj_map, tt_subj_reifiers
+
+
 def serialize_turtle12(graph) -> str:
     """Serialize a StarlightGraph or rdflib.Graph (with SL encoding) to Turtle 1.2.
 
     Triple terms are emitted as <<( s p o )>>. Internal encoding triples
     (sl:TripleTerm, sl:Reification, rdf:subject/predicate/object) are omitted.
+    Reifier bnodes whose annotated triple is asserted in the graph are folded
+    into inline {| ann_pred ann_val |} syntax on the base triple.
     Only namespace prefixes actually used in the graph are emitted.
     """
     from starlight.graph.starlight_graph import StarlightGraph
 
     sg = graph if isinstance(graph, StarlightGraph) else StarlightGraph.from_rdflib(graph)
     ns_mgr = sg.namespace_manager
+
+    fold_map, folded_reifiers, tt_subj_map, tt_subj_reifiers = _build_fold_map(sg)
 
     # --- Pass 1: generate triple lines, collecting used URIRef strings ---
     by_subj: dict = defaultdict(lambda: defaultdict(list))
@@ -113,8 +182,40 @@ def serialize_turtle12(graph) -> str:
             elif isinstance(part, URIRef):
                 used_uris.add(str(part))
 
+    suppressed = folded_reifiers | tt_subj_reifiers
     for s, p, o in sg.triples((None, None, None)):
-        by_subj[s][p].append(o)
+        if s not in suppressed:
+            by_subj[s][p].append(o)
+
+    # Unasserted anonymous reifiers: TripleTerm becomes the subject directly.
+    for tt, pred_map in tt_subj_map.items():
+        for p, objs in pred_map.items():
+            for o in objs:
+                by_subj[tt][p].append(o)
+
+    def _ann_block(base_triple):
+        """Return inline annotation suffix for a foldable asserted base triple.
+
+        Anonymous reifiers → ' {| ann val ; ... |}'
+        Named reifiers     → ' ~ :r {| ann val |}' or ' ~ :r' if no annotations
+        Multiple reifiers  → blocks concatenated with a space between them
+        """
+        entries = fold_map.get(base_triple)
+        if not entries:
+            return ''
+        blocks = []
+        for reifier, anns, is_named in entries:
+            ann_parts = []
+            for ann_p, ann_o in anns:
+                used_uris.add(str(ann_p))
+                ann_parts.append(f'{_fmt_collect(ann_p, ns_mgr)} {_fmt_collect(ann_o, ns_mgr)}')
+            ann_str = ' ; '.join(ann_parts)
+            if is_named:
+                r_str = _fmt_collect(reifier, ns_mgr)
+                blocks.append(f'~ {r_str} {{| {ann_str} |}}' if ann_str else f'~ {r_str}')
+            else:
+                blocks.append(f'{{| {ann_str} |}}' if ann_str else '{|  |}')
+        return ' ' + ' '.join(blocks)
 
     triple_lines = []
     for subj in sorted(by_subj.keys(), key=_sort_key):
@@ -126,7 +227,12 @@ def serialize_turtle12(graph) -> str:
             used_uris.add(str(pred))
             p_str = _fmt(pred, ns_mgr)
             is_last_pred = (i == n_preds - 1)
-            o_combined = ', '.join(_fmt_collect(o, ns_mgr) for o in objs)
+            o_parts = []
+            for o in objs:
+                o_str = _fmt_collect(o, ns_mgr)
+                ann = _ann_block((subj, pred, o))
+                o_parts.append(o_str + ann)
+            o_combined = ', '.join(o_parts)
             end = ' .' if is_last_pred else ' ;'
 
             if i == 0:

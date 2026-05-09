@@ -1,12 +1,16 @@
 # Starlight Future Enhancements
 
-Analyze code for inefficiencie and memory problems.
-
 ## Open Design Questions
 
 - **RDF version declaration** — All four RDF 1.2 formats now emit a version hint when triple terms are present (`@version "1.2" .` for Turtle/TriG; `VERSION "1.2"` for N-Triples/N-Quads) and their parsers silently skip the declaration. No open items remain here.
 - **Annotation syntax in serializer** — Emit the compact `{| |}` annotation shorthand or always use explicit `rdf:reifies` triples? The compact form is more readable but requires pattern-matching at serialize time (see Serializer section).
-- **Backend database integration** — Two cases: (1) RDF 1.1 backend — encode TripleTerms as `tt:HASH`, rewrite SPARQL 1.2 → 1.1 before sending, restore `tt:HASH` URIRefs on return. (2) RDF 1.2 native backend — write native quoted triples, pass SPARQL 1.2 through as-is, convert the store's quoted-triple result format → `TripleTerm` on return. Target for Case 2 is **Oxigraph** (Rust-based, strong RDF 1.2 support); integration via `pyoxigraph` directly or the `rdflib-oxigraph` Store plugin — to be evaluated.
+- **Backend database integration** — Both cases are implemented. (1) RDF 1.1 backend: TripleTerms encoded as `tt:HASH` URIRefs, SPARQL 1.2 rewritten to 1.1 before sending, `tt:HASH` URIRefs restored on return. (2) RDF 1.2 native backend: native quoted triples written to Fuseki (rdf-star) and Oxigraph (rdf-1.2) via HTTP; results converted from the store's quoted-triple JSON format back to TripleTerm objects. Open item: **embedded `pyoxigraph`** (see Backends section).
+
+---
+
+## rdflib 8 Compatibility
+
+rdflib 8.0.0a0 (pre-release, from GitHub `main`) was tested against the full suite. One failure was found and fixed: `sl:Reification` marker triples injected during parsing were missing `_base_uri`, causing relative IRI subjects on `rdf:reifies` triples to be stored unresolved. The fix is in `main` (commit `60c343e`). Branch `rdf8-branch` exists for continued compatibility work when rdflib 8 reaches a stable release.
 
 ---
 
@@ -33,15 +37,6 @@ N3 is a superset of Turtle. Our Turtle 1.2 parser already handles any triple-ter
 A lightweight `n3-12` alias that routes to `turtle12` gives full coverage for N3 files that are effectively Turtle with RDF 1.2 features at near-zero cost. For files that use genuine N3 logic constructs, we could fall back to rdflib's native `n3` parser and then import the resulting plain triples into a StarlightGraph — this would silently drop formulae but would allow Starlight to accept any file rdflib can accept.
 
 *Note: decide whether we want a graceful rdflib fallback path so Starlight can parse any file rdflib handles, even when it cannot round-trip the N3-specific constructs.*
-
-**longturtle** (`longturtle`) — ✅ Implemented as `longturtle12`
-One triple per line; no subject or predicate grouping; `@version` and `@prefix` handling identical to `turtle12`. Parse routes to the Turtle 1.2 parser (longturtle is valid Turtle).
-
-**RDF/XML** (`xml`, `application/rdf+xml`, `pretty-xml`) — ✅ Implemented as `rdfxml12`
-rdflib's XML parser already handles `<rdf:TripleTerm>` (produces bnode encoding). A thin conversion step (`_convert_bnodes`) turns those bnodes into TripleTerm objects. The serializer uses ElementTree: inline `<rdf:TripleTerm>` for object-position terms, top-level `<rdf:TripleTerm rdf:nodeID="...">` for subject-position terms. Nested triple terms are handled recursively. Predicate IRIs must be QName-splittable at `#` or `/`.
-
-**TriX** (`trix`, `application/trix`) — ✅ Implemented as `trix12`
-Custom ElementTree parser/serializer. `<tripleTerm>` extension handles triple terms in both subject and object positions. Full StarlightDataset support preserving named-graph structure.
 
 ### Not applicable
 
@@ -83,7 +78,7 @@ When a reification node appears only as subject (never as object), the RDF 1.2 T
 ### Parser
 
 **Base URI resolution** — ✅ Done
-`urljoin` (RFC 3986) replaces naive string concatenation in `_to_node`. Each `@base` declaration is resolved against the previously active base, and each triple is stamped with its active base at parse time so that multiple `@base` declarations in one file each apply only to the triples that follow them. `g.base` is set to the last active base.
+`urljoin` (RFC 3986) replaces naive string concatenation in `_to_node`. Each `@base` declaration is resolved against the previously active base, and each triple is stamped with its active base at parse time so that multiple `@base` declarations in one file each apply only to the triples that follow them. `g.base` is set to the last active base. `_base_uri` is also propagated to injected `sl:Reification` marker triples so that relative IRI reifier subjects resolve correctly.
 
 ---
 
@@ -113,6 +108,29 @@ rdflib's `Memory` store stores the actual `StarlightGraph` Python objects as con
 
 ### Backends
 
+**SQLite write-through mode**
+A hybrid persistence model where SQLite is used purely as a durability layer and never as a query target. On startup the full graph is loaded from SQLite into memory; all subsequent `add()`/`remove()` calls write through to both the in-memory store and SQLite atomically; all `query()` calls run entirely in memory. SQLite is never asked to evaluate SPARQL, so the N×M round-trip problem does not apply.
+
+```python
+g = StarlightGraph.open_sqlite('graph.db')   # load into memory from SQLite
+g.add(triple)                                # writes to in-memory + SQLite
+list(g.query(sparql))                        # runs in-memory only
+```
+
+This occupies a useful position between pure in-memory (fast, no persistence) and SQLite-only (persistent, slow complex queries):
+
+| | In-memory | SQLite write-through | SQLite-only |
+|---|:---:|:---:|:---:|
+| Query speed | ✓ fast | ✓ fast | ✗ N×M penalty |
+| Persistence | ✗ | ✓ | ✓ |
+| Server required | ✗ | ✗ | ✗ |
+| Dataset fits in RAM | required | required | not required |
+| Incremental writes | ✗ | ✓ | ✓ |
+
+The write-through approach differs from the file-backed mode below in one key way: writes are incremental (each `add()` is one SQL INSERT) rather than requiring a full re-serialize on save, and recovery is immediate — no parse step on startup.
+
+Implementation notes: `add()` and `addN()` would call `super()` for the in-memory path and then issue a parameterized SQL INSERT on the SQLite connection. `remove()` issues a DELETE. A transaction context manager around `addN()` batches the SQL writes to avoid per-triple commit overhead. The startup load uses the existing `_build_registry_from_store()` path.
+
 **File-backed in-memory persistence mode**
 A `StarlightGraph` persistence model that separates storage from query execution: the graph lives entirely in memory (fast queries, no SQL round-trip overhead) but serializes to and loads from a file on disk (Turtle 1.2 or N-Triples 1.2) for durability. The motivating use case is temporal queries — e.g. "all reified triples effective between two dates" — which require joining a TT pattern with two additional date predicates. Against a SQL backend, that query triggers N SQL round-trips per pattern (rdflib's SPARQL evaluator cannot push joins into SQL); against an in-memory store the same query runs in a single SPARQL pass.
 
@@ -130,4 +148,6 @@ Possible extensions: `auto_save=True` flag to write on every mutation; async/per
 Trade-offs vs SQLite: startup cost is loading the full file (vs SQLite's registry-only rebuild); no concurrent multi-process access; all data must fit in RAM. Appropriate when the graph fits in memory and query performance matters more than write-through durability.
 
 **Direct `pyoxigraph` embedded backend**
-`pyoxigraph` (Rust bindings) provides a `Store` object with native RDF 1.2 support — no HTTP server required. `Store()` is in-memory (fast, good for unit tests); `Store(path=...)` is RocksDB-backed and persistent. A new backend mode (e.g. `'oxigraph-embedded'`) would call `pyoxigraph.Store` directly instead of the `http_*` HTTP functions, eliminating the Docker/server dependency entirely and enabling fast in-process testing against a real RDF 1.2 store. The main integration cost is translating between `pyoxigraph` term types and rdflib `URIRef`/`Literal`/`BNode`/`TripleTerm`.
+`pyoxigraph` (Rust bindings) provides a `Store` object with native RDF 1.2 support — no HTTP server required. `Store()` is in-memory; `Store(path=...)` is RocksDB-backed and persistent. A new backend mode (e.g. `'oxigraph-embedded'`) would call `pyoxigraph.Store` directly instead of the HTTP functions, eliminating the Docker/server dependency entirely and enabling fast in-process testing against a real RDF 1.2 store.
+
+The HTTP-mode benchmark (`bench_oxigraph.py`) gives a baseline: at 250K TTs, Oxigraph via HTTP delivers 168ms wildcard scans and 122ms join queries — already the fastest backend. Embedded mode would eliminate the ~30ms HTTP round-trip floor, making Oxigraph competitive on point lookups as well. The main integration cost is translating between `pyoxigraph` term types and rdflib `URIRef`/`Literal`/`BNode`/`TripleTerm`.

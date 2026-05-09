@@ -670,6 +670,8 @@ class StarlightGraph(Graph):
         format='rdfxml12'  — RDF/XML 1.2 with <rdf:TripleTerm> elements
         All other formats delegate to rdflib (no triple-term support).
         """
+        if format in ('n3', 'n3-12', 'text/n3'):
+            format = 'turtle12'
         if format in ('turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'trix12', 'rdfxml12', 'jsonld12'):
             from pathlib import Path
             if data is not None:
