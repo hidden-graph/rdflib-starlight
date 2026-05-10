@@ -1,0 +1,17 @@
+@prefix : <http://example.org/> .
+
+# Annotation shorthand — add metadata directly to a triple
+:bob :knows :carol {| :since "2020" ; :source :Wikipedia |} .
+
+# Triple term in object position — refer to a fact as a value
+:alice :says <<( :bob :knows :carol )>> .
+
+# Reification shorthand in subject position — assert something about a fact
+<< :bob :knows :carol >> :verifiedBy :ResearchTeam .
+
+# Unasserted triple term — referenced as a value, not a standalone fact
+:alice :believes <<( :bob :knows :mike )>> .
+
+# Named reifier with tilde syntax
+:bob :knows :carol ~ :stmt1 .
+:stmt1 :confidence "0.9" .
