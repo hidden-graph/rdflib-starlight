@@ -21,7 +21,7 @@ from starlight.model.encoding import TT_NS, RR_NS, tt_hash
 
 # Legacy sl: constants — kept for the intermediate build phase only;
 # stripped from the final graph by _skolemize_encoding().
-SL_NS          = 'http://starlight.org/ns#'
+SL_NS          = 'https://github.com/hidden-graph/rdflib-starlight/ns#'
 SL_TRIPLE_TERM = URIRef(SL_NS + 'TripleTerm')
 SL_REIFICATION = URIRef(SL_NS + 'Reification')
 RDF_REIFIES    = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')

@@ -22,7 +22,7 @@ RDF_SUBJECT   = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#subject>"
 RDF_PREDICATE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate>"
 RDF_OBJECT    = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#object>"
 RDF_REIFIES   = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>"
-TT_NS_PREFIX  = "http://starlight.org/ns/tt#"
+TT_NS_PREFIX  = "https://github.com/hidden-graph/rdflib-starlight/ns/tt#"
 
 _TRIPLE_FUNC_RE = _re.compile(
     r'\b(SUBJECT|PREDICATE|OBJECT)\s*\(\s*(\?[A-Za-z_][A-Za-z0-9_]*)\s*\)',

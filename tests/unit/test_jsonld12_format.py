@@ -179,7 +179,7 @@ class TestParse:
         data = json.dumps({
             '@context': {
                 'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-                'tt':  'http://starlight.org/ns/tt#',
+                'tt':  'https://github.com/hidden-graph/rdflib-starlight/ns/tt#',
                 'ex':  EX,
             },
             '@graph': [

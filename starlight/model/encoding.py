@@ -9,8 +9,8 @@ Anon reifiers → sequential URIRefs under RR_NS (each {| |} block is distinct)
 
 import hashlib
 
-TT_NS = 'http://starlight.org/ns/tt#'   # triple-term content-addressed URIs
-RR_NS = 'http://starlight.org/ns/rr#'   # anonymous reifier URIs
+TT_NS = 'https://github.com/hidden-graph/rdflib-starlight/ns/tt#'   # triple-term content-addressed URIs
+RR_NS = 'https://github.com/hidden-graph/rdflib-starlight/ns/rr#'   # anonymous reifier URIs
 
 
 def tt_hash(s_str: str, p_str: str, o_str: str) -> str:

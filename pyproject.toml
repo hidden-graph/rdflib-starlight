@@ -34,9 +34,9 @@ classifiers = [
 sqlalchemy = ["rdflib-sqlalchemy>=0.5"]
 
 [project.urls]
-Homepage = "https://github.com/johnclements/rdflib-starlight"
-Repository = "https://github.com/johnclements/rdflib-starlight"
-Issues = "https://github.com/johnclements/rdflib-starlight/issues"
+Homepage = "https://github.com/hidden-graph/rdflib-starlight"
+Repository = "https://github.com/hidden-graph/rdflib-starlight"
+Issues = "https://github.com/hidden-graph/rdflib-starlight/issues"
 
 [tool.setuptools.packages.find]
 include = ["starlight*"]

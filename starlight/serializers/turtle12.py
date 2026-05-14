@@ -19,7 +19,7 @@ from rdflib.namespace import RDF
 from starlight.model.triple import TripleTerm
 from starlight.model.encoding import TT_NS, RR_NS
 
-SL_NS = 'http://starlight.org/ns#'
+SL_NS = 'https://github.com/hidden-graph/rdflib-starlight/ns#'
 _RDF_NS = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
 _INTERNAL_NS = {SL_NS, TT_NS, RR_NS}
 

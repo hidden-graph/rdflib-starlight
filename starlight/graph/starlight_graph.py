@@ -19,7 +19,7 @@ from rdflib.namespace import RDF
 from starlight.model.triple import TripleTerm
 from starlight.model.encoding import TT_NS, tt_hash
 
-SL_NS           = 'http://starlight.org/ns#'
+SL_NS           = 'https://github.com/hidden-graph/rdflib-starlight/ns#'
 SL_TRIPLE_TERM  = URIRef(SL_NS + 'TripleTerm')   # kept for export / backward compat
 SL_REIFICATION  = URIRef(SL_NS + 'Reification')  # kept for export / backward compat
 RDF_REIFIES     = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
