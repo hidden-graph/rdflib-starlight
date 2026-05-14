@@ -1,8 +1,0 @@
-{
-    "chat.tools.terminal.autoApprove": {
-        "/^python3 w3c_turtle_tests/run_w3c_turtle_tests\\.py$/": {
-            "approve": true,
-            "matchCommandLine": true
-        }
-    }
-}

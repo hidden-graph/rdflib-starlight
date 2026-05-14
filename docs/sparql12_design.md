@@ -33,7 +33,7 @@ triple-term syntax. It is a design agreement, not an implementation spec.
 
 ## Formal RDF 1.2 Representation
 
-The above dataset expressed in formal RDF 1.2 (no annoation syntax) — using `rdf:reifies`and `<<( )>>` triple terms. This is the canonical form that all annotation syntaxes desugar to.
+The above dataset expressed in formal RDF 1.2 (no annotation syntax) — using `rdf:reifies` and `<<( )>>` triple terms. This is the canonical form that all annotation syntaxes desugar to.
 
 ```turtle
 @prefix :    <http://example.org/> .
@@ -150,8 +150,8 @@ SELECT ?s ?p ?o ?pred ?val WHERE {
 :bob   | :knows   | :carol   | :via         | :LinkedIn
 :bob   | :knows   | :carol   | :verifiedBy  | :ResearchTeam
 
-`:carol :knows :dave` does not appear — its base triple is not asserted, so neither
-the `?s ?p ?o .` finds no match. 
+`:carol :knows :dave` does not appear — its base triple is not asserted, so `?s ?p ?o .` finds no match.
+
 ---
 
 ### QF3 — Triple term in object position
@@ -596,8 +596,3 @@ from `<<( ?s ?p ?o )>>`) are plain RDF terms and are never restored.
 
 Phase 3 applies only to the rdf-1.1 backend. Native backends return triple
 terms directly — no `tt:HASH` encoding, no restoration step.
-
----
-
-
-

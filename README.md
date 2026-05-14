@@ -50,7 +50,7 @@ The last triple uses an **unasserted triple term** — `:bob :knows :mike` is re
 from starlight.graph.starlight_graph import StarlightGraph
 
 g = StarlightGraph()
-g.parse('example.ttl')
+g.parse('example.ttl', format='turtle12')
 
 # Query using SPARQL 1.2 triple-term patterns
 results = g.query("""
@@ -68,27 +68,18 @@ for row in results:
 http://example.org/Wikipedia
 ```
 
-Use a CONSTRUCT query to rebuild the annotated triple from variables, then serialize — the serializer folds the reification into compact annotation syntax automatically:
+Serialize the graph back to Turtle 1.2 — annotations are folded into compact `{| |}` syntax automatically:
 
 ```python
-result = g.query("""
-    PREFIX : <http://example.org/>
-    CONSTRUCT {
-        ?s ?p ?o .
-        ?stmt rdf:reifies <<( ?s ?p ?o )>> .
-        ?stmt ?attr ?val .
-    }
-    WHERE {
-        ?stmt rdf:reifies <<( ?s ?p ?o )>> .
-        ?stmt ?attr ?val .
-    }
-""")
-print(result.serialize(format='turtle'))
+print(g.serialize(format='turtle12'))
 ```
 
 ```turtle
 @version "1.2" .
 @prefix : <http://example.org/> .
+
+:alice :believes <<( :bob :knows :mike )>> ;
+    :says <<( :bob :knows :carol )>> .
 
 :bob :knows :carol {| :since "2020" ; :source :Wikipedia |} .
 ```

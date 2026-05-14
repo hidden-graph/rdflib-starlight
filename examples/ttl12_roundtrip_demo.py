@@ -8,7 +8,7 @@ Shows three views of the same graph:
   3. Starlight Turtle 1.2 output — triple terms as <<( )>>, encoding hidden
 
 Run from anywhere:
-  python scripts/ttl12_roundtrip_demo.py
+  python examples/ttl12_roundtrip_demo.py
 """
 
 import sys
@@ -32,8 +32,8 @@ INPUT = """\
 # Inline annotation shorthand {| |} — anonymous reifier
 :bob :knows :carol {| :since "2020" ; :via :LinkedIn |} .
 
-# Triple term used as subject
-<<( :bob :knows :carol )>> :verifiedBy :ResearchTeam .
+# Reification shorthand — anonymous reifier, base triple NOT asserted
+<< :bob :knows :carol >> :verifiedBy :ResearchTeam .
 """
 
 DIVIDER = '-' * 60

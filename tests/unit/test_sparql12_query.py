@@ -460,3 +460,52 @@ class TestQ13:
             }
         """)
         assert len(r.bindings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Q14 — CONSTRUCT with <<( )>> in template and WHERE clause
+# ---------------------------------------------------------------------------
+
+class TestQ14:
+    def test_construct_triple_term_same_variable(self, g):
+        # <<( ?s ?p ?o )>> in the CONSTRUCT template must get the same variable
+        # as the same pattern in WHERE. Before the content-based variable fix,
+        # the rewriter assigned different sequential variables to each block,
+        # so the CONSTRUCT template's encoding triples were never bound and the
+        # result graph contained no reification triples.
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            CONSTRUCT {
+              ?s ?p ?o .
+              ?stmt rdf:reifies <<( ?s ?p ?o )>> .
+              ?stmt ?attr ?val .
+            } WHERE {
+              ?stmt rdf:reifies <<( ?s ?p ?o )>> .
+              ?stmt ?attr ?val .
+              FILTER(?attr != rdf:reifies)
+            }
+        """)
+        assert isinstance(r.graph, StarlightGraph)
+        RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
+        reifies_triples = list(r.graph.triples((None, RDF_REIFIES, None)))
+        assert len(reifies_triples) >= 1, "CONSTRUCT result must contain rdf:reifies triple"
+        _, _, obj = reifies_triples[0]
+        assert isinstance(obj, TripleTerm), f"Object of rdf:reifies must be TripleTerm, got {type(obj)}"
+        assert obj == TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))
+
+    def test_construct_triple_term_serializable(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            CONSTRUCT {
+              ?stmt rdf:reifies <<( :bob :knows :carol )>> .
+              ?stmt ?attr ?val .
+            } WHERE {
+              ?stmt rdf:reifies <<( :bob :knows :carol )>> .
+              ?stmt ?attr ?val .
+              FILTER(?attr != rdf:reifies)
+            }
+        """)
+        ttl = r.graph.serialize(format='turtle12')
+        assert '<<(' in ttl or 'reifies' in ttl

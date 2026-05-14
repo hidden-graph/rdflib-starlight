@@ -16,7 +16,7 @@ term appears, so OPTIONAL/UNION branch semantics remain local.
 from __future__ import annotations
 
 import re as _re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 RDF_SUBJECT   = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#subject>"
 RDF_PREDICATE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate>"
@@ -77,11 +77,17 @@ _TILDE_RE = _re.compile(
 @dataclass
 class _RewriteState:
     next_var_index: int = 0
+    _content_cache: dict = field(default_factory=dict, init=False, repr=False)
 
     def new_var(self) -> str:
         name = f"?__tt{self.next_var_index}"
         self.next_var_index += 1
         return name
+
+    def var_for_content(self, content_key: str) -> str:
+        if content_key not in self._content_cache:
+            self._content_cache[content_key] = self.new_var()
+        return self._content_cache[content_key]
 
 
 def rewrite_sparql12_to_11(query: str) -> str:
@@ -361,7 +367,8 @@ def _rewrite_triple_term(text: str, start: int, state: _RewriteState) -> tuple[s
     predicate_token, predicate_patterns = _rewrite_term(parts[1], state)
     object_token, object_patterns = _rewrite_term(parts[2], state)
 
-    tt_var = state.new_var()
+    content_key = f"{subject_token} {predicate_token} {object_token}"
+    tt_var = state.var_for_content(content_key)
     patterns = []
     patterns.extend(subject_patterns)
     patterns.extend(predicate_patterns)

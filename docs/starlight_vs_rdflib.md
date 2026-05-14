@@ -7,7 +7,7 @@ Summary of all public `rdflib.Graph` methods and status in `StarlightGraph`.
 ✅ Done — explicitly overridden; TripleTerm coercion/filtering is correct
 🔗 Inherited — not overridden; delegates through our `triples()` override and works correctly
 ⚠️ Partial — works for common cases but has documented caveats
-➖ Not needed — no TripleTerm handling required; plain rdflib behaviour is correct
+➖ Not relevant — no TripleTerm handling required; plain rdflib behaviour is correct
 
 ---
 
@@ -107,7 +107,7 @@ SPARQL 1.2 syntax is fully supported. See [sparql12_design.md](sparql12_design.m
 
 All graph algorithms operate on the visible RDF 1.2 graph; encoding triples are filtered automatically.
 
-🔗 `g.connected()` — Uses `subjects()`; encoding triples filtered so only visible graph structure is considered.
+🔗 `g.connected()` — Uses `subjects()`.
 
 ⚠️ `g.isomorphic(other)` — Uses `graph_diff` which iterates both graphs via `triples()`; TT URIRefs are content-addressed (same content = same URI) so identical TripleTerms match correctly. BNodes *inside* a TripleTerm are included in the hash and will not isomorphize across separately parsed graphs.  
 

@@ -14,7 +14,7 @@ g = StarlightGraph(backend='rdf-star', query_url=..., update_url=...)
 g = StarlightGraph(backend='rdf-1.2', query_url=..., update_url=...)
 ```
 
-Verify against a running Fuseki 5.4+ instance when a stable RDF 1.2 release is available.
+Verify against a running Fuseki instance when a stable RDF 1.2 release is available.
 
 ---
 
