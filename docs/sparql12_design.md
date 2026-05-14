@@ -11,152 +11,155 @@ triple-term syntax. It is a design agreement, not an implementation spec.
 @prefix :    <http://example.org/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
-# Triple term in object position
+# Unasserted Triple term in object position. No reification.
 :alice :says <<( :bob :knows :carol )>> .
 
-# Named reifier with annotations
+# Named reifier using tilde syntax — triple is asserted.
+:bob :knows :carol ~ :stmt1 .
+:stmt1 :confidence "0.9" ;
+       :source :WikiData .
+
+# Inline annotation — anonymous reifier of asserted triple.  
+:bob :knows :carol {| :since "2020" ; :via :LinkedIn |} .
+
+# Reification shorthand — anonymous reifier, underlying triple NOT asserted.
+<< :bob :knows :carol >> :verifiedBy :ResearchTeam .
+
+# Reification of a different, unasserted triple.
+<< :carol :knows :dave >> :certainty "low" .
+```
+
+---
+
+## Formal RDF 1.2 Representation
+
+The above dataset expressed in formal RDF 1.2 (no annoation syntax) — using `rdf:reifies`and `<<( )>>` triple terms. This is the canonical form that all annotation syntaxes desugar to.
+
+```turtle
+@prefix :    <http://example.org/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# Triple term in object position — base triple not asserted.
+:alice :says <<( :bob :knows :carol )>> .
+
+# Base triple is asserted (from both the tilde and inline-annotation examples above).
+:bob :knows :carol .
+
+# Named reifier (:stmt1) with its properties.
 :stmt1 rdf:reifies <<( :bob :knows :carol )>> ;
        :confidence "0.9" ;
        :source :WikiData .
 
-# Inline annotation — anonymous reifier
-:bob :knows :carol {| :since "2020" ; :via :LinkedIn |} .
+# Anonymous reifier (_:rr0) with its properties — from the {| |} annotation.
+_:rr0 rdf:reifies <<( :bob :knows :carol )>> ;
+      :since "2020" ;
+      :via :LinkedIn .
 
-# Triple term as subject
-<<( :bob :knows :carol )>> :verifiedBy :ResearchTeam .
+# Anonymous reifier (_:rr1) from the << >> shorthand — base triple is asserted above.
+_:rr1 rdf:reifies <<( :bob :knows :carol )>> ;
+      :verifiedBy :ResearchTeam .
+
+# Anonymous reifier (_:rr2) for a different triple that is NOT asserted.
+_:rr2 rdf:reifies <<( :carol :knows :dave )>> ;
+      :certainty "low" .
 ```
 
 ---
 
-## How the Rewriter Works
+## SPARQL 1.2 Query Examples
 
-`StarlightGraph.query()` intercepts any query containing `<<( )>>` and rewrites it
-to SPARQL 1.1 before passing it to rdflib's engine. Each triple term is replaced
-with an auto-generated variable (`?__tt0`, `?__tt1`, ...) and three encoding
-triples are injected into the same graph pattern block:
-
-```sparql
-# Input
-?stmt rdf:reifies <<( :bob :knows :carol )>> .
-
-# Rewritten
-?stmt rdf:reifies ?__tt0 .
-?__tt0 rdf:subject   :bob .
-?__tt0 rdf:predicate :knows .
-?__tt0 rdf:object    :carol .
-```
-
-Queries with no `<<( )>>` or annotation patterns are passed through unchanged.
-
-**Annotation patterns** (`<< s p o >>`, `s p o {| ... |}`, `s p o ~?r`) are rewritten
-differently — see the section below.
+QF1 pairs the formal pattern with its syntactically equivalent `<< >>` turtle annotation form. QF2 introduces `{| |}`, which differs semantically — it requires the base triple to be asserted — and shows what that constraint excludes.
 
 ---
 
-## Triple Terms vs Annotation Patterns
+### QF1 — All properties of reifiers of a specific triple
 
-Two syntactically similar forms have distinct semantics.
-
-**Triple term pattern** — parentheses: `<<( s p o )>>`
-
-The triple is treated as a *resource* (a node). No claim that the underlying triple
-is asserted in the graph. Used wherever an RDF node is expected.
-
-**Annotation pattern** — no parentheses: `<< s p o >>`
-
-Implies that the triple `(s, p, o)` is **asserted** in the graph. Expands to match
-any reifier of that triple and query its properties.
-
-The `{| pred obj |}` inline annotation and `~?r` reifier-name forms carry the same
-asserted-triple semantics.
-
-| Syntax | Triple asserted? | Typical use |
-|--------|-----------------|-------------|
-| `<<( s p o )>> :verifiedBy ?who` | No | Triple term as a subject node |
-| `<< s p o >> :confidence ?c` | **Yes** | Query annotations on an asserted triple |
-| `s p o {| ?pred ?val |}` | **Yes** | Inline annotation on an asserted triple |
-| `s p o ~?r` | **Yes** | Bind the reifier of an asserted triple |
-| `?stmt rdf:reifies <<( s p o )>>` | No | Find a named reifier |
-
-**Rewrite for annotation patterns**
-
-`<< ?s ?p ?o >> ?pred ?val .` rewrites to:
-
-```sparql
-?s ?p ?o .
-?__r rdf:reifies <<( ?s ?p ?o )>> .
-?__r ?pred ?val .
-```
-
-The anonymous reifier variable `?__r` is not exposed in results. Use `~?r` to name it.
-Note that `?pred` will also bind to `rdf:reifies` (the reification triple itself);
-add `FILTER(?pred != rdf:reifies)` to exclude it when querying only annotation properties.
-
----
-
-## Result Binding Rules
-
-Variables that appear **inside** a triple term pattern bind to plain RDF terms
-(URIRef, Literal, BNode) — the components of the matched triple.
-
-Variables that appear **outside** a triple term (i.e. bound to `?__ttN` internally)
-are **not exposed** in SELECT results. `StarlightGraph.query()` post-processes
-results to restore any `tt:HASH` URIRef bindings to `TripleTerm` objects — but
-only for variables the caller explicitly selected.
-
----
-
-## Query Examples
-
----
-
-### Q1 — Triple term in object position (reification)
-
-**Query**
+**Formal**
 ```sparql
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT ?stmt WHERE {
-  ?stmt rdf:reifies <<( :bob :knows :carol )>> .
+SELECT ?p ?o WHERE {
+  ?r rdf:reifies <<( :bob :knows :carol )>> .
+  ?r ?p ?o .
+}
+```
+
+**Equivalent — `<< >>` annotation form**
+```sparql
+PREFIX :   <http://example.org/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+SELECT ?p ?o WHERE {
+  << :bob :knows :carol >> ?p ?o .
 }
 ```
 
 **Expected results**
 
-?stmt
-:stmt1
-_:rr_0  (the anonymous reifier from the {| |} annotation)
+?p              | ?o
+rdf:reifies     | <<( :bob :knows :carol )>>
+rdf:reifies     | <<( :bob :knows :carol )>>
+rdf:reifies     | <<( :bob :knows :carol )>>
+:confidence     | "0.9"
+:source         | :WikiData
+:since          | "2020"
+:via            | :LinkedIn
+:verifiedBy     | :ResearchTeam
 
-**Notes**
-Both the named reifier `:stmt1` and the anonymous blank-node reifier from
-`{| :since "2020" ... |}` reify the same triple term.
+The `rdf:reifies` row appears once per reifier (three times) since it is a
+property of each reifier node. Add `FILTER(?p != rdf:reifies)` to see only
+annotation properties.
 
 ---
 
-### Q2 — Triple term as subject
+### QF2 — Annotation syntax: asserted triples only
 
-**Query**
+The formal pattern below includes `?s ?p ?o .` to assert the base triple, then finds its reifiers' properties. The `{| |}` form is the annotation equivalent.
+
+**Formal** *(base triple assertion explicit)*
 ```sparql
 PREFIX :   <http://example.org/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT ?who WHERE {
-  <<( :bob :knows :carol )>> :verifiedBy ?who .
+SELECT ?s ?p ?o ?pred ?val WHERE {
+  ?s ?p ?o .
+  ?r rdf:reifies <<( ?s ?p ?o )>> .
+  ?r ?pred ?val .
+  FILTER(?pred != rdf:reifies)
+}
+```
+
+**Equivalent — `{| |}` annotation form**
+```sparql
+PREFIX :   <http://example.org/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+SELECT ?s ?p ?o ?pred ?val WHERE {
+  ?s ?p ?o {| ?pred ?val |} .
+  FILTER(?pred != rdf:reifies)
 }
 ```
 
 **Expected results**
 
-?who
-:ResearchTeam
+?s     | ?p       | ?o       | ?pred        | ?val
+:bob   | :knows   | :carol   | :confidence  | "0.9"
+:bob   | :knows   | :carol   | :source      | :WikiData
+:bob   | :knows   | :carol   | :since       | "2020"
+:bob   | :knows   | :carol   | :via         | :LinkedIn
+:bob   | :knows   | :carol   | :verifiedBy  | :ResearchTeam
 
+`:carol :knows :dave` does not appear — its base triple is not asserted, so neither
+the `?s ?p ?o .` finds no match. 
 ---
 
-### Q3 — Triple term in object position (non-reification)
+### QF3 — Triple term in object position
 
-**Query**
+This pattern matches a triple term used as a value, not a reification relationship.
+
 ```sparql
-PREFIX :   <http://example.org/>
+PREFIX : <http://example.org/>
 
 SELECT ?who WHERE {
   ?who :says <<( :bob :knows :carol )>> .
@@ -170,9 +173,10 @@ SELECT ?who WHERE {
 
 ---
 
-### Q4 — Variable triple term components
+### QF4 — Enumerate reifiers and their triple term components
 
-**Query**
+`?stmt` is needed to correlate the reifier with its predicate and object — `<< >>` does not expose the reifier variable, so only the formal pattern is used here.
+
 ```sparql
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -184,351 +188,416 @@ SELECT ?stmt ?s ?p ?o WHERE {
 
 **Expected results**
 
-?stmt    ?s     ?p       ?o
-:stmt1   :bob   :knows   :carol
-_:rr_0   :bob   :knows   :carol
+?stmt    ?s      ?p       ?o
+:stmt1   :bob    :knows   :carol
+_:rr0    :bob    :knows   :carol
+_:rr1    :bob    :knows   :carol
+_:rr2    :carol  :knows   :dave
 
-**Notes**
-`?s`, `?p`, `?o` bind to the components of the matched triple term.
-Both reifiers point to the same triple term so both rows have identical ?s/?p/?o.
+All four reifiers are returned. `:rr2` reifies a different triple term
+`<<( :carol :knows :dave )>>` whose base triple is not asserted.
 
 ---
 
-### Q5 — OPTIONAL annotations on a reifier
+### QF5 — Triple term bound as a variable
 
-**Query**
+When `?t` is selected directly, `query()` post-processes the result to return a
+`TripleTerm` object rather than the internal `tt:HASH` URIRef.
+
 ```sparql
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT ?stmt ?conf ?source WHERE {
-  ?stmt rdf:reifies <<( :bob :knows :carol )>> .
-  OPTIONAL { ?stmt :confidence ?conf . }
-  OPTIONAL { ?stmt :source ?source . }
+SELECT ?stmt ?t WHERE {
+  ?stmt rdf:reifies ?t .
 }
 ```
 
 **Expected results**
 
-?stmt    ?conf   ?source
-:stmt1   "0.9"   :WikiData
-_:rr_0   —       —
+?stmt    | ?t
+:stmt1   | <<( :bob :knows :carol )>>
+_:rr0    | <<( :bob :knows :carol )>>
+_:rr1    | <<( :bob :knows :carol )>>
+_:rr2    | <<( :carol :knows :dave )>>
 
-**Notes**
-The anonymous reifier has no `:confidence` or `:source` so those columns are
-unbound (NULL) for its row. OPTIONAL scope must remain local to its `{ }` block.
+All four reifiers are returned. `:stmt1`, `_:rr0`, and `_:rr1` all reify the same
+triple term; `_:rr2` reifies a different one.
 
 ---
 
-### Q6 — Triple term selected as a variable
+### QF6 — Triple term in object position, returned as a variable
 
-**Query**
 ```sparql
-PREFIX :   <http://example.org/>
+PREFIX : <http://example.org/>
 
-SELECT ?who ?tt WHERE {
-  ?who :says ?tt .
+SELECT ?who ?t WHERE {
+  ?who :says ?t .
 }
 ```
 
 **Expected results**
 
-?who     ?tt
-:alice   <<( :bob :knows :carol )>>
+?who     | ?t
+:alice   | <<( :bob :knows :carol )>>
 
-**Notes**
-`?tt` binds to the raw `tt:HASH` URIRef in the underlying store.
-`StarlightGraph.query()` must restore this to a `TripleTerm` object and
-serialize it using the graph's namespace manager so prefixed names are used.
-This is a post-processing step, not part of the rewriter.
+`?t` binds to the triple term value. `query()` restores it to a `TripleTerm` object
+in the result; callers never see the internal `tt:HASH` encoding.
 
 ---
 
-### Q7 — SUBJECT / PREDICATE / OBJECT functions
+### QF7 — `SUBJECT`, `PREDICATE`, `OBJECT` functions
 
-SPARQL 1.2 defines built-in functions for extracting components from a triple
-term binding.
+These functions extract the components of a bound triple term variable. They rewrite to `rdf:subject`/`rdf:predicate`/`rdf:object` triple patterns in the underlying query.
 
-**Query**
-```sparql
-PREFIX :   <http://example.org/>
-
-SELECT ?who (SUBJECT(?tt) AS ?knower) (PREDICATE(?tt) AS ?rel) (OBJECT(?tt) AS ?known) WHERE {
-  ?who :says ?tt .
-}
-```
-
-**Expected results**
-
-?who     ?knower   ?rel      ?known
-:alice   :bob      :knows    :carol
-
-**Notes**
-`SUBJECT()`, `PREDICATE()`, `OBJECT()` operate on bound triple term variables.
-They rewrite to `rdf:subject`/`rdf:predicate`/`rdf:object` triple patterns injected
-into the WHERE clause, consistent with how `<<( )>>` patterns are handled.
-
----
-
-### Q8 — Annotation patterns
-
-Annotation patterns query properties of reifiers of asserted triples. All three
-syntactic forms rewrite to the same `rdf:reifies` + component pattern.
-
-**Query — all annotations on any asserted triple (`<< >>` form)**
+**Using SELECT expressions**
 ```sparql
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT ?s ?p ?o ?pred ?val WHERE {
-  << ?s ?p ?o >> ?pred ?val .
-  FILTER(?pred != rdf:reifies)
+SELECT ?stmt ?t
+       (SUBJECT(?t)   AS ?s)
+       (PREDICATE(?t) AS ?p)
+       (OBJECT(?t)    AS ?o)
+WHERE {
+  ?stmt rdf:reifies ?t .
 }
 ```
 
-**Expected results**
-
-?s      ?p       ?o       ?pred         ?val
-:bob    :knows   :carol   :since        "2020"
-:bob    :knows   :carol   :via          :LinkedIn
-:bob    :knows   :carol   :confidence   "0.9"
-:bob    :knows   :carol   :source       :WikiData
-
-**Notes**
-All four rows come from two reifiers of `<<( :bob :knows :carol )>>`: the anonymous
-`_:rr_0` (carrying `:since`/`:via`) and `:stmt1` (carrying `:confidence`/`:source`).
-Without the `FILTER`, a row with `?pred = rdf:reifies` would also appear for each
-reifier.
-
----
-
-**Query — inline annotation form (`{| |}`) targeting a specific predicate**
-```sparql
-PREFIX :   <http://example.org/>
-
-SELECT ?since WHERE {
-  :bob :knows :carol {| :since ?since |} .
-}
-```
-
-**Expected results**
-
-?since
-"2020"
-
----
-
-**Query — bind the reifier explicitly (`~?r` form)**
+**Using BIND**
 ```sparql
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT ?r ?pred ?val WHERE {
-  :bob :knows :carol ~?r .
-  ?r ?pred ?val .
-  FILTER(?pred != rdf:reifies)
+SELECT ?stmt ?s ?p ?o WHERE {
+  ?stmt rdf:reifies ?t .
+  BIND(SUBJECT(?t)   AS ?s)
+  BIND(PREDICATE(?t) AS ?p)
+  BIND(OBJECT(?t)    AS ?o)
 }
 ```
 
 **Expected results**
 
-?r       ?pred         ?val
-:stmt1   :confidence   "0.9"
-:stmt1   :source       :WikiData
-_:rr_0   :since        "2020"
-_:rr_0   :via          :LinkedIn
-
-**Notes**
-`~?r` binds the reifier node directly, allowing further pattern matching on its
-properties without the implicit `?__r` variable. Equivalent to:
-```sparql
-?r rdf:reifies <<( :bob :knows :carol )>> .
-:bob :knows :carol .
-?r ?pred ?val .
-```
+?stmt    | ?t                          | ?s      | ?p       | ?o
+:stmt1   | <<( :bob :knows :carol )>>  | :bob    | :knows   | :carol
+_:rr0    | <<( :bob :knows :carol )>>  | :bob    | :knows   | :carol
+_:rr1    | <<( :bob :knows :carol )>>  | :bob    | :knows   | :carol
+_:rr2    | <<( :carol :knows :dave )>> | :carol  | :knows   | :dave
 
 ---
 
-### Q9 — Nested triple term
+### QF8 — `isTripleTerm` filter
 
-A nested triple term is a triple whose subject or object is itself a triple
-term. This query finds reifiers of a triple whose subject is another triple.
+`isTripleTerm(?x)` returns `true` when `?x` is a triple term value. Use it to find
+triple terms anywhere in the graph without knowing which predicate carries them.
 
-**Additional data for this example**
-```turtle
-@prefix :    <http://example.org/> .
-@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-
-# :carol claims that the fact ":alice :believes <<( :bob :knows :dave )>>"
-# has been verified.
-:verifStmt rdf:reifies <<( <<( :bob :knows :dave )>> :believedBy :alice )>> .
-:verifStmt :verifiedBy :ResearchTeam .
-```
-
-**Query**
 ```sparql
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT ?stmt ?innerS ?innerP ?innerO ?outerP ?outerO WHERE {
-  ?stmt rdf:reifies <<( <<( ?innerS ?innerP ?innerO )>> ?outerP ?outerO )>> .
+SELECT DISTINCT ?t ?s ?p ?o (EXISTS { ?s ?p ?o } AS ?asserted) WHERE {
+  ?sub ?pred ?t .
+  FILTER(isTripleTerm(?t))
+  BIND(SUBJECT(?t)   AS ?s)
+  BIND(PREDICATE(?t) AS ?p)
+  BIND(OBJECT(?t)    AS ?o)
 }
 ```
 
 **Expected results**
 
-?stmt        ?innerS   ?innerP   ?innerO   ?outerP        ?outerO
-:verifStmt   :bob      :knows    :dave     :believedBy    :alice
+?t                           | ?s      | ?p       | ?o      | ?asserted
+<<( :bob :knows :carol )>>   | :bob    | :knows   | :carol  | true
+<<( :carol :knows :dave )>>  | :carol  | :knows   | :dave   | false
 
-**Notes**
-The rewriter produces two `?__ttN` variables — `?__tt0` for the inner triple
-term, `?__tt1` for the outer — and injects encoding triples for both:
-
-```sparql
-?stmt rdf:reifies ?__tt1 .
-?__tt1 rdf:subject   ?__tt0 .
-?__tt1 rdf:predicate :believedBy .
-?__tt1 rdf:object    :alice .
-?__tt0 rdf:subject   :bob .
-?__tt0 rdf:predicate :knows .
-?__tt0 rdf:object    :dave .
-```
-
-The inner `?__tt0` appears as the value of `rdf:subject` in the outer encoding.
+`DISTINCT` collapses duplicates from multiple reifiers of the same triple term.
+`BIND` extracts the components before `EXISTS` tests them as a plain triple pattern.
+`?asserted` is `true` for `:bob :knows :carol` (explicitly asserted); `false` for
+`:carol :knows :dave` (only reified, never asserted).
 
 ---
 
-### Q10 — All reification statements with their triple terms
+### QF9 — OPTIONAL: per-reifier annotation properties
 
-Returns every reifier alongside the triple it reifies — both the reifier node
-and the triple term are returned as bound variables.
-
-**Query**
 ```sparql
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT ?stmt ?tt WHERE {
-  ?stmt rdf:reifies ?tt .
+SELECT ?stmt ?conf ?source ?since ?via ?verified ?certainty WHERE {
+  ?stmt rdf:reifies <<( ?s ?p ?o )>> .
+  OPTIONAL { ?stmt :confidence ?conf }
+  OPTIONAL { ?stmt :source     ?source }
+  OPTIONAL { ?stmt :since      ?since }
+  OPTIONAL { ?stmt :via        ?via }
+  OPTIONAL { ?stmt :verifiedBy ?verified }
+  OPTIONAL { ?stmt :certainty  ?certainty }
 }
 ```
 
 **Expected results**
 
-?stmt      ?tt
-:stmt1     <<( :bob :knows :carol )>>
-_:rr_0     <<( :bob :knows :carol )>>
-
-**Notes**
-`?tt` binds to a `tt:HASH` URIRef in the store; `query()` post-processing restores
-it to a `TripleTerm` object. Both rows share the same triple term value since
-`:stmt1` and `_:rr_0` both reify the same triple.
+?stmt    ?conf   ?source    ?since   ?via        ?verified        ?certainty
+:stmt1   "0.9"   :WikiData  —        —           —                —
+_:rr0    —       —          "2020"   :LinkedIn   —                —
+_:rr1    —       —          —        —           :ResearchTeam    —
+_:rr2    —       —          —        —           —                "low"
 
 ---
 
-### Q11 — ASK with triple term
+### QF10 — ASK: does any reifier of a specific triple carry a given property?
 
-**Query**
+**Formal**
 ```sparql
 PREFIX :   <http://example.org/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
 ASK {
-  <<( :bob :knows :carol )>> :verifiedBy :ResearchTeam .
+  ?r rdf:reifies <<( :bob :knows :carol )>> .
+  ?r :confidence ?c .
 }
 ```
 
-**Expected result**
-`true`
+**Equivalent — `<< >>` annotation form**
+```sparql
+PREFIX : <http://example.org/>
+
+ASK {
+  << :bob :knows :carol >> :confidence ?c .
+}
+```
+
+**Expected result:** `true`
 
 ---
 
-### Q12 — CONSTRUCT producing a plain graph
+### QF11 — CONSTRUCT: rebuild a reifier subgraph
 
-**Query**
 ```sparql
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
 CONSTRUCT {
-  ?stmt :hasConfidence ?conf .
+  ?stmt rdf:reifies <<( :bob :knows :carol )>> .
+  ?stmt ?p ?o .
 } WHERE {
   ?stmt rdf:reifies <<( :bob :knows :carol )>> .
-  ?stmt :confidence ?conf .
+  ?stmt :confidence ?c .
+  ?stmt ?p ?o .
+  FILTER(?p != rdf:reifies)
 }
 ```
 
 **Expected result graph**
+
 ```turtle
-:stmt1 :hasConfidence "0.9" .
+:stmt1 rdf:reifies <<( :bob :knows :carol )>> ;
+       :confidence "0.9" ;
+       :source :WikiData .
 ```
+
+The WHERE clause restricts to reifiers that carry `:confidence` (only `:stmt1`).
+All remaining properties of that reifier are projected via `?p`/`?o`.
 
 ---
 
-### Q13 — `isTripleTerm` and assertion check
+## How the Rewriter Works
 
-`isTripleTerm(?x)` returns `true` when `?x` is a triple term value. It rewrites to
-`FILTER(STRSTARTS(STR(?x), "http://starlight.org/tt/"))` against the internal
-`tt:HASH` encoding. `SUBJECT()`, `PREDICATE()`, `OBJECT()` extract components of a
-bound triple term without needing a `<<( )>>` pattern in WHERE.
+`StarlightGraph.query()` routes each query based on the configured backend.
 
-**Query**
+**rdf-1.1 backend (default, including in-memory):** the query is translated into SPARQL 1.1, executed against the underlying rdflib store, then any triple term values in the results are restored. Queries with no RDF 1.2 constructs and no triple term results pass through unchanged. This translation has three phases.
+
+**Native backends (rdf-star, rdf-1.2):** the query is forwarded directly to the
+SPARQL endpoint via HTTP. No phase 1–3 processing applies — the backend handles
+triple terms natively.
+
+---
+
+### Phase 1 — Annotation form expansion
+
+The three annotation shorthand forms are expanded directly to RDF 1.1 triple
+patterns in optimized join order. There is no intermediate step through canonical
+RDF 1.2 — Phase 1 produces the final encoding-layer patterns in one pass.
+
+Join order rationale: component patterns (`rdf:subject`/`rdf:predicate`/`rdf:object`)
+come first because the `rdf:subject` index is very selective when the subject is a
+ground term, binding `?__tt` before the engine searches for reifiers. The base triple
+assertion (`s p o .`) comes last so the engine starts from the smaller set of triple
+term nodes rather than scanning every triple when s/p/o are variables.
+
+**`s p o ~ ?r`** — named reifier, base triple asserted
+
 ```sparql
-PREFIX :   <http://example.org/>
+# Input
+s p o ~ ?r .
 
-SELECT DISTINCT ?tt ?s ?p ?o (EXISTS { ?s ?p ?o } AS ?asserted) WHERE {
-  { ?sub ?pred ?tt } UNION { ?tt ?pred ?obj }
-  FILTER(isTripleTerm(?tt))
-  BIND(SUBJECT(?tt) AS ?s)
-  BIND(PREDICATE(?tt) AS ?p)
-  BIND(OBJECT(?tt) AS ?o)
-}
+# Expanded
+?__tt0 rdf:subject   s .
+?__tt0 rdf:predicate p .
+?__tt0 rdf:object    o .
+?r rdf:reifies ?__tt0 .
+s p o .
 ```
 
-**Expected results**
+**`s p o {| ?pred ?val |}`** — anonymous reifier, base triple asserted
 
-?tt                          ?s     ?p       ?o       ?asserted
-<<( :bob :knows :carol )>>   :bob   :knows   :carol   true
+```sparql
+# Input
+s p o {| ?pred ?val |} .
 
-**Notes**
-The UNION covers triple terms in both subject and object positions; `DISTINCT`
-collapses duplicates. `EXISTS { ?s ?p ?o }` is `true` here because `:bob :knows
-:carol` is asserted via the `{| |}` annotation. A triple term that appears only as
-an object of `:says` or `rdf:reifies`, with the base triple never directly asserted,
-would return `false`.
+# Expanded
+?__tt1 rdf:subject   s .
+?__tt1 rdf:predicate p .
+?__tt1 rdf:object    o .
+?__r0 rdf:reifies ?__tt1 .
+?__r0 ?pred ?val .
+s p o .
+```
+
+**`<< s p o >> ?pred ?val`** — anonymous reifier, no assertion check
+
+```sparql
+# Input
+<< s p o >> ?pred ?val .
+
+# Expanded
+?__tt1 rdf:subject   s .
+?__tt1 rdf:predicate p .
+?__tt1 rdf:object    o .
+?__r0 rdf:reifies ?__tt1 .
+?__r0 ?pred ?val .
+```
+
+The `~` and `{| |}` forms append `s p o .` to enforce that the base triple is
+asserted; `<< >>` does not. The anonymous reifier `?__r0` is never exposed in
+SELECT results — use `~ ?r` to name it.
 
 ---
 
-## Design Decisions
+### Phase 2 — Triple term rewrite (RDF 1.2 → RDF 1.1)
 
-Agreed and closed — not open for further debate.
+Each explicit `<<( s p o )>>` triple term in a WHERE clause is replaced by an
+auto-generated variable `?__ttN`, and three encoding triples are injected into
+the same graph pattern block. Annotation forms are already fully expanded by
+Phase 1 and do not pass through here.
 
-- **TripleTerm restoration**: `query()` always restores `tt:HASH` URIRefs to
-  `TripleTerm` objects in SELECT results. Callers never see internal `tt:` URIRefs.
+**Fixed triple term**
 
-- **CONSTRUCT output**: always a `StarlightGraph`, regardless of whether the
-  template contains triple terms.
+```sparql
+# Input
+?stmt rdf:reifies <<( :bob :knows :carol )>> .
 
-- **`isTripleTerm` implementation**: rewrite to
-  `FILTER(STRSTARTS(STR(?x), "http://starlight.org/tt/"))` — consistent with the
-  rewriter approach, no rdflib extension registration needed.
+# Rewritten
+?stmt rdf:reifies ?__tt0 .
+?__tt0 rdf:subject   :bob .
+?__tt0 rdf:predicate :knows .
+?__tt0 rdf:object    :carol .
+```
 
-- **`SUBJECT`/`PREDICATE`/`OBJECT` implementation**: rewrite to inject
-  `rdf:subject`/`rdf:predicate`/`rdf:object` triple patterns into the WHERE clause.
+**Variable triple term components**
+
+```sparql
+# Input
+?stmt rdf:reifies <<( ?s ?p ?o )>> .
+
+# Rewritten
+?stmt rdf:reifies ?__tt0 .
+?__tt0 rdf:subject   ?s .
+?__tt0 rdf:predicate ?p .
+?__tt0 rdf:object    ?o .
+```
+
+**Triple term in object position**
+
+```sparql
+# Input
+?who :says <<( :bob :knows :carol )>> .
+
+# Rewritten
+?who :says ?__tt0 .
+?__tt0 rdf:subject   :bob .
+?__tt0 rdf:predicate :knows .
+?__tt0 rdf:object    :carol .
+```
+
+**Nested triple term**
+
+```sparql
+# Input
+?r rdf:reifies <<( :alice :believes <<( :bob :knows :dave )>> )>> .
+
+# Rewritten
+?r rdf:reifies ?__tt1 .
+?__tt1 rdf:subject   :alice .
+?__tt1 rdf:predicate :believes .
+?__tt1 rdf:object    ?__tt0 .
+?__tt0 rdf:subject   :bob .
+?__tt0 rdf:predicate :knows .
+?__tt0 rdf:object    :dave .
+```
+
+**Function rewrites**
+
+**`SUBJECT(?t)` / `PREDICATE(?t)` / `OBJECT(?t)`** — inject component triple patterns
+```sparql
+# Input
+(SUBJECT(?t) AS ?s)  (PREDICATE(?t) AS ?p)  (OBJECT(?t) AS ?o)
+
+# Rewritten — inject into WHERE, substitute variable in SELECT
+?t rdf:subject   ?s .
+?t rdf:predicate ?p .
+?t rdf:object    ?o .
+```
+
+**`isTripleTerm(?x)`** — rewritten to an indexed existence check plus URI prefix guard
+```sparql
+# Input
+FILTER(isTripleTerm(?x))
+
+# Rewritten
+FILTER(EXISTS { ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> [] }
+    && STRSTARTS(STR(?x), "http://starlight.org/ns/tt#"))
+```
+
+The `STRSTARTS` guard rejects any user triple that coincidentally
+carries `rdf:subject` but whose subject URI is not in the `tt:` namespace.
 
 ---
 
-## Open Implementation Notes
+### Phase 3 — Result restoration
 
-1. **Prefixed name serialization in TripleTerm results (Q6, Q7, Q10)**
-   `TripleTerm.__str__()` currently emits full URIs (`<http://...>`). Results must
-   use prefixed names (`:bob`) consistent with the rest of the graph. `query()` must
-   pass the graph's namespace manager to `TripleTerm` serialization at result time.
+After execution, `query()` scans the result bindings for any `tt:HASH` URIRef
+values (the internal encoding of triple terms) and replaces them with `TripleTerm`
+objects. This applies only to variables the caller explicitly selected — internal
+variables like `?__tt0` are never exposed.
 
-2. **Annotation pattern rewriter pass (Q8)**
-   `<< s p o >>`, `{| |}`, and `~?r` forms require a pre-pass that runs before the
-   `<<( )>>` rewriter. The injected reifier variable `?__r` must be scoped to the
-   same `{ }` block as the base triple. OPTIONAL and UNION interaction must be
-   tested against Q8 examples.
+Variables that appear **inside** a triple term pattern (e.g. `?s`, `?p`, `?o` in
+`<<( ?s ?p ?o )>>`) bind to plain RDF terms — URIRefs, literals, or blank nodes —
+and require no restoration.
 
-3. **SPARQL UPDATE — deferred**
-   INSERT/DELETE with triple-term patterns is not addressed here.
+```sparql
+# Input — no <<( )>> patterns, so Phase 2 is unchanged
+SELECT ?stmt ?t WHERE {
+  ?stmt rdf:reifies ?t .
+}
+
+# rdflib executes and returns (internal representation):
+#   ?stmt = :stmt1          ← plain URIRef, unchanged
+#   ?t    = tt:a1b2c3d4     ← tt:HASH URIRef (internal encoding)
+
+# After Phase 3 restoration:
+#   ?stmt = :stmt1          ← unchanged
+#   ?t    = <<( :bob :knows :carol )>>   ← restored to TripleTerm
+```
+
+`?t` is restored because it was selected by the caller and holds a `tt:HASH`
+URIRef. Variables that bind to triple term *components* (e.g. `?s`, `?p`, `?o`
+from `<<( ?s ?p ?o )>>`) are plain RDF terms and are never restored.
+
+Phase 3 applies only to the rdf-1.1 backend. Native backends return triple
+terms directly — no `tt:HASH` encoding, no restoration step.
+
+---
+
+
+

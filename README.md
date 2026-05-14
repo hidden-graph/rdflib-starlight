@@ -1,4 +1,5 @@
 # rdflib-starlight
+RDF 1.2 wrapper for rdflib.
 
 **RDF 1.2** was published as a W3C Candidate Recommendation on April 7, 2026. It represents the formal standardization of RDF-star, a community-driven extension to RDF that had been under development since 2019. The primary change RDF 1.2 introduces is **reification** — the ability to make statements *about* statements. RDF 1.2 makes reification a first-class feature of the data model through **triple terms** — triples that can themselves appear as the object of other triples.
 

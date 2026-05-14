@@ -151,12 +151,12 @@ class TestContextAPI:
         assert len(tts) == 1
         assert tts[0] == TripleTerm(ex('alice'), ex('knows'), ex('bob'))
 
-    def test_reifications_method(self):
+    def test_reifiers_method(self):
         ds = StarlightDataset()
         ds.parse(data=TRIG_BASIC, format='trig12')
         g1 = ds.get_context(G1)
         tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
-        reifiers = list(g1.reifications(TT=tt))
+        reifiers = list(g1.reifiers(TT=tt))
         assert ex('stmt1') in reifiers
 
     def test_encoding_triples_hidden_in_context(self):

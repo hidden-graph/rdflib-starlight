@@ -11,6 +11,7 @@ Public API used by StarlightGraph:
     sparql_term(node, backend)          → SPARQL inline string
     rewrite_12_to_backend(query, mode)  → query string with correct TT syntax
     http_select(url, sparql, auth)      → (vars, bindings)
+    http_construct(url, sparql, auth)   → (body_bytes, content_type)
     http_update(url, sparql, auth)      → None
     http_ask(url, sparql, auth)         → bool
     build_result(vars_, bindings)       → rdflib.query.Result
@@ -138,6 +139,23 @@ def http_select(query_url: str, sparql: str, extra_headers: dict | None = None) 
     resp = requests.post(query_url, data=sparql.encode('utf-8'), headers=headers, timeout=30)
     resp.raise_for_status()
     return _parse_bindings(resp.json())
+
+
+def http_construct(query_url: str, sparql: str, extra_headers: dict | None = None) -> tuple[bytes, str]:
+    """Execute a SPARQL CONSTRUCT or DESCRIBE and return (body_bytes, content_type).
+
+    Requests Turtle, which both rdf-star and rdf-1.2 backends support and which
+    StarlightGraph.parse() handles natively including triple-term syntax.
+    """
+    headers = {
+        'Content-Type': 'application/sparql-query',
+        'Accept': 'text/turtle',
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    resp = requests.post(query_url, data=sparql.encode('utf-8'), headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.content, resp.headers.get('Content-Type', 'text/turtle')
 
 
 def http_update(update_url: str, sparql: str, extra_headers: dict | None = None) -> None:

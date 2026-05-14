@@ -6,6 +6,7 @@ encoding triples, from_rdflib(), and Statement operations.
 """
 
 import pytest
+from unittest.mock import patch, MagicMock
 from rdflib import Graph, URIRef, Literal, BNode
 from rdflib.namespace import RDF
 
@@ -32,9 +33,6 @@ class TestRdflibCompat:
         sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
         assert (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')) in sg
 
-    def test_add_three_args(self, sg):
-        sg.add(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
-        assert (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')) in sg
 
     def test_add_literal_object(self, sg):
         sg.add((URIRef(EX+'s'), URIRef(EX+'p'), Literal('hello')))
@@ -80,23 +78,15 @@ class TestTripleTermAdd:
         assert isinstance(o, TripleTerm)
         assert o == TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
 
-    def test_add_tt_subject_positional(self, sg):
-        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')), URIRef(EX+'q'), URIRef(EX+'z'))
-        results = list(sg.triples((None, URIRef(EX+'q'), URIRef(EX+'z'))))
-        assert len(results) == 1
-        s, _, _ = results[0]
-        assert isinstance(s, TripleTerm)
-        assert s == TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+    def test_add_tt_subject_raises(self, sg):
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        with pytest.raises(ValueError):
+            sg.add((tt, URIRef(EX+'q'), URIRef(EX+'z')))
 
-    def test_add_tt_subject_single_tuple_form(self, sg):
-        triple = ((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')), URIRef(EX+'q'), URIRef(EX+'z'))
-        sg.add(triple)
-        results = list(sg.triples((None, URIRef(EX+'q'), None)))
-        assert len(results) == 1
+    def test_add_tuple_subject_raises(self, sg):
+        with pytest.raises(ValueError):
+            sg.add(((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')), URIRef(EX+'q'), URIRef(EX+'z')))
 
-    def test_contains_tt_subject(self, sg):
-        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')), URIRef(EX+'q'), URIRef(EX+'z'))
-        assert ((URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')), URIRef(EX+'q'), URIRef(EX+'z')) in sg
 
     def test_contains_tt_object(self, sg):
         sg.add((URIRef(EX+'r'), RDF_REIFIES, (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
@@ -196,24 +186,25 @@ class TestStatements:
         _, _, o = results[0]
         assert isinstance(o, TripleTerm)
 
-    def test_reifications_by_reifier(self, sg):
+    def test_reifiers_by_triple_term(self, sg):
         sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
-        reifiers = list(sg.reifications(TT=(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
+        reifiers = list(sg.reifiers(TT=(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))))
         assert URIRef(EX+'stmt') in reifiers
         tts = list(sg.reified_triples(URIRef(EX+'stmt')))
         assert tts[0] == TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
 
-    def test_reifications_by_triple_term(self, sg):
-        sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
-        tt = (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
-        reifiers = list(sg.reifications(TT=tt))
-        assert len(reifiers) == 1
-
-    def test_reifications_all(self, sg):
+    def test_reifiers_all(self, sg):
         sg.add_reification(URIRef(EX+'stmt1'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
         sg.add_reification(URIRef(EX+'stmt2'), (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
-        reifiers = list(sg.reifications())
+        reifiers = list(sg.reifiers())
         assert len(reifiers) == 2
+
+    def test_reifications_returns_triple_terms(self, sg):
+        sg.add_reification(URIRef(EX+'stmt1'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
+        sg.add_reification(URIRef(EX+'stmt2'), (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        tts = list(sg.reifications())
+        assert len(tts) == 2
+        assert all(isinstance(tt, TripleTerm) for tt in tts)
 
     def test_statement_len(self, sg):
         sg.add_reification(URIRef(EX+'stmt'), (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')))
@@ -423,3 +414,113 @@ class TestStoreLifecycle:
         s, p, o = results[0]
         assert isinstance(o, TripleTerm)
         assert o.subject == URIRef(EX+'alice')
+
+
+# ---------------------------------------------------------------------------
+# Native backend — CONSTRUCT via http_construct (mocked HTTP)
+# ---------------------------------------------------------------------------
+
+_TURTLE_RESPONSE = b"""
+@prefix :    <http://example.org/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+:stmt1 rdf:reifies <<( :bob :knows :carol )>> ;
+       :confidence "0.9" .
+"""
+
+def _mock_post(turtle_body: bytes):
+    """Return a mock requests.Response that serves turtle_body."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.content = turtle_body
+    resp.headers = {'Content-Type': 'text/turtle'}
+    resp.raise_for_status = lambda: None
+    return resp
+
+
+class TestNativeConstruct:
+
+    def _make_native_sg(self):
+        """StarlightGraph in rdf-1.2 mode with a fake SPARQLUpdateStore endpoint.
+
+        The store is never actually contacted — requests.post is mocked in each test.
+        """
+        from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
+        store = SPARQLUpdateStore(
+            query_endpoint='http://fake.local/query',
+            update_endpoint='http://fake.local/update',
+        )
+        return StarlightGraph(store=store, backend='rdf-1.2')
+
+    def test_construct_returns_starlight_graph(self):
+        sg = self._make_native_sg()
+        with patch('requests.post', return_value=_mock_post(_TURTLE_RESPONSE)):
+            r = sg.query("""
+                PREFIX :   <http://example.org/>
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+                CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }
+            """)
+        assert r.type == 'CONSTRUCT'
+        assert isinstance(r.graph, StarlightGraph)
+
+    def test_construct_graph_contains_triple_term(self):
+        sg = self._make_native_sg()
+        with patch('requests.post', return_value=_mock_post(_TURTLE_RESPONSE)):
+            r = sg.query("""
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+                CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }
+            """)
+        triples = list(r.graph.triples((None, RDF_REIFIES, None)))
+        assert len(triples) == 1
+        _, _, tt = triples[0]
+        assert isinstance(tt, TripleTerm)
+        assert tt.subject   == URIRef(EX + 'bob')
+        assert tt.predicate == URIRef(EX + 'knows')
+        assert tt.object    == URIRef(EX + 'carol')
+
+    def test_construct_with_prefix_before_keyword(self):
+        """Query type detection must work when PREFIX declarations precede CONSTRUCT."""
+        sg = self._make_native_sg()
+        with patch('requests.post', return_value=_mock_post(_TURTLE_RESPONSE)):
+            r = sg.query("""
+                PREFIX :    <http://example.org/>
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+                CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }
+            """)
+        assert r.type == 'CONSTRUCT'
+
+    def test_update_posts_to_update_endpoint(self):
+        """UPDATE on a native backend sends the query directly to the update endpoint."""
+        sg = self._make_native_sg()
+        update_resp = MagicMock()
+        update_resp.raise_for_status = lambda: None
+        with patch('requests.post', return_value=update_resp) as mock_post:
+            sg.update("""
+                PREFIX :   <http://example.org/>
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+                INSERT DATA {
+                  :stmt1 rdf:reifies <<( :bob :knows :carol )>> .
+                }
+            """)
+        assert mock_post.called
+        call_url = mock_post.call_args[0][0]
+        assert 'update' in call_url
+
+    def test_update_rdfstar_rewrites_syntax(self):
+        """For rdf-star backends, <<( )>> is rewritten to << >> before sending."""
+        from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
+        store = SPARQLUpdateStore(
+            query_endpoint='http://fake.local/query',
+            update_endpoint='http://fake.local/update',
+        )
+        sg = StarlightGraph(store=store, backend='rdf-star')
+        update_resp = MagicMock()
+        update_resp.raise_for_status = lambda: None
+        with patch('requests.post', return_value=update_resp) as mock_post:
+            sg.update("""
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+                INSERT DATA { :s rdf:reifies <<( :a :b :c )>> . }
+            """)
+        sent_body = mock_post.call_args[1]['data'].decode('utf-8')
+        assert '<<(' not in sent_body
+        assert '<< :a :b :c >>' in sent_body

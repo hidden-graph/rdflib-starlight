@@ -1,5 +1,0 @@
-@prefix : <http://example.org/> .
-
-:bob :knows :carol {| :since "2020" ; :source :Wikipedia |} .
-:alice :says <<( :bob :knows :carol )>> .
-:alice :believes <<( :bob :knows :mike )>> .

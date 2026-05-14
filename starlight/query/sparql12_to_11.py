@@ -21,6 +21,7 @@ from dataclasses import dataclass
 RDF_SUBJECT   = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#subject>"
 RDF_PREDICATE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate>"
 RDF_OBJECT    = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#object>"
+RDF_REIFIES   = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>"
 TT_NS_PREFIX  = "http://starlight.org/ns/tt#"
 
 _TRIPLE_FUNC_RE = _re.compile(
@@ -107,8 +108,14 @@ def rewrite_sparql12_to_11(query: str) -> str:
     state = _RewriteState()
 
     if needs_istt:
+        # EXISTS uses [] (a blank node scoped to the EXISTS clause) to leverage
+        # the rdf:subject index; STRSTARTS guards against any user triple that
+        # coincidentally carries rdf:subject but whose subject is not a tt: URI.
         query = _IS_TT_RE.sub(
-            lambda m: f'STRSTARTS(STR({m.group(1)}), "{TT_NS_PREFIX}")',
+            lambda m: (
+                f'(EXISTS {{ {m.group(1)} {RDF_SUBJECT} [] }}'
+                f' && STRSTARTS(STR({m.group(1)}), "{TT_NS_PREFIX}"))'
+            ),
             query,
         )
 
@@ -164,33 +171,52 @@ def _rewrite_annotation_forms(query: str, state: _RewriteState) -> str:
     prefixed names, full IRIs, and simple literals. Complex literals with
     embedded spaces or datatype suffixes are not handled.
     """
-    # Pass 1: s p o ~?r  →  s p o . ?r rdf:reifies <<( s p o )>>
+    # Pass 1: s p o ~?r
+    # Component patterns first (bind ?__tt via the selective rdf:subject index),
+    # then find reifiers, then validate the base-triple assertion last.
+    # Putting s p o last avoids a full triple-scan when s/p/o are variables.
     def _tilde(m: _re.Match) -> str:
         s, p, o, r = m.group(1), m.group(2), m.group(3), m.group(4)
-        return f"{s} {p} {o} .\n  {r} rdf:reifies <<( {s} {p} {o} )>>"
+        tt_var = state.new_var()
+        return (f"{tt_var} {RDF_SUBJECT} {s} .\n  "
+                f"{tt_var} {RDF_PREDICATE} {p} .\n  "
+                f"{tt_var} {RDF_OBJECT} {o} .\n  "
+                f"{r} {RDF_REIFIES} {tt_var} .\n  "
+                f"{s} {p} {o}")
 
     query = _TILDE_RE.sub(_tilde, query)
 
-    # Pass 2: s p o {| ap av ; ... |}  →  s p o . ?__rN rdf:reifies <<( s p o )>> . ?__rN ap av . ...
+    # Pass 2: s p o {| ap av ; ... |}
+    # Same strategy: triple term components → reification → annotation properties
+    # → assertion check last. Any <<( )>> in annotation values are left for Phase 2.
     def _ann_block(m: _re.Match) -> str:
         s, p, o = m.group(1), m.group(2), m.group(3)
         pairs = [pair.strip() for pair in m.group(4).split(';') if pair.strip()]
         r_var = state.new_var()
-        parts = [f"{s} {p} {o}",
-                 f"{r_var} rdf:reifies <<( {s} {p} {o} )>>"]
+        tt_var = state.new_var()
+        parts = [f"{tt_var} {RDF_SUBJECT} {s}",
+                 f"{tt_var} {RDF_PREDICATE} {p}",
+                 f"{tt_var} {RDF_OBJECT} {o}",
+                 f"{r_var} {RDF_REIFIES} {tt_var}"]
         parts.extend(f"{r_var} {pair}" for pair in pairs)
+        parts.append(f"{s} {p} {o}")
         return " .\n  ".join(parts)
 
     query = _ANN_BLOCK_RE.sub(_ann_block, query)
 
-    # Pass 3: << s p o >> pred obj  →  s p o . ?__rN rdf:reifies <<( s p o )>> . ?__rN pred obj
+    # Pass 3: << s p o >> pred obj
+    # No base-triple assertion. Component patterns still go before reification.
     def _ann_subject(m: _re.Match) -> str:
         s, p, o = m.group(1), m.group(2), m.group(3)
         pred, obj = m.group(4), m.group(5)
         r_var = state.new_var()
-        return (f"{s} {p} {o} .\n  "
-                f"{r_var} rdf:reifies <<( {s} {p} {o} )>> .\n  "
-                f"{r_var} {pred} {obj}")
+        tt_var = state.new_var()
+        parts = [f"{tt_var} {RDF_SUBJECT} {s}",
+                 f"{tt_var} {RDF_PREDICATE} {p}",
+                 f"{tt_var} {RDF_OBJECT} {o}",
+                 f"{r_var} {RDF_REIFIES} {tt_var}",
+                 f"{r_var} {pred} {obj}"]
+        return " .\n  ".join(parts)
 
     query = _ANN_SUBJECT_RE.sub(_ann_subject, query)
 

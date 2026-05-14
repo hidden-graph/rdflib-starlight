@@ -12,6 +12,8 @@ Encoding: triple terms are stored as content-addressed URIRefs under TT_NS
 triples that define the encoding are hidden from callers.
 """
 
+import re
+
 from rdflib import Graph, URIRef, BNode
 from rdflib.namespace import RDF
 from starlight.model.triple import TripleTerm
@@ -156,7 +158,7 @@ class StarlightGraph(Graph):
     def _native_query(self, query_object, processor='sparql', result='sparql',
                       initNs=None, initBindings=None, use_store_provided=True, **kwargs):
         from starlight.backends.native import (
-            rewrite_12_to_backend, http_select, http_ask, build_result,
+            rewrite_12_to_backend, http_select, http_ask, http_construct, build_result,
         )
         q_url, _, hdrs = self._store_http()
 
@@ -164,11 +166,25 @@ class StarlightGraph(Graph):
             query_object = rewrite_12_to_backend(query_object, self._backend)
 
         sparql = query_object
-        ql = sparql.strip().upper()
-        if ql.startswith('ASK'):
+
+        # Detect query type by searching for the keyword — startswith() fails when
+        # PREFIX declarations appear before ASK / CONSTRUCT / DESCRIBE.
+        _qt = re.search(r'\b(ASK|CONSTRUCT|DESCRIBE)\b', sparql, re.IGNORECASE)
+        query_type = _qt.group(1).upper() if _qt else 'SELECT'
+
+        if query_type == 'ASK':
             from rdflib.query import Result as RDFResult
             r = RDFResult('ASK')
             r.askAnswer = http_ask(q_url, sparql, hdrs)
+            return r
+
+        if query_type in ('CONSTRUCT', 'DESCRIBE'):
+            from rdflib.query import Result as RDFResult
+            body, _ = http_construct(q_url, sparql, hdrs)
+            g = StarlightGraph()
+            g.parse(data=body.decode('utf-8'), format='turtle12')
+            r = RDFResult('CONSTRUCT')
+            r.graph = g
             return r
 
         vars_, bindings = http_select(q_url, sparql, hdrs)
@@ -355,20 +371,16 @@ class StarlightGraph(Graph):
     # Overridden rdflib.Graph methods
     # ------------------------------------------------------------------
 
-    def add(self, s_or_triple, p=None, obj=None):
-        """Add a triple. Tuples in subject/object positions are treated as TripleTerms.
+    def add(self, triple):
+        """Add a triple. A TripleTerm (or plain 3-tuple) in the object position is
+        converted to its internal encoding automatically.
 
-        Supports both rdflib-compatible single-tuple form and extended
-        positional-argument form:
             g.add((s, p, o))              # plain triple
-            g.add((s, p, o), q, z)        # triple term as subject
-            g.add(s, p, (a, b, c))        # triple term as object
+            g.add((s, p, TripleTerm(...))) # TripleTerm as object
+            g.add((s, p, (a, b, c)))      # plain tuple treated as TripleTerm
         """
-        if p is None and obj is None:
-            s, p, obj = s_or_triple
-        else:
-            s = s_or_triple
-        if isinstance(s, TripleTerm):
+        s, p, obj = triple
+        if isinstance(s, (TripleTerm, tuple)):
             raise ValueError(
                 "RDF 1.2: triple terms are not permitted in subject position of a triple."
             )
@@ -560,37 +572,38 @@ class StarlightGraph(Graph):
     # RDF 1.2-specific additions
     # ------------------------------------------------------------------
 
-    def add_reifier(self, predicate, obj, name=None):
-        """Assert a reifier triple and return the reifier node.
+    def add_reifier_annotation(self, predicate, obj, name=None):
+        """Create a reifier node and add one annotation property to it.
 
-        If name is given it is used as the reifier URIRef; otherwise a fresh
-        BNode is created. The triple (reifier, predicate, obj) is added to the
-        graph and the reifier is returned for use with add_reification().
+        The node is not yet a reifier until add_reification() is called.
 
-            stmt = g.add_reifier(EX.reported, EX.NYTimes, name=EX.stmt1)
-            g.add_reification(stmt, (EX.a, EX.b, EX.c))
+            r = g.add_reifier_annotation(EX.confidence, Literal("0.9"), name=EX.stmt1)
+            g.add_reification(r, (EX.bob, EX.knows, EX.carol))
 
             # or inline:
-            g.add_reification(g.add_reifier(EX.reported, EX.NYTimes), triple)
+            g.add_reification(
+                g.add_reifier_annotation(EX.reported, EX.NYTimes),
+                triple_term
+            )
         """
         reifier = URIRef(name) if name is not None else BNode()
-        super().add((reifier, predicate, obj))
+        self.add((reifier, predicate, obj))
         return reifier
 
     def add_reification(self, reifier, triple_term):
-        """Add a reification: reifier rdf:reifies triple_term."""
+        """Add reifier rdf:reifies triple_term, making the node an official reifier."""
         tt = triple_term if isinstance(triple_term, TripleTerm) else TripleTerm(*triple_term)
         tt_uri = self._intern_tt(tt)
         super().add((reifier, RDF_REIFIES, tt_uri))
 
-    def reifications(self, TT=None, predicate=None, object=None):
+    def reifiers(self, TT=None, predicate=None, object=None):
         """Yield reifier nodes matching the given filters.
 
         TT        -- only reifiers that rdf:reifies this triple term
         predicate -- only reifiers that have (reifier, predicate, ?) in the graph
         object    -- only reifiers that have (reifier, ?, object) in the graph
 
-        Filters combine: reifications(TT=t, predicate=p, object=o) returns
+        Filters combine: reifiers(TT=t, predicate=p, object=o) returns
         reifiers that reify t AND have (reifier, p, o) in the graph.
         """
         # Step 1 — candidate reifiers from TT filter (fast path via rdf:reifies index)
@@ -615,13 +628,37 @@ class StarlightGraph(Graph):
         elif tt_reifiers is not None:
             candidates = tt_reifiers
         elif prop_reifiers is not None:
-            # keep only nodes that are actually reifiers
             all_reifiers = {r for r, _, _ in super().triples((None, RDF_REIFIES, None))}
             candidates = prop_reifiers & all_reifiers
         else:
             candidates = {r for r, _, _ in super().triples((None, RDF_REIFIES, None))}
 
         yield from candidates
+
+    def reifications(self, s=None, p=None, o=None):
+        """Yield TripleTerms that have at least one reifier and match the s/p/o pattern.
+
+            g.reifications()                 # all reified triple terms
+            g.reifications(p=EX.knows)       # reified TTs with that predicate
+        """
+        for tt in self.triple_terms(subject=s, predicate=p, object=o):
+            tt_uri = self._coerce_tt_read(tt)
+            if tt_uri and tt_uri is not _TT_NOT_FOUND:
+                if any(True for _ in super().triples((None, RDF_REIFIES, tt_uri))):
+                    yield tt
+
+    def reifier_annotations(self, TT):
+        """Yield (reifier, predicate, value) annotation triples for all reifiers of TT.
+
+        Excludes the rdf:reifies triple itself.
+        """
+        tt_uri = self._coerce_tt_read(TT)
+        if tt_uri is None or tt_uri is _TT_NOT_FOUND:
+            return
+        for reifier, _, _ in super().triples((None, RDF_REIFIES, tt_uri)):
+            for _, pred, val in super().triples((reifier, None, None)):
+                if pred != RDF_REIFIES:
+                    yield reifier, pred, self._restore(val)
 
     def reified_triples(self, reifier):
         """Yield the TripleTerms reified by the given reifier node."""
@@ -649,10 +686,6 @@ class StarlightGraph(Graph):
         """Return True if a TripleTerm with these exact components exists in the graph."""
         key = TripleTerm(subject, predicate, object)._key()
         return key in self._tt_registry
-
-    def reifiers(self, TT):
-        """Yield all reifier nodes that rdf:reifies the given triple term."""
-        yield from self.reifications(TT=TT)
 
     def remove_reification(self, reifier):
         """Remove the rdf:reifies triple(s) for the given reifier."""
@@ -797,10 +830,12 @@ class StarlightGraph(Graph):
           via a post-processing SELECT pass against the same WHERE clause
         """
         if self._is_native:
-            raise NotImplementedError(
-                f'SPARQL UPDATE on native backend {self._backend!r} not yet implemented; '
-                'use add() / addN() / remove() instead.'
-            )
+            from starlight.backends.native import rewrite_12_to_backend, http_update
+            _, u_url, hdrs = self._store_http()
+            if isinstance(update_object, str):
+                update_object = rewrite_12_to_backend(update_object, self._backend)
+            http_update(u_url, update_object, hdrs)
+            return None
         from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
         if isinstance(update_object, str):
             update_object = self._preprocess_data_updates(update_object)
@@ -1101,6 +1136,27 @@ class StarlightGraph(Graph):
                 return destination
             return text
         return super().serialize(destination=destination, format=format, **kwargs)
+
+    def print(self, format: str = 'turtle12', out=None) -> None:
+        """Print the graph to stdout. Defaults to turtle12 so TripleTerms display correctly."""
+        import sys
+        print(self.serialize(format=format), file=out or sys.stdout, flush=True)
+
+    def cbd(self, resource, *, target_graph=None, include_reifications=True):
+        """Concise Bounded Description. Defaults target_graph to a new StarlightGraph.
+
+        Raises TypeError if target_graph is a plain rdflib.Graph — it cannot store
+        TripleTerms that may appear in the CBD results.
+        """
+        from rdflib import Graph as _RDFLibGraph
+        if target_graph is None:
+            target_graph = StarlightGraph()
+        elif not isinstance(target_graph, StarlightGraph):
+            raise TypeError(
+                f"cbd() target_graph must be a StarlightGraph, not {type(target_graph).__name__}. "
+                "A plain rdflib.Graph cannot store TripleTerms."
+            )
+        return super().cbd(resource, target_graph=target_graph, include_reifications=include_reifications)
 
     @classmethod
     def from_rdflib(cls, source_graph):

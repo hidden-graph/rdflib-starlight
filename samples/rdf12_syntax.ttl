@@ -1,17 +1,83 @@
-@prefix : <http://example.org/> .
+@prefix :    <http://example.org/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
-# Annotation shorthand — add metadata directly to a triple
+# =============================================================================
+# Syntax Examples
+#
+# For each example, three representations are shown:
+#
+#   RDF 1.2 input in Turtle 1.2 format.
+#
+#   rdflib (RDF 1.1)  — what starlight stores in the underlying rdflib graph.
+#                       Triple terms are encoded as content-addressed URIRefs:
+#                         sl:tt#<hash>  — triple term  (http://starlight.org/ns/tt#)
+#                         sl:rr#<n>     — anonymous reifier (http://starlight.org/ns/rr#)
+#
+#   RDF 1.2 formal    — the canonical form using rdf:reifies and <<( )>> triple terms.
+# =============================================================================
+
+
+# 1. Annotation shorthand  {| |}
+#    :bob :knows :carol is asserted as a triple; metadata is attached to it.
+
 :bob :knows :carol {| :since "2020" ; :source :Wikipedia |} .
 
-# Triple term in object position — refer to a fact as a value
+#   rdflib store:    :bob :knows :carol .
+#                    sl:tt#a1b2c3d4 rdf:subject :bob ;
+#                                   rdf:predicate :knows ;
+#                                   rdf:object :carol .
+#                    sl:rr#0 rdf:reifies sl:tt#a1b2c3d4 ;
+#                            :since "2020" ; :source :Wikipedia .
+#
+#   RDF 1.2 formal:  :bob :knows :carol .
+#                    _:s rdf:reifies <<( :bob :knows :carol )>> ;
+#                        :since "2020" ; :source :Wikipedia .
+
+
+# 2. Triple term in object position  <<( )>>
+#    The fact :bob :knows :carol is referenced as a value; not separately asserted.
+
 :alice :says <<( :bob :knows :carol )>> .
 
-# Reification shorthand in subject position — assert something about a fact
+#   rdflib store:    sl:tt#a1b2c3d4 rdf:subject :bob ;
+#                                   rdf:predicate :knows ;
+#                                   rdf:object :carol .
+#                    :alice :says sl:tt#a1b2c3d4 .
+#                    (:bob :knows :carol is NOT asserted as a standalone triple here)
+#
+#   RDF 1.2 formal:  :alice :says <<( :bob :knows :carol )>> .
+
+
+# 3. Reification shorthand in subject position  << >>
+#    An anonymous reifier is created; the underlying triple is NOT asserted.
+
 << :bob :knows :carol >> :verifiedBy :ResearchTeam .
 
-# Unasserted triple term — referenced as a value, not a standalone fact
-:alice :believes <<( :bob :knows :mike )>> .
+#   rdflib store:    sl:tt#a1b2c3d4 rdf:subject :bob ;
+#                                   rdf:predicate :knows ;
+#                                   rdf:object :carol .
+#                    sl:rr#1 rdf:reifies sl:tt#a1b2c3d4 ;
+#                            :verifiedBy :ResearchTeam .
+#
+#   RDF 1.2 formal:  _:s rdf:reifies <<( :bob :knows :carol )>> ;
+#                        :verifiedBy :ResearchTeam .
 
-# Named reifier with tilde syntax
+
+# 4. Named reifier with tilde  ~ :name
+#    :stmt1 is the named reifier; the underlying triple is asserted.
+
 :bob :knows :carol ~ :stmt1 .
 :stmt1 :confidence "0.9" .
+
+#   rdflib store:    :bob :knows :carol .
+#                    sl:tt#a1b2c3d4 rdf:subject :bob ;
+#                                   rdf:predicate :knows ;
+#                                   rdf:object :carol .
+#                    :stmt1 rdf:reifies sl:tt#a1b2c3d4 ;
+#                           :confidence "0.9" .
+#
+#   RDF 1.2 formal:  :bob :knows :carol .
+#                    :stmt1 rdf:reifies <<( :bob :knows :carol )>> ;
+#                           :confidence "0.9" .
+
+

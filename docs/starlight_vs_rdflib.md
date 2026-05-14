@@ -1,6 +1,6 @@
 # StarlightGraph vs rdflib.Graph — Method Coverage Tracker
 
-Tracks every public `rdflib.Graph` method against its status in `StarlightGraph`.
+Summary of all public `rdflib.Graph` method and status in `StarlightGraph`.
 
 **Status key**
 
@@ -13,91 +13,94 @@ Tracks every public `rdflib.Graph` method against its status in `StarlightGraph`
 ---
 
 ## Core Mutation
-Triples may contain triples statements {(c b c)} in the subject or object position of the triple.
 
-✅ `add(triple)` — Coerces tuple/TripleTerm in subject and object positions; also accepts positional `(s, p, o)` form.
+TripleTerm as used below can be refer to a either a triple in form (s,p,o) in the object position, or a TripleTerm python datatype created as TT = TripleTerm(s,p,p)
 
-✅ `remove(triple)` — Coerces subject/object before delegating to store.
+✅ g.add(triple)` — Adds one triple. Allows triple term as an object.
 
-🔗 `set(triple)` — Calls our `remove()` + `add()`, so coercion flows through correctly.
+✅ g.remove(triple)` — Removes a triple. Allows triple term as an object.
 
-✅ `addN(quads)` — Overridden; coerces TripleTerms in subject/object positions before writing to the store.
+🔗 g.set(triple)` — Replaces all existing objects for the given subject+predicate with the new value. Allows triple term as an object.  
+
+✅ g.addN(quads)` — Adds multiple `(subject, predicate, object, graph)` quads in one call. Converts Accepts TripleTerms in the object position.
 
 ---
 
 ## Core Traversal
-Patterns may contain triple statements as part of the pattern.
-✅ `triples(pattern)` — Coerces TripleTerm patterns; filters internal encoding triples (`tt:` subject + `rdf:subject/predicate/object`); restores TT URIRefs to TripleTerm objects in results.
 
-✅ `triples_choices(triple)` — Overridden; coerces TripleTerm patterns (lists or singles), filters encoding triples, restores TripleTerm objects in results.
+TripleTerms can appear in the object position of a pattern. All traversal methods can return TripleTerms as first-class values.
 
-🔗 `__iter__` — rdflib implements as `self.triples((None, None, None))` — our override fires correctly.
+✅ `g.triples((s, p, o))` — Yields all triples matching the pattern. Each position is a specific value or `None` (wildcard). Accepts a TripleTerm in the object position; returns TripleTerms as `TripleTerm` objects.
 
-✅ `__contains__(triple)` — Coerces subject/object before membership test.
+✅ `g.triples_choices((s, p, o))` — Like `g.triples()` but any position can be a list of values instead of a single value. Accepts TripleTerms in any object list entry.
 
-✅ `__len__` — Counts only visible (non-encoding) triples via `self.triples()`.
+🔗 `for (s, p, o) in g` — Iterates all triples in the graph. Delegates to `g.triples()`, so TripleTerms are returned correctly.
+
+✅ `(s, p, o) in g` — Tests whether a specific triple is in the graph. Accepts a TripleTerm in the object position.
+
+✅ `len(g)` — Returns the number of triples in the graph based on RDF 1.2 representation.
 
 ---
 
 ## Convenience Traversal
 
-All of these are implemented in rdflib as thin wrappers over `self.triples()`, so they inherit correct TripleTerm support without needing overrides.
+These are all rdflib wrappers over `g.triples()` and work correctly with TripleTerms without any override. Objects may be TripleTerms; TripleTerms are returned as `TripleTerm` objects.
 
-Subjects and objects may be triple terms and subjects() and objects() may return triple terms.
+🔗 `g.subjects(predicate, object)` — Yields subjects matching the given predicate and object.
 
-🔗 `subjects(predicate, object)` — Iterates `self.triples()`; returns TripleTerm objects where applicable; encoding triples filtered.
+🔗 `g.predicates(subject, object)` — Yields predicates matching the given subject and object.
 
-🔗 `predicates(subject, object)` — Predicates cannot be TripleTerms in RDF 1.2; encoding predicates are filtered by `triples()`.
+🔗 `g.objects(subject, predicate)` — Yields objects for the given subject and predicate. May return TripleTerms.
 
-🔗 `objects(subject, predicate)` — Returns TripleTerm objects in object positions via `triples()` restoration.
+🔗 `g.subject_objects(predicate)` — Yields `(subject, object)` pairs for the given predicate. May return TripleTerms as object.
 
-🔗 `subject_objects(predicate)` — Both positions restored via `triples()`.
+🔗 `g.subject_predicates(object)` — Yields `(subject, predicate)` pairs for the given object.
 
-🔗 `subject_predicates(object)` — Subject position restored via `triples()`.
+🔗 `g.predicate_objects(subject)` — Yields `(predicate, object)` pairs for the given subject. May return TripleTerms as object.
 
-🔗 `predicate_objects(subject)` — Object position restored via `triples()`.
+🔗 `g.value(subject, predicate, object)` — Returns a single matching value, or `None`. Raises if multiple matches exist.
 
-🔗 `value(subject, predicate, object)` — Delegates to `objects()` / `subjects()`; returns TripleTerm correctly.
-
-🔗 `all_nodes()` — Built as `chain(subjects(), objects())`; both of those work; encoding nodes excluded.
+🔗 `g.all_nodes()` — Yields every subject and object node in the graph based on RDF 1.2 representation.  
 
 ---
 
 ## Namespace / Identifier
 
-➖ `bind(prefix, namespace)` — No TripleTerm involvement.
+The following functions have no TripleTerm involvement.
 
-➖ `namespaces()` — No TripleTerm involvement.
+➖ `bind(prefix, namespace)`
 
-➖ `compute_qname(uri)` — URI string utility.
+➖ `namespaces()` 
 
-➖ `qname(uri)` — URI string utility.
+➖ `compute_qname(uri)`
 
-➖ `absolutize(uri)` — URI resolution utility.
+➖ `qname(uri)` 
 
-➖ `n3(namespace_manager)` — Returns the graph's own identifier as N3, not triple content.
+➖ `absolutize(uri)` 
+
+➖ `n3(namespace_manager)` 
 
 ---
 
 ## Serialization / Parsing
 
-Allows for the parsing from 1.2 formats and the serialization into 1.2 formats. 
+All rdflib formats are supported. Six additional RDF 1.2 formats add TripleTerm support.
 
-✅ `parse(...)` — Four RDF 1.2 formats supported: `format='turtle12'` (full Turtle 1.2 via `StarlightTurtleParser`); `format='nt12'` (N-Triples 1.2 line-by-line parser); `format='nq12'` (N-Quads 1.2, all named graphs merged); `format='trig12'` (TriG 1.2, all named graphs merged). All other formats delegate to rdflib with no TripleTerm support.
+✅ `g.parse(...)` — Six additional RDF 1.2 formats supported: `turtle12`, `nt12`, `nq12`, `trig12`, `trix12`, `rdfxml12`.
 
-✅ `serialize(...)` — Four RDF 1.2 formats supported: `format='turtle12'` (`serialize_turtle12()`); `format='nt12'` (N-Triples 1.2, one triple per line, full IRIs); `format='nq12'` (N-Quads 1.2, graph name from `self.identifier`); `format='trig12'` (TriG 1.2, `GRAPH <id> { Turtle 1.2 }` for named-graph identifiers, plain Turtle for BNode identifiers). All other formats serialize the raw store (encoding triples visible).
+✅ `g.serialize(...)` — All rdflib formats continue to work (e.g. ttl 1.1) but will expose internal encoding of triples. Six RDF 1.2 formats serialize TripleTerms correctly: `turtle12`, `longturtle12`, `nt12`, `nq12`, `trig12`, `trix12`.
 
-⚠️ `print(format, out)` — Calls `self.serialize()`; all four RDF 1.2 formats work cleanly; non-RDF-1.2 formats expose internal encoding.
+✅ `g.print(...)` — Overridden to default to `turtle12`. Calling `g.print()` with no arguments produces clean RDF 1.2 output.
 
 ---
 
 ## SPARQL
 
-Allow SPARQL queries to consume and return triple statements.
+SPARQL 1.2 syntax is fully supported. See [sparql12_design.md](sparql12_design.md) for full details.
 
-✅ `query(query_object, ...)` — Overridden. Rewrites SPARQL 1.2 syntax to SPARQL 1.1 before execution; runs the rewritten query against a plain `Graph` view of the store so encoding triples are visible; post-processes SELECT bindings to restore `tt:HASH` URIRefs to `TripleTerm` objects (including prefixed-name serialization via the graph's namespace manager); wraps CONSTRUCT output in a `StarlightGraph`. Supported forms: `<<( )>>` triple-term patterns, `<< >>` annotation subjects, `{| |}` inline annotation blocks, `~?r` reifier binding, `SUBJECT()`/`PREDICATE()`/`OBJECT()` functions, `isTripleTerm()` filter.
+✅ `g.query(...)` — Accepts SPARQL 1.2 queries including `<<( )>>` triple-term patterns, `{| |}` annotation blocks, `~?r` reifier binding, and `isTripleTerm()`. For the default rdf-1.1 backend, queries are rewritten to SPARQL 1.1 internally. For native backends (rdf-star, rdf-1.2), queries go directly to the endpoint via HTTP. CONSTRUCT can return RDF 1.2 graph.
 
-✅ `update(update_object, ...)` — Overridden. Three paths: (1) WHERE clauses — `<<( )>>` rewritten to encoding patterns; (2) INSERT/DELETE DATA — ground triple terms parsed via Turtle 1.2 and added/removed directly; (3) INSERT/DELETE templates — `<<( )>>` in subject **or** object position handled via post-processing SELECT against the same WHERE clause; bindings resolved via Python API. Registry rebuilt after every update.
+✅ `g.update(...)` — Accepts SPARQL 1.2 UPDATE with triple-term patterns in WHERE, INSERT, and DELETE clauses. For the default rdf-1.1 backend, triple terms are encoded before writing. For native backends, the update goes directly to the endpoint via HTTP.
 
 ---
 
@@ -105,51 +108,53 @@ Allow SPARQL queries to consume and return triple statements.
 
 Update graph algorithms to operate with triple statements,
 
-🔗 `connected()` — Uses `subjects()` which is correct; encoding triples filtered so only visible graph structure is considered.
+🔗 `connected()` — Uses `subjects()`; encoding triples filtered so only visible graph structure is considered.
 
-⚠️ `isomorphic(other)` — Uses `graph_diff` which iterates both graphs via `triples()`; TT URIRefs are content-addressed (same content = same URI) so identical TripleTerms match correctly. BNodes *inside* a TripleTerm are included in the hash and will not isomorphize across separately parsed graphs — correct RDF 1.2 semantics but may surprise callers.
+⚠️ `isomorphic(other)` — Uses `graph_diff` which iterates both graphs via `triples()`; TT URIRefs are content-addressed (same content = same URI) so identical TripleTerms match correctly. BNodes *inside* a TripleTerm are included in the hash and will not isomorphize across separately parsed graphs.  
 
-⚠️ `cbd(resource, ...)` — Calls `self.predicate_objects()` (correct), but copies results into `target_graph` via `target_graph.add()`. If `target_graph` is a plain `rdflib.Graph`, TripleTerms in object position cannot be stored. Works correctly when `target_graph` is also a `StarlightGraph`.
+✅ `g.cbd(resource, ...)` — Returns a `StarlightGraph` containing all triples for the given resource. Raises `TypeError` if a plain `rdflib.Graph` is passed as `target_graph`.
 
 ➖ `transitiveClosure(func, arg)` — User-supplied function; no direct TripleTerm involvement.
 
-➖ `transitive_objects(subject, predicate)` — Calls `self.objects()` which is inherited correctly; a TripleTerm as a hop in the chain is an unusual edge case.
+➖ `transitive_objects(subject, predicate)` — Walks a chain following objects as subjects. A TripleTerm cannot be subjects.
 
-➖ `transitive_subjects(predicate, object)` — Same as above.
+➖ `transitive_subjects(predicate, object)` — Walks the chain in reverse, finding all subjects that eventually lead to the given object. A TripleTerm can be the starting object.  
 
 ---
 
 ## RDF Collections
 
-🔲 `collection(identifier)` — `rdf:first` / `rdf:rest` lists; TripleTerms should be valid list members (a collection of statements) but are not currently handled.
+🔗 `g.collection(identifier)` — Returns a `Collection` object for navigating an `rdf:first`/`rdf:rest` list. TripleTerms are valid list members and are returned correctly as `TripleTerm` objects.
 
-🔲 `items(list)` — Generator over list members; will return raw `tt:HASH` URIRefs instead of TripleTerm objects when a list contains triple terms.
+🔗 `g.items(list)` — Iterates members of an RDF list. TripleTerms in the list are returned as `TripleTerm` objects.
 
 ---
 
 ## Store Lifecycle
 
-➖ `open(configuration, create)`
+These methods manage the underlying store connection and transactions. They have no TripleTerm involvement and are not overridden.
 
-➖ `close(commit_pending_transaction)`
+➖ `g.open(configuration, create)` — Opens the store (e.g. connects to a database).
 
-➖ `commit()`
+➖ `g.close(commit_pending_transaction)` — Closes the store connection.
 
-➖ `rollback()`
+➖ `g.commit()` — Commits the current transaction.
 
-➖ `destroy(configuration)`
+➖ `g.rollback()` — Rolls back the current transaction.
+
+➖ `g.destroy(configuration)` — Destroys the store (e.g. drops the database).
 
 ---
 
 ## Other rdflib Utilities
 
-➖ `skolemize(...)` — rdflib BNode → URI skolemization; unrelated to TT encoding.
+➖ `g.skolemize(...)` — Replaces blank nodes with stable URIs. No TripleTerm involvement.
 
-➖ `de_skolemize(...)`
+➖ `g.de_skolemize(...)` — Reverses `skolemize()`. No TripleTerm involvement.
 
-🔲 `resource(identifier)` — Returns an `rdflib.Resource` view; identifier is not coerced to `tt:HASH`, so passing a TripleTerm to navigate annotations will not work.
+➖ `g.resource(identifier)` — Returns an `rdflib.Resource` view for navigating a node's properties. Not applicable to TripleTerms since they cannot be subjects — use `g.reifications()` and `g.reified_triples()` instead.
 
-➖ `toPython()` — No-op on Graph; unrelated.
+➖ `g.toPython()` — No-op on graphs; no TripleTerm involvement.
 
 ---
 
@@ -157,23 +162,25 @@ Update graph algorithms to operate with triple statements,
 
 These methods exist only in `StarlightGraph` and have no rdflib equivalent.
 
-✅ `add_reifier(predicate, obj, name=None)` — Creates a reifier node (named URIRef if `name` given, fresh BNode otherwise), asserts `(reifier, predicate, obj)` into the graph, and returns the reifier for use with `add_reification()`. `.
+✅ `g.add_reifier_annotation(predicate, obj, name=None)` — Creates a new annotation using named URIRef as subject if `name` given, BNode otherwise.  The node becomes a reifier after `g.add_reification()` is called. Returns the subject node as reifier.
 
-✅ `add_reification(reifier, triple_term)` — Adds a reification as `reifier rdf:reifies tt:HASH`; accepts a plain 3-tuple or TripleTerm for `triple_term`.
+✅ `g.add_reification(reifier, triple_term)` — Adds `reifier rdf:reifies <<( s p o )>>`.. Accepts a plain 3-tuple or `TripleTerm` for `triple_term`.
 
-✅ `reifications(TT=None, predicate=None, object=None)` — Yields reifier nodes matching the combined filters: `TT` narrows by the triple term being reified; `predicate`/`object` narrow by properties of the reifier itself. Any combination works — e.g. `reifications(TT=t, predicate=EX.reported, object=EX.NYTimes)` returns reifiers that reify `t` AND were reported by NYTimes.
+✅ `g.reifiers(TT=None, predicate=None, object=None)` — Yields reifier nodes. `TT` narrows by the TripleTerm being reified; `predicate`/`object` narrow by the reifier's own annotation properties. Any combination works.
 
-✅ `reified_triples(reifier)` — Yields the TripleTerms reified by the given reifier node. Pair with `reifications()` to answer "what did NYTimes report?" or "what does this reifier claim?".
+✅ `g.reifications(s=None, p=None, o=None)` — Yields TripleTerms that have at least one reifier annotation, optionally filtered by the components `s`, `p`, `o` of the TripleTerm.
 
-✅ `triple_terms(subject=None, predicate=None, object=None)` — Yields all TripleTerms registered in the graph; any combination of subject, predicate, object filters the results. Use `next(g.triple_terms(s, p, o), None)` for a single lookup by components.
+✅ `g.reifier_annotations(TT)` — Yields `(reifier, predicate, value)` annotation triples for all reifiers of the given TripleTerm. Excludes the `rdf:reifies` triple itself.
 
-✅ `has_triple_term(subject, predicate, object)` — Returns True if a TripleTerm with those exact components exists in the graph; pure registry lookup, no store query.
+✅ `g.reified_triples(reifier)` — Yields the TripleTerms of the given reifier.  
 
-✅ `reifiers(TT)` — Shorthand for `reifications(TT=TT)`; yields all reifier nodes that claim a specific triple term.
+✅ `g.triple_terms(subject=None, predicate=None, object=None)` — Yields all TripleTerms in the graph; any combination of `subject`, `predicate`, `object` filters the results.
 
-✅ `remove_reification(reifier)` — Removes the `rdf:reifies` triple(s) for the given reifier node.
+✅ `g.has_triple_term(subject, predicate, object)` — Returns `True` if a TripleTerm with those exact components exists in the graph.
 
-✅ `from_rdflib(source_graph)` — Class method; runs `_skolemize_encoding`, copies triples, rebuilds TT registry.
+✅ `g.remove_reification(reifier)` — Removes the `rdf:reifies` triple for the given reifier.
+
+✅ `g.from_rdflib(source_graph)` — Class method; imports a plain `rdflib.Graph` into a new `StarlightGraph`, encoding any existing reification triples and rebuilding the TripleTerm registry.
 
 ---
 
@@ -183,15 +190,34 @@ New classes introduced by Starlight with no direct rdflib equivalent.
 
 ### starlight/model/triple.py
 
-✅ `TripleTerm` — Represents an RDF 1.2 triple term `<<( s p o )>>` as a Python value type. Value-equality and hashing based on content; accepts nested TripleTerms. Coerced from plain 3-tuples wherever the StarlightGraph API accepts a node. Implements `n3(namespace_manager=None)` for rdflib term interface compatibility.
+✅ `TripleTerm` — Represents an RDF 1.2 triple term `<<( s p o )>>` as a Python value. Two TripleTerms with the same components are equal regardless of how they were created. Accepts nested TripleTerms. A plain 3-tuple in object position is automatically treated as a TripleTerm. Implements `.n3()` so rdflib can format it as `<<( :bob :knows :carol )>>` wherever a node is expected.
 
 ### starlight/graph/starlight_graph.py
 
 ✅ `StarlightGraph` — Subclass of `rdflib.Graph`; the main public API for single-graph RDF 1.2. Stores TripleTerms as content-addressed `tt:HASH` URIRefs internally and hides the encoding from all callers. See method tracker above.
 
+```python
+from starlight.graph.starlight_graph import StarlightGraph
+from starlight.model.triple import TripleTerm
+from rdflib import URIRef, Literal
+
+g = StarlightGraph()                    # in-memory, default rdf-1.1 backend
+g = StarlightGraph(backend='rdf-1.2')  # native RDF 1.2 endpoint
+```
+
 ### starlight/graph/starlight_dataset.py
 
-✅ `StarlightDataset` — Subclass of `rdflib.Dataset`; multi-graph container where every named-graph context is a `StarlightGraph`. Overrides `get_context()` to return `StarlightGraph` views (with registry populated), `quads()` to filter encoding triples and restore TripleTerms, `contexts()` to yield `StarlightGraph` instances, `parse(format='trig12')` to load TriG 1.2 into isolated per-graph `StarlightGraph` contexts, and `serialize(format='trig12')` to emit a valid TriG 1.2 document with `GRAPH <uri> { Turtle 1.2 }` blocks. Each named graph's TripleTerm registry is independent; triple terms in graph A are not visible from graph B.
+✅ `StarlightDataset` — Subclass of `rdflib.Dataset`; a multi-graph container where every named graph is a `StarlightGraph`. Each named graph has its own independent TripleTerm registry — triple terms in graph A are not visible from graph B.
+
+- `ds.get_context(uri)` — returns the named graph as a `StarlightGraph` with its registry populated.
+
+- `ds.quads((s, p, o))` — yields `(subject, predicate, object, graph)` across all named graphs, filtered by the optional `(s, p, o)` pattern (each position `None` matches anything). Encoding triples are hidden; TripleTerms are returned as `TripleTerm` objects. The fourth element is the `StarlightGraph` the triple belongs to.
+
+- `ds.contexts()` — yields each named graph as a `StarlightGraph`.
+
+- `ds.parse(format='trig12')` — loads a TriG 1.2 document, each named graph into its own `StarlightGraph`.
+
+- `ds.serialize(format='trig12')` — emits a TriG 1.2 document with `GRAPH <uri> { ... }` blocks.
 
 
 ### starlight/parsers/turtle_parser.py
@@ -240,16 +266,14 @@ Module-level functions that are part of the internal encoding but not public API
 
 ## Summary
 
-✅ Done — 13
-🔗 Inherited (works) — 14
-⚠️ Partial / caveats — 3
-🔲 Not started (gap) — 2
-➖ Not needed — 16
+✅ Done — 35 (13 rdflib.Graph methods overridden; 10 RDF 1.2 additions; 12 Starlight classes/functions)
+🔗 Inherited (works) — 13
+⚠️ Partial / caveats — 1 (see below)
+➖ Not relevant — 20
 
 
 ### Known caveats
 
-- **`serialize` non-RDF-1.2 formats** — internal `tt:HASH` URIRefs and encoding triples (`rdf:subject/predicate/object`) are visible; intended for debugging but may surprise callers expecting clean RDF 1.1.
+- **`serialize` non-RDF-1.2 formats** — internal `tt:HASH` URIRefs and encoding triples (`rdf:subject/predicate/object`) are visible when serializing to an RDF 1.1 format.  
 - **`cbd`** — only safe when `target_graph` is a `StarlightGraph`; TripleTerms in object positions cannot be stored in a plain `rdflib.Graph`.
-- **`isomorphic`** — TripleTerms with BNodes inside them are content-addressed and will not isomorphize across separately parsed graphs (expected RDF 1.2 semantics, but worth noting).
-- **`parse`/`serialize` TriG/N-Quads named-graph merging** — `StarlightGraph` is a single-graph view; `trig12` and `nq12` parsing merges all named-graph content into one graph (provenance is lost).
+- **`isomorphic`** — TripleTerms with BNodes inside them are content-addressed and will not isomorphize across separately parsed graphs.
