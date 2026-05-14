@@ -556,7 +556,7 @@ FILTER(isTripleTerm(?x))
 
 # Rewritten
 FILTER(EXISTS { ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> [] }
-    && STRSTARTS(STR(?x), "http://starlight.org/ns/tt#"))
+    && STRSTARTS(STR(?x), "https://github.com/hidden-graph/rdflib-starlight/ns/tt#"))
 ```
 
 The `STRSTARTS` guard rejects any user triple that coincidentally

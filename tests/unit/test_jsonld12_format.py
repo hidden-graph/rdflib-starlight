@@ -14,7 +14,7 @@ from starlight.graph.starlight_graph import StarlightGraph, RDF_REIFIES
 from starlight.model.triple import TripleTerm
 
 EX   = 'http://example.org/'
-TT_NS = 'http://starlight.org/ns/tt#'
+TT_NS = 'https://github.com/hidden-graph/rdflib-starlight/ns/tt#'
 RDF_TRIPLE_TERM = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#TripleTerm')
 
 
