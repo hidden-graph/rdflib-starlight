@@ -1136,13 +1136,38 @@ class StarlightGraph(Graph):
                     f.write(text)
                 return destination
             return text
-        # For 1.1 formats: wrap the same store in a plain Graph so rdflib's
-        # serializer sees the internal tt:HASH encoding rather than TripleTerm
-        # objects (whose .n3() would emit invalid 1.2 syntax without a @version).
+        # For 1.1 formats: de-skolemize internal URIRefs to blank nodes so
+        # rdflib's serializer produces clean output without exposing tt:/rr: URIs.
+        return self._deskolemize_to_graph().serialize(destination=destination, format=format, **kwargs)
+
+    def _deskolemize_to_graph(self) -> Graph:
+        """Return a plain rdflib.Graph with internal tt:/rr: URIRefs replaced by BNodes.
+
+        Used by 1.1 serializers so triple terms appear as blank-node reifications
+        rather than opaque content-addressed URIRefs.
+        """
+        from starlight.model.encoding import TT_NS, RR_NS
+        _INTERNAL_NS = (TT_NS, RR_NS, SL_NS)
+
+        bnode_map: dict = {}
+
+        def _sub(node):
+            if isinstance(node, URIRef):
+                s = str(node)
+                if s.startswith(TT_NS) or s.startswith(RR_NS):
+                    if node not in bnode_map:
+                        bnode_map[node] = BNode()
+                    return bnode_map[node]
+            return node
+
         raw = Graph(store=self.store, identifier=self.identifier)
+        out = Graph()
         for prefix, ns in self.namespaces():
-            raw.bind(prefix, ns)
-        return raw.serialize(destination=destination, format=format, **kwargs)
+            if not str(ns).startswith(_INTERNAL_NS):
+                out.bind(prefix, ns)
+        for s, p, o in raw:
+            out.add((_sub(s), _sub(p), _sub(o)))
+        return out
 
     def print(self, format: str = 'turtle12', out=None) -> None:
         """Print the graph to stdout. Defaults to turtle12 so TripleTerms display correctly."""
