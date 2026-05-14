@@ -1093,16 +1093,17 @@ class StarlightGraph(Graph):
             return Literal(tok[1:-1])
         return None
 
-    def serialize(self, destination=None, format='turtle', **kwargs):
+    def serialize(self, destination=None, format='turtle12', **kwargs):
         """Serialize the graph.
 
-        format='turtle12'     — Turtle 1.2 with <<( )>> triple terms
+        format='turtle12'     — Turtle 1.2 with <<( )>> triple terms (default)
         format='longturtle12' — Turtle 1.2, one triple per line (no grouping)
         format='nt12'         — N-Triples 1.2 with <<( )>> triple terms
         format='nq12'         — N-Quads 1.2 (graph name from self.identifier)
         format='trig12'       — TriG 1.2 (GRAPH block wrapper around Turtle 1.2)
         format='trix12'       — TriX 1.2 XML (<graph> block with <triple> elements)
-        All other formats delegate to rdflib (internal tt: encoding visible).
+        All other formats (e.g. 'turtle', 'xml') delegate to rdflib using the
+        internal tt:HASH encoding — triple terms appear as opaque URIRefs.
         """
         _RDF12_FORMATS = {'turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'trix12', 'rdfxml12', 'jsonld12'}
         if format in _RDF12_FORMATS:
@@ -1135,7 +1136,13 @@ class StarlightGraph(Graph):
                     f.write(text)
                 return destination
             return text
-        return super().serialize(destination=destination, format=format, **kwargs)
+        # For 1.1 formats: wrap the same store in a plain Graph so rdflib's
+        # serializer sees the internal tt:HASH encoding rather than TripleTerm
+        # objects (whose .n3() would emit invalid 1.2 syntax without a @version).
+        raw = Graph(store=self.store, identifier=self.identifier)
+        for prefix, ns in self.namespaces():
+            raw.bind(prefix, ns)
+        return raw.serialize(destination=destination, format=format, **kwargs)
 
     def print(self, format: str = 'turtle12', out=None) -> None:
         """Print the graph to stdout. Defaults to turtle12 so TripleTerms display correctly."""
