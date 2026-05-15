@@ -1,0 +1,54 @@
+Expected behavior of parseQuery with SPARQL 1.2
+Current behavior
+rdflib.plugins.sparql.parser.parseQuery throws ParseException on any SPARQL 1.2 syntax. The caller gets nothing — there is no partial parse, no structured error, no fallback.
+
+Expected behavior
+parseQuery (or a Starlight-provided equivalent) accepts the full SPARQL 1.2 grammar and returns a typed parse tree. The six new constructs are:
+
+1. Triple terms in subject/object position
+
+<<( ?s ?p ?o )>> ex:certainty ?c .
+Currently: parse error.
+
+Expected: a TripleTerm node in the subject slot of the triple, containing its own subject, predicate, object child nodes — the same types that can appear in any triple (variables, IRIs, literals, or nested triple terms).
+
+Triple terms must be preserved in the parse tree, not rewritten to reification. The rewriting is Starlight's job at execution time; the parse tree should reflect what the user wrote.
+
+2. TRIPLE(s, p, o) — triple-term constructor
+
+BIND(TRIPLE(?s, ?p, ?o) AS ?t)
+Currently: parse error (TRIPLE is not a known function name).
+
+Expected: a Builtin_TRIPLE (or Function_TRIPLE) node with three argument slots — same shape as other three-argument builtins like IF.
+
+3. SUBJECT(?t), PREDICATE(?t), OBJECT(?t) — accessor functions
+
+BIND(SUBJECT(?t) AS ?s)
+FILTER(OBJECT(?t) = ex:bob)
+Currently: parse error.
+
+Expected: Builtin_SUBJECT, Builtin_PREDICATE, Builtin_OBJECT nodes with one argument each — same shape as any single-argument builtin like STR.
+
+4. isTripleTerm(?x) — type predicate
+
+FILTER(isTripleTerm(?t))
+Currently: parse error (the function name is unknown to the grammar).
+
+Expected: a Builtin_isTripleTerm node with one argument — same shape as isIRI, isBlank, etc.
+
+5. Annotation syntax {| prop value |}
+
+?s ex:knows ?o {| ex:certainty ?c |}
+Currently: parse error.
+
+Expected: an Annotation node attached to the enclosing triple, containing a property-value list. This is the most complex addition — the grammar production wraps a triple and its annotation block together.
+
+6. Annotation subject << s p o >> pred obj
+
+<< ex:alice ex:knows ex:bob >> ex:certainty ?c .
+Currently: parse error.
+
+Expected: a ReifiedTriple node in subject position, distinct from TripleTerm — it denotes the reifier of the named triple rather than the triple term itself.
+
+Why preserved structure matters
+If the parser rewrites (like the current rewrite_sparql12_to_11 text rewriter does), the caller gets reification triples — the original intent is lost. A structural editor needs TripleTerm { subject: ?s, predicate: ?p, object: ?o } to be able to display and edit it. Reification triples give the editor no way to know a triple term was there. The rewriting to SPARQL 1.1 belongs at the execution layer, not the parse layer.

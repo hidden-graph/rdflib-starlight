@@ -15,6 +15,22 @@ Public API used by StarlightGraph:
     http_update(url, sparql, auth)      → None
     http_ask(url, sparql, auth)         → bool
     build_result(vars_, bindings)       → rdflib.query.Result
+
+SPARQL 1.2 construct support per backend
+-----------------------------------------
+Both backends receive queries via rewrite_12_to_backend().
+
+  rdf-1.2  (e.g. Apache Jena 5+, Oxigraph): the endpoint speaks SPARQL 1.2
+    natively, so the query is passed through unchanged.
+
+  rdf-star (e.g. Apache Jena 4 draft RDF-star): uses the older << s p o >>
+    embedded-triple notation.  rewrite_12_to_backend converts:
+      <<( s p o )>>          →  << s p o >>
+      s p o {| ap av |}      →  s p o . << s p o >> ap av
+      << s p o >> pred obj   →  (already valid Jena syntax, passed through)
+    The ~?r reifier-binding shorthand has no equivalent in draft RDF-star and
+    raises NotImplementedError.  SUBJECT/PREDICATE/OBJECT/isTripleTerm/TRIPLE
+    are passed through; support depends on the specific endpoint version.
 """
 
 from __future__ import annotations
@@ -53,16 +69,69 @@ def sparql_term(node, backend: str) -> str:
 # SPARQL 1.2 → backend syntax rewrite
 # ---------------------------------------------------------------------------
 
-def rewrite_12_to_backend(query: str, backend: str) -> str:
-    """Rewrite SPARQL 1.2 <<( )>> triple-term syntax to the backend's form.
+def _rdfstar_rewrite_annotations(query: str) -> str:
+    """Convert SPARQL 1.2 annotation sugar to Jena RDF-star << >> syntax.
 
-    - rdf-1.2:  pass through unchanged (the backend speaks final-spec syntax)
-    - rdf-star: <<( s p o )>> → << s p o >> (Jena RDF-star draft syntax)
+    Handles two of the three annotation forms:
 
-    Handles nested triple terms correctly.
+    1.  s p o {| ap av ; ap2 av2 |}
+        →  s p o . << s p o >> ap av . << s p o >> ap2 av2
+
+    2.  << s p o >> pred obj   (annotation-subject triple)
+        Already valid Jena RDF-star syntax; passed through unchanged.
+
+    The ~?r reifier-binding shorthand has no equivalent in Jena draft
+    RDF-star (the reifier node is not a first-class resource in that model)
+    and raises NotImplementedError.
     """
-    if backend == 'rdf-1.2' or '<<(' not in query:
+    import re as _re
+    from starlight.query.sparql12_to_11 import _ANN_BLOCK_RE, _TILDE_RE
+
+    if _TILDE_RE.search(query):
+        raise NotImplementedError(
+            "The ~?r reifier-binding syntax is not supported for the rdf-star backend "
+            "(the draft RDF-star model has no first-class reifier node). "
+            "Use the rdf-1.2 backend, or rewrite the query manually."
+        )
+
+    if '{|' not in query:
         return query
+
+    def _ann_block(m: _re.Match) -> str:
+        s, p, o = m.group(1), m.group(2), m.group(3)
+        pairs = [pair.strip() for pair in m.group(4).split(';') if pair.strip()]
+        parts = [f"{s} {p} {o}"]
+        for pair in pairs:
+            parts.append(f"<< {s} {p} {o} >> {pair}")
+        return " .\n  ".join(parts)
+
+    return _ANN_BLOCK_RE.sub(_ann_block, query)
+
+
+def rewrite_12_to_backend(query: str, backend: str) -> str:
+    """Rewrite SPARQL 1.2 syntax to the form accepted by the given backend.
+
+    - rdf-1.2:  pass through unchanged (the endpoint speaks SPARQL 1.2 natively)
+    - rdf-star: convert all SPARQL 1.2 constructs to Jena draft RDF-star syntax:
+        <<( s p o )>>        →  << s p o >>
+        s p o {| ap av |}    →  s p o . << s p o >> ap av
+        << s p o >> pred obj →  unchanged (already valid Jena syntax)
+        ~?r                  →  NotImplementedError (no rdf-star equivalent)
+        SUBJECT/PREDICATE/OBJECT/isTripleTerm/TRIPLE — passed through unchanged;
+        support depends on the specific endpoint.
+    """
+    if backend == 'rdf-1.2':
+        return query
+
+    # Handle annotation forms before the <<( )>> → << >> conversion so that
+    # any <<( )>> produced by annotation expansion is also converted.
+    needs_ann = '{|' in query or '~' in query
+    if needs_ann:
+        query = _rdfstar_rewrite_annotations(query)
+
+    if '<<(' not in query:
+        return query
+
     from starlight.query.sparql12_to_11 import _consume_triple_term
     result = []
     i = 0
