@@ -46,14 +46,15 @@ _BIND_ACCESSOR_RE = _re.compile(
 # quoted literal (simple), blank node, or rdf:type shorthand 'a'.
 _T = (
     r'(?:'
-    r'\?[A-Za-z_]\w*'               # variable
-    r'|<[^>]+>'                     # full IRI
-    r'|"[^"\\]*(?:\\.[^"\\]*)*"'    # double-quoted literal
-    r"|'[^'\\]*(?:\\.[^'\\]*)*'"    # single-quoted literal
-    r'|[A-Za-z_]\w*:[A-Za-z_]\w*'  # prefixed name  prefix:local
-    r'|:[A-Za-z_]\w*'               # default-prefix name  :local
-    r'|_:[A-Za-z_]\w*'              # blank node
-    r'|\ba\b'                       # rdf:type shorthand
+    r'\?[A-Za-z_]\w*'                                        # variable
+    r'|<[^>]+>'                                              # full IRI
+    r'|"[^"\\]*(?:\\.[^"\\]*)*"'                             # double-quoted literal
+    r"|'[^'\\]*(?:\\.[^'\\]*)*'"                             # single-quoted literal
+    r'|[A-Za-z_]\w*:[A-Za-z_]\w*'                           # prefixed name  prefix:local
+    r'|:[A-Za-z_]\w*'                                        # default-prefix name  :local
+    r'|_:[A-Za-z_]\w*'                                       # blank node
+    r'|\ba\b'                                                # rdf:type shorthand
+    r'|[+-]?(?:\d+\.?\d*|\d*\.\d+)(?:[eE][+-]?\d+)?'       # numeric literal
     r')'
 )
 
