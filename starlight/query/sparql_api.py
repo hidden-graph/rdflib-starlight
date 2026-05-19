@@ -27,17 +27,11 @@ Use these instead of the rdflib originals when working with SPARQL 1.2 queries::
 
 from __future__ import annotations
 
-from .sparql12_to_11 import rewrite_sparql12_to_11
+from .sparql12_to_11 import rewrite_sparql12_to_11, _rewrite_sparql12_to_11_tracked
 
 _RDF_SUBJECT   = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#subject'
 _RDF_PREDICATE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate'
 _RDF_OBJECT    = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#object'
-_TT_VAR_PREFIX = '__tt'
-
-
-def _is_tt_var(node) -> bool:
-    from rdflib import Variable
-    return isinstance(node, Variable) and str(node).startswith(_TT_VAR_PREFIX)
 
 
 def _extract_path_iri(predicate_node):
@@ -55,26 +49,33 @@ def _extract_path_iri(predicate_node):
     return None
 
 
-def _restore_sparql12_in_tree(parse_result):
+def _restore_sparql12_in_tree(parse_result, generated_tt_vars: frozenset):
     """Post-process a rdflib SPARQL 1.1 parse tree to restore SPARQL 1.2 nodes.
 
-    Detects the encoding triple-patterns that ``rewrite_sparql12_to_11`` injects
-    for ``<<( s p o )>>`` triple terms::
+    Detects the encoding triple-patterns that ``_rewrite_sparql12_to_11_tracked``
+    injects for ``<<( s p o )>>`` triple terms::
 
         ?__ttN  rdf:subject   <s>
         ?__ttN  rdf:predicate <p>
         ?__ttN  rdf:object    <o>
 
-    These are removed from every ``TriplesBlock`` in the tree.  Each ``?__ttN``
-    variable is then replaced everywhere in the parse tree with a
+    Only variables whose names appear in ``generated_tt_vars`` (the exact set
+    produced during this parse) are treated as encoding variables.  User-written
+    variables that happen to share the ``__tt`` prefix are left untouched.
+
+    These are removed from every ``TriplesBlock`` in the tree.  Each generated
+    ``?__ttN`` variable is then replaced everywhere in the parse tree with a
     ``CompValue('TripleTerm', subject=…, predicate=…, object=…)`` node whose
     children carry the original (potentially nested) SPARQL 1.2 terms.
 
     Returns the modified ``parse_result`` in place.  Queries with no SPARQL 1.2
     encoding patterns are returned unchanged.
     """
-    from rdflib import URIRef
+    from rdflib import URIRef, Variable
     from rdflib.plugins.sparql.parserutils import CompValue
+
+    def _is_tt_var(node) -> bool:
+        return isinstance(node, Variable) and str(node) in generated_tt_vars
 
     rdf_s = URIRef(_RDF_SUBJECT)
     rdf_p = URIRef(_RDF_PREDICATE)
@@ -203,10 +204,11 @@ def parseQuery(q):
     Returns a pyparsing ``ParseResults`` tree — same type as the rdflib function.
     """
     from rdflib.plugins.sparql.parser import parseQuery as _parseQuery
+    tt_vars: frozenset = frozenset()
     if isinstance(q, str):
-        q = rewrite_sparql12_to_11(q)
+        q, tt_vars = _rewrite_sparql12_to_11_tracked(q)
     result = _parseQuery(q)
-    return _restore_sparql12_in_tree(result)
+    return _restore_sparql12_in_tree(result, tt_vars)
 
 
 def prepareQuery(queryString: str, initNs=None, base=None):
@@ -234,10 +236,11 @@ def parseUpdate(q):
     Returns an rdflib ``CompValue`` object — same type as the rdflib function.
     """
     from rdflib.plugins.sparql.parser import parseUpdate as _parseUpdate
+    tt_vars: frozenset = frozenset()
     if isinstance(q, str):
-        q = rewrite_sparql12_to_11(q)
+        q, tt_vars = _rewrite_sparql12_to_11_tracked(q)
     result = _parseUpdate(q)
-    return _restore_sparql12_in_tree(result)
+    return _restore_sparql12_in_tree(result, tt_vars)
 
 
 def prepareUpdate(updateString: str, initNs=None, base=None):
