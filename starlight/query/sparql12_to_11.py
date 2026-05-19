@@ -58,7 +58,12 @@ _T = (
     r')'
 )
 
-# << s p o >> pred obj  — annotation subject pattern
+# << s p o ~ reifier >> pred obj  — annotation subject with explicit reifier
+_ANN_SUBJECT_TILDE_RE = _re.compile(
+    rf'<<\s+({_T})\s+({_T})\s+({_T})\s+~\s+({_T})\s*>>\s+({_T})\s+({_T})',
+)
+
+# << s p o >> pred obj  — annotation subject pattern (anonymous reifier)
 _ANN_SUBJECT_RE = _re.compile(
     rf'<<\s+({_T})\s+({_T})\s+({_T})\s*>>\s+({_T})\s+({_T})',
 )
@@ -153,7 +158,8 @@ def rewrite_sparql12_to_11(query: str) -> str:
 
     Handles:
     - ``<<( s p o )>>`` triple-term patterns in WHERE clauses
-    - ``<< s p o >> pred obj`` annotation subject patterns
+    - ``<< s p o >> pred obj`` annotation subject patterns (anonymous reifier)
+    - ``<< s p o ~ reifier >> pred obj`` annotation subject with explicit reifier
     - ``s p o {| ap av ; ... |}`` inline annotation blocks
     - ``s p o ~?r`` reifier-binding shorthand
     - ``SUBJECT(?tt)``, ``PREDICATE(?tt)``, ``OBJECT(?tt)`` function calls
@@ -191,10 +197,43 @@ def _rewrite_annotation_forms(query: str, state: _RewriteState) -> str:
     prefixed names, full IRIs, and simple literals. Complex literals with
     embedded spaces or datatype suffixes are not handled.
     """
-    # Pass 1: s p o ~?r
+    # Pass 1: << s p o ~ reifier >> pred obj  — explicit reifier in subject
+    # Must run before _TILDE_RE so the bare `s p o ~?r` pattern doesn't consume
+    # the tilde that belongs inside << >>.
+    def _ann_subject_tilde(m: _re.Match) -> str:
+        s, p, o = m.group(1), m.group(2), m.group(3)
+        reifier, pred, obj = m.group(4), m.group(5), m.group(6)
+        tt_var = state.new_var()
+        parts = [f"{tt_var} {RDF_SUBJECT} {s}",
+                 f"{tt_var} {RDF_PREDICATE} {p}",
+                 f"{tt_var} {RDF_OBJECT} {o}",
+                 f"{reifier} {RDF_REIFIES} {tt_var}",
+                 f"{reifier} {pred} {obj}"]
+        return " .\n  ".join(parts)
+
+    query = _ANN_SUBJECT_TILDE_RE.sub(_ann_subject_tilde, query)
+
+    # Pass 2: << s p o >> pred obj  — anonymous reifier in subject
+    # No base-triple assertion. Component patterns still go before reification.
+    def _ann_subject(m: _re.Match) -> str:
+        s, p, o = m.group(1), m.group(2), m.group(3)
+        pred, obj = m.group(4), m.group(5)
+        r_var = state.new_var()
+        tt_var = state.new_var()
+        parts = [f"{tt_var} {RDF_SUBJECT} {s}",
+                 f"{tt_var} {RDF_PREDICATE} {p}",
+                 f"{tt_var} {RDF_OBJECT} {o}",
+                 f"{r_var} {RDF_REIFIES} {tt_var}",
+                 f"{r_var} {pred} {obj}"]
+        return " .\n  ".join(parts)
+
+    query = _ANN_SUBJECT_RE.sub(_ann_subject, query)
+
+    # Pass 3: s p o ~?r
     # Component patterns first (bind ?__tt via the selective rdf:subject index),
     # then find reifiers, then validate the base-triple assertion last.
     # Putting s p o last avoids a full triple-scan when s/p/o are variables.
+    # Runs after << >> forms are consumed so ~ inside << >> isn't matched here.
     def _tilde(m: _re.Match) -> str:
         s, p, o, r = m.group(1), m.group(2), m.group(3), m.group(4)
         tt_var = state.new_var()
@@ -206,7 +245,7 @@ def _rewrite_annotation_forms(query: str, state: _RewriteState) -> str:
 
     query = _TILDE_RE.sub(_tilde, query)
 
-    # Pass 2: s p o {| ap av ; ... |}
+    # Pass 4: s p o {| ap av ; ... |}
     # Same strategy: triple term components → reification → annotation properties
     # → assertion check last. Any <<( )>> in annotation values are left for Phase 2.
     def _ann_block(m: _re.Match) -> str:
@@ -223,22 +262,6 @@ def _rewrite_annotation_forms(query: str, state: _RewriteState) -> str:
         return " .\n  ".join(parts)
 
     query = _ANN_BLOCK_RE.sub(_ann_block, query)
-
-    # Pass 3: << s p o >> pred obj
-    # No base-triple assertion. Component patterns still go before reification.
-    def _ann_subject(m: _re.Match) -> str:
-        s, p, o = m.group(1), m.group(2), m.group(3)
-        pred, obj = m.group(4), m.group(5)
-        r_var = state.new_var()
-        tt_var = state.new_var()
-        parts = [f"{tt_var} {RDF_SUBJECT} {s}",
-                 f"{tt_var} {RDF_PREDICATE} {p}",
-                 f"{tt_var} {RDF_OBJECT} {o}",
-                 f"{r_var} {RDF_REIFIES} {tt_var}",
-                 f"{r_var} {pred} {obj}"]
-        return " .\n  ".join(parts)
-
-    query = _ANN_SUBJECT_RE.sub(_ann_subject, query)
 
     return query
 
