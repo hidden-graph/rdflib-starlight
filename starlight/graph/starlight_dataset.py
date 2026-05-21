@@ -333,6 +333,9 @@ class StarlightDataset(Dataset):
                 {var: self._restore_any(row.get(var)) if row.get(var) is not None else None
                  for var in r.vars}
                 for row in r.bindings
+                if not (any(isinstance(v, URIRef) and str(v).startswith(TT_NS)
+                            for v in row.values())
+                        and _ENCODING_PREDS.intersection(row.values()))
             ]
         elif r.type == 'CONSTRUCT':
             r.graph = StarlightGraph.from_rdflib(r.graph)

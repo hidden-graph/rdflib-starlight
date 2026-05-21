@@ -509,3 +509,35 @@ class TestQ14:
         """)
         ttl = r.graph.serialize(format='turtle12')
         assert '<<(' in ttl or 'reifies' in ttl
+
+
+# ---------------------------------------------------------------------------
+# Q15 — Encoding-triple isolation: open-pattern SELECT must not leak internals
+# ---------------------------------------------------------------------------
+
+class TestQ15:
+    """An unbound ?s ?p ?o scan must return exactly the visible triples.
+
+    Encoding triples (tt:HASH rdf:subject/predicate/object ...) are an internal
+    implementation detail of starlight's triple-term storage.  They must never
+    appear in SPARQL SELECT results, even when the query has no triple-term
+    patterns of its own and would otherwise match every triple in the store.
+    """
+
+    def test_open_scan_row_count_matches_triples(self, g):
+        visible = sum(1 for _ in g.triples((None, None, None)))
+        r = g.query('SELECT * WHERE { ?s ?p ?o }')
+        assert len(r.bindings) == visible, (
+            f'SELECT * returned {len(r.bindings)} rows but triples() yields '
+            f'{visible} — encoding triples are leaking into SPARQL results'
+        )
+
+    def test_open_scan_no_encoding_predicates(self, g):
+        from rdflib.namespace import RDF as _RDF
+        encoding_preds = {_RDF.subject, _RDF.predicate, _RDF.object}
+        r = g.query('SELECT * WHERE { ?s ?p ?o }')
+        p_var = r.vars[1]
+        leaked = [row for row in r.bindings if row[p_var] in encoding_preds]
+        assert leaked == [], (
+            f'{len(leaked)} encoding triple(s) leaked into SPARQL results: {leaked}'
+        )
