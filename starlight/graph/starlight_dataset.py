@@ -226,11 +226,18 @@ class StarlightDataset(Dataset):
     ) -> 'StarlightDataset':
         """Parse RDF data into named-graph contexts.
 
-        format='trig12'  — TriG 1.2; each GRAPH block becomes a StarlightGraph.
-        format='nq12'   — N-Quads 1.2; each distinct graph name becomes a StarlightGraph.
-        format='trix12' — TriX 1.2 XML; each <graph> block becomes a StarlightGraph.
+        format='turtle12' — Turtle 1.2; triples go into the default graph as a StarlightGraph.
+        format='trig12'   — TriG 1.2; each GRAPH block becomes a StarlightGraph.
+                            Plain Turtle content (no GRAPH blocks) goes into the default graph.
+        format='nq12'     — N-Quads 1.2; each distinct graph name becomes a StarlightGraph.
+        format='trix12'   — TriX 1.2 XML; each <graph> block becomes a StarlightGraph.
         All other formats delegate to rdflib (no triple-term support).
         """
+        # turtle12 is Turtle-only (no GRAPH blocks); trig12 is a strict superset,
+        # so routing turtle12 through the trig12 path is correct and safe.
+        if format == 'turtle12':
+            format = 'trig12'
+
         if format not in ('trig12', 'nq12', 'trix12'):
             return super().parse(
                 source=source, publicID=publicID, format=format,
