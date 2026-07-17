@@ -49,22 +49,46 @@ def _extract_path_iri(predicate_node):
     return None
 
 
+def _unwrap_atomic_expr(node):
+    """Peel single-child expression-wrapper CompValues down to the real term.
+
+    rdflib always wraps a bare term in a ladder of no-op binary-expression
+    CompValues (ConditionalOrExpression -> ConditionalAndExpression ->
+    RelationalExpression -> AdditiveExpression -> MultiplicativeExpression),
+    each contributing nothing but ``{'expr': <next node>}``, even when there is
+    no actual operator applied. This peels through that ladder to reach the
+    leaf term (a pname_/URIRef/Literal/Variable) or a real multi-key node like
+    a ``Function`` call. Nodes with more than just ``'expr'`` set (i.e. an
+    actual operator was present) are left alone.
+    """
+    from rdflib.plugins.sparql.parserutils import CompValue
+    while isinstance(node, CompValue) and set(node.keys()) == {'expr'}:
+        node = node['expr']
+    return node
+
+
 def _restore_sparql12_in_tree(parse_result, generated_tt_vars: frozenset):
     """Post-process a rdflib SPARQL 1.1 parse tree to restore SPARQL 1.2 nodes.
 
-    Detects the encoding triple-patterns that ``_rewrite_sparql12_to_11_tracked``
-    injects for ``<<( s p o )>>`` triple terms::
+    Detects the two encoding shapes that ``_rewrite_sparql12_to_11_tracked``
+    injects for a ``<<( s p o )>>`` triple term, depending on whether it was
+    ground (no variables) or not (see ``_rewrite_triple_term`` in
+    ``sparql12_to_11.py`` for why the shape differs):
 
+        # non-ground: matching pattern
         ?__ttN  rdf:subject   <s>
         ?__ttN  rdf:predicate <p>
         ?__ttN  rdf:object    <o>
+
+        # ground: value construction, no graph-matching side effect
+        BIND(<tt#fn/hash>(<s>, <p>, <o>) AS ?__ttN)
 
     Only variables whose names appear in ``generated_tt_vars`` (the exact set
     produced during this parse) are treated as encoding variables.  User-written
     variables that happen to share the ``__tt`` prefix are left untouched.
 
-    These are removed from every ``TriplesBlock`` in the tree.  Each generated
-    ``?__ttN`` variable is then replaced everywhere in the parse tree with a
+    Both shapes are removed from the tree.  Each generated ``?__ttN`` variable
+    is then replaced everywhere in the parse tree with a
     ``CompValue('TripleTerm', subject=…, predicate=…, object=…)`` node whose
     children carry the original (potentially nested) SPARQL 1.2 terms.
 
@@ -74,15 +98,18 @@ def _restore_sparql12_in_tree(parse_result, generated_tt_vars: frozenset):
     from rdflib import URIRef, Variable
     from rdflib.plugins.sparql.parserutils import CompValue
 
+    from .sparql12_to_11 import TT_HASH_FN
+
     def _is_tt_var(node) -> bool:
         return isinstance(node, Variable) and str(node) in generated_tt_vars
 
     rdf_s = URIRef(_RDF_SUBJECT)
     rdf_p = URIRef(_RDF_PREDICATE)
     rdf_o = URIRef(_RDF_OBJECT)
+    tt_hash_fn_iri = URIRef(TT_HASH_FN[1:-1])
 
     # ------------------------------------------------------------------
-    # Phase 1 — collect encoding triples and strip them from TriplesBlocks
+    # Phase 1 — collect encoding triples/binds and strip them from the tree
     # ------------------------------------------------------------------
     encoding: dict[str, dict] = {}   # var_name → {'s': node, 'p': node, 'o': node}
 
@@ -108,10 +135,37 @@ def _restore_sparql12_in_tree(parse_result, generated_tt_vars: frozenset):
             remaining.append(t)
         return remaining
 
+    def _record_ground_bind(bind_node) -> bool:
+        """If bind_node encodes a ground triple term, record it and return True."""
+        var = bind_node.get('var')
+        if not _is_tt_var(var):
+            return False
+        expr = _unwrap_atomic_expr(bind_node.get('expr'))
+        if not (isinstance(expr, CompValue) and expr.name == 'Function'
+                and expr.get('iri') == tt_hash_fn_iri):
+            return False
+        args = [_unwrap_atomic_expr(a) for a in expr.get('expr', [])]
+        if len(args) != 3:
+            return False
+        parts = encoding.setdefault(str(var), {})
+        parts['s'], parts['p'], parts['o'] = args
+        return True
+
+    def _strip_group(parts):
+        """Remove encoding Bind_ nodes from a GroupGraphPatternSub 'part' list."""
+        remaining = []
+        for part in parts:
+            if isinstance(part, CompValue) and part.name == 'Bind' and _record_ground_bind(part):
+                continue
+            remaining.append(part)
+        return remaining
+
     def _walk_collect(node):
         if isinstance(node, CompValue):
             if node.name == 'TriplesBlock':
                 node['triples'] = _strip_triples_block(node.get('triples', []))
+            elif node.name == 'GroupGraphPatternSub' and 'part' in node:
+                node['part'] = _strip_group(node['part'])
             for v in node.values():
                 _walk_collect(v)
         elif isinstance(node, list):

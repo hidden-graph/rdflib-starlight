@@ -17,7 +17,7 @@ from rdflib import Graph, URIRef, BNode, Literal
 from rdflib.namespace import RDF, XSD
 from starlight.parsers import lexer as _lexer
 from starlight.parsers import syntax as _syntax
-from starlight.model.encoding import TT_NS, RR_NS, tt_hash
+from starlight.model.encoding import TT_NS, RR_NS, tt_hash, encode_dirlang_datatype
 
 # Legacy sl: constants — kept for the intermediate build phase only;
 # stripped from the final graph by _skolemize_encoding().
@@ -183,6 +183,19 @@ def _to_node(val, prefix_map, base_uri):
         if kind == '^^':
             return Literal(text, datatype=_to_node(suffix, prefix_map, base_uri))
         if kind == '@':
+            if '--' in suffix:
+                # RDF 1.2 "text"@lang--dir (rdf:dirLangString). rdflib's Literal
+                # has no notion of the --dir suffix and raises on lang=suffix
+                # directly, so encode via the internal dirlang: datatype URI
+                # instead - decoded back to DirLangString at the StarlightGraph
+                # boundary (see starlight.model.dirlangstring).
+                language, _, direction = suffix.rpartition('--')
+                direction = direction.lower()
+                if direction not in ('ltr', 'rtl'):
+                    raise ValueError(
+                        f'RDF 1.2: base direction must be "ltr" or "rtl", got {direction!r} in @{suffix}'
+                    )
+                return Literal(text, datatype=encode_dirlang_datatype(language.lower(), direction))
             return Literal(text, lang=suffix)
         return Literal(text)
 

@@ -99,9 +99,9 @@ def _batch_insert(triples):
         buf.clear()
 
     for s, p, o in triples:
-        s_str = sparql_term(s, BACKEND)
-        p_str = sparql_term(p, BACKEND)
-        o_str = sparql_term(o, BACKEND)
+        s_str = sparql_term(s)
+        p_str = sparql_term(p)
+        o_str = sparql_term(o)
         buf.append(f'  {s_str} {p_str} {o_str} .\n')
         if len(buf) >= BATCH_SIZE:
             flush()

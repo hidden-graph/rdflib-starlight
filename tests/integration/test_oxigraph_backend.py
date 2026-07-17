@@ -241,9 +241,71 @@ class TestOxigraphSPARQL:
         r = sg.query(q)
         assert r.askAnswer is True
 
-    def test_12_syntax_not_rewritten(self, sg):
-        """Verify <<( )>> is NOT rewritten to << >> for rdf-1.2 mode."""
-        from starlight.backends.native import rewrite_12_to_backend
-        original = 'SELECT ?x WHERE { ?x rdf:reifies <<( ex:a ex:b ex:c )>> . }'
-        result   = rewrite_12_to_backend(original, 'rdf-1.2')
-        assert result == original
+    def test_12_syntax_passed_through_unchanged(self, sg):
+        """<<( )>> SPARQL 1.2 syntax goes straight to Oxigraph - no rewriting layer."""
+        sg.add((URIRef(EX+'stmt'), RDF_REIF, TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))))
+        q = f"""
+        PREFIX ex: <{EX}>
+        PREFIX rdf: <{RDF_NS}>
+        SELECT ?x WHERE {{
+            GRAPH <{GRAPH_URI}> {{
+                ?x rdf:reifies <<( ex:a ex:b ex:c )>> .
+            }}
+        }}
+        """
+        rows = list(sg.query(q))
+        assert len(rows) == 1
+        assert rows[0][0] == URIRef(EX+'stmt')
+
+
+# ---------------------------------------------------------------------------
+# TRIPLE()/isTRIPLE() and the RDF 1.2 base-direction SPARQL functions,
+# passed through unchanged to Oxigraph - confirmed 2026-07-16, Oxigraph 0.5.9
+# natively supports all of them.
+# ---------------------------------------------------------------------------
+
+@oxigraph
+class TestOxigraphRdf12SparqlFunctions:
+
+    def test_triple_constructor_function(self, sg):
+        r = sg.query(f"""
+            SELECT (TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>) AS ?t) WHERE {{}}
+        """)
+        assert r.bindings[0][r.vars[0]] == TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+
+    def test_is_triple_spec_name(self, sg):
+        r = sg.query(f"""
+            SELECT (isTRIPLE(TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>)) AS ?v) WHERE {{}}
+        """)
+        assert r.bindings[0][r.vars[0]] == Literal(True)
+
+    def test_dirlangstring_write_read(self, sg):
+        from starlight.model.dirlangstring import DirLangString
+        d = DirLangString('hello', 'en', 'rtl')
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), d))
+        results = list(sg.triples((URIRef(EX+'s'), URIRef(EX+'p'), None)))
+        assert results == [(URIRef(EX+'s'), URIRef(EX+'p'), d)]
+
+    def test_dirlangstring_construct_round_trip(self, sg):
+        from starlight.model.dirlangstring import DirLangString
+        d = DirLangString('hola', 'es', 'ltr')
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), d))
+        r = sg.query(f'CONSTRUCT {{ ?s ?p ?o }} WHERE {{ GRAPH <{GRAPH_URI}> {{ ?s ?p ?o }} }}')
+        assert (URIRef(EX+'s'), URIRef(EX+'p'), d) in r.graph
+
+    def test_langdir_hasLangdir_strlangdir(self, sg):
+        r = sg.query("""
+            SELECT (LANGDIR("hi"@en--rtl) AS ?dir)
+                   (hasLANGDIR("hi"@en--rtl) AS ?hd)
+                   (STRLANGDIR("hi", "en", "ltr") AS ?sld)
+                   (LANG("hi"@en--rtl) AS ?l)
+                   (hasLANG("hi"@en--rtl) AS ?hl)
+            WHERE {}
+        """)
+        from starlight.model.dirlangstring import DirLangString
+        row = r.bindings[0]
+        assert row[r.vars[0]] == Literal('rtl')
+        assert row[r.vars[1]] == Literal(True)
+        assert row[r.vars[2]] == DirLangString('hi', 'en', 'ltr')
+        assert row[r.vars[3]] == Literal('en')
+        assert row[r.vars[4]] == Literal(True)

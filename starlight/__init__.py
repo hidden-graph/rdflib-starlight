@@ -18,6 +18,7 @@ from rdflib.collection import Collection
 
 # Starlight-specific additions
 from starlight.model.triple import TripleTerm
+from starlight.model.dirlangstring import DirLangString
 from starlight.graph.starlight_graph import StarlightGraph
 from starlight.graph.starlight_dataset import StarlightDataset
 
@@ -38,6 +39,7 @@ __all__ = [
     "Collection",
     # starlight additions
     "TripleTerm",
+    "DirLangString",
     "StarlightGraph",
     "StarlightDataset",
 ]

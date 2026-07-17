@@ -3,11 +3,24 @@ starlight.serializers.rdfxml12
 
 Serialize a StarlightGraph to RDF/XML 1.2.
 
-Triple terms in object position are emitted as inline <rdf:TripleTerm> elements.
-Triple terms in subject position are emitted as top-level <rdf:TripleTerm>
-elements with rdf:nodeID, which is valid RDF/XML (a typed node element that also
-carries property elements).  When the same TripleTerm appears in both roles,
-the object reference uses rdf:nodeID to point to the top-level element.
+Triple terms in object position are emitted using the real RDF 1.2 XML Syntax
+mechanism: ``rdf:parseType="Triple"`` on the property element, wrapping a
+single ``<rdf:Description>`` that holds exactly one property (the triple's
+predicate/object) - see RDF 1.2 XML Syntax sec 2.19. A nested triple term
+(the inner property's object is itself a triple term) recurses the same way.
+
+There is no separate representation for reification: ``rdf:reifies`` is just
+an ordinary predicate whose object is a triple term, so it's emitted exactly
+like any other triple-term-valued property - this is the "formal" pattern
+already used as the canonical form across every other format in this codebase
+(see docs/sparql12_design.md). The spec's ``rdf:annotation``/
+``rdf:annotationNodeID`` attribute shorthand is a convenience the *parser*
+also accepts (for reading documents from other tools) but this serializer
+never emits it, keeping one predictable output shape.
+
+A triple term can only ever be an *object* in RDF 1.2 (never a subject), so
+unlike earlier versions of this module there is no top-level "triple term as
+subject" case to handle.
 
 Predicate IRIs must be QName-able (i.e. splittable at a '#' or '/' boundary
 with a non-digit local name).  IRIs that cannot be expressed as QNames raise
@@ -23,6 +36,8 @@ from collections import defaultdict
 from rdflib import URIRef, BNode, Literal
 
 from starlight.model.triple import TripleTerm
+from starlight.model.dirlangstring import DirLangString
+from starlight.model.encoding import encode_dirlang_datatype
 
 _RDF_NS  = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
 _XML_NS  = 'http://www.w3.org/XML/1998/namespace'
@@ -73,24 +88,21 @@ def _register_ns(sg) -> None:
 # Object serialization helpers
 # ---------------------------------------------------------------------------
 
-def _inline_tt_structure(parent: ET.Element, tt: TripleTerm, tt_nodeids: dict) -> None:
-    """Append <rdf:subject>, <rdf:predicate>, <rdf:object> children for *tt*."""
-    for rdf_role, component in (
-        ('subject',   tt.subject),
-        ('predicate', tt.predicate),
-        ('object',    tt.object),
-    ):
-        child = ET.SubElement(parent, f'{_R}{rdf_role}')
-        _set_object(child, component, tt_nodeids)
-
-
-def _set_object(prop: ET.Element, obj, tt_nodeids: dict) -> None:
+def _set_object(prop: ET.Element, obj) -> None:
     """Configure *prop* for the given object node (attribute or nested element)."""
     if isinstance(obj, URIRef):
         prop.set(f'{_R}resource', str(obj))
 
     elif isinstance(obj, BNode):
         prop.set(f'{_R}nodeID', str(obj))
+
+    elif isinstance(obj, DirLangString):
+        # Same internal dirlang: datatype-URI encoding as every other format;
+        # rdflib's real RDF/XML parser reads rdf:datatype back into
+        # Literal(text, datatype=...) unchanged, no langtag validation
+        # involved (that only fires for the xml:lang attribute).
+        prop.text = obj.value
+        prop.set(f'{_R}datatype', str(encode_dirlang_datatype(obj.language, obj.direction)))
 
     elif isinstance(obj, Literal):
         prop.text = str(obj)
@@ -100,16 +112,25 @@ def _set_object(prop: ET.Element, obj, tt_nodeids: dict) -> None:
             prop.set(f'{_R}datatype', str(obj.datatype))
 
     elif isinstance(obj, TripleTerm):
-        if obj in tt_nodeids:
-            # Reference the top-level element by its nodeID
-            prop.set(f'{_R}nodeID', tt_nodeids[obj])
-        else:
-            # Inline: anonymous TripleTerm appears only as an object
-            tt_elem = ET.SubElement(prop, f'{_R}TripleTerm')
-            _inline_tt_structure(tt_elem, obj, tt_nodeids)
+        # rdf:parseType="Triple" wrapping a single <rdf:Description> that
+        # holds exactly one property - the real RDF 1.2 XML Syntax mechanism
+        # (sec 2.19), not an invented element. Recurses for a nested triple
+        # term (the inner property's own object is itself a TripleTerm).
+        prop.set(f'{_R}parseType', 'Triple')
+        desc = ET.SubElement(prop, f'{_R}Description')
+        if isinstance(obj.subject, URIRef):
+            desc.set(f'{_R}about', str(obj.subject))
+        else:  # BNode - triple terms are only ever objects, so this can't recurse
+            desc.set(f'{_R}nodeID', str(obj.subject))
+        inner_prop = ET.SubElement(desc, _clark(str(obj.predicate)))
+        _set_object(inner_prop, obj.object)
 
     else:
         raise TypeError(f'Unexpected object type: {type(obj).__name__}: {obj!r}')
+
+
+def _sort_key(node) -> str:
+    return str(node)
 
 
 # ---------------------------------------------------------------------------
@@ -119,59 +140,36 @@ def _set_object(prop: ET.Element, obj, tt_nodeids: dict) -> None:
 def serialize_rdfxml12(graph) -> str:
     """Serialize a StarlightGraph to RDF/XML 1.2 text.
 
-    Triple terms in object position → inline <rdf:TripleTerm>.
-    Triple terms in subject position → top-level <rdf:TripleTerm rdf:nodeID=...>.
-    When the same TripleTerm appears in both roles, the object uses rdf:nodeID.
+    Triple terms in object position → ``rdf:parseType="Triple"`` wrapping a
+    single ``<rdf:Description>`` (RDF 1.2 XML Syntax sec 2.19). Reification is
+    the ordinary ``rdf:reifies`` predicate with a triple-term-valued object -
+    the same "formal pattern" used as the canonical form everywhere else in
+    this codebase, not the ``rdf:annotation``/``rdf:annotationNodeID``
+    shorthand (which the parser accepts for reading, but this serializer
+    never emits).
     """
     from starlight.graph.starlight_graph import StarlightGraph
 
     sg = graph if isinstance(graph, StarlightGraph) else StarlightGraph.from_rdflib(graph)
     _register_ns(sg)
 
-    # --- Pass 1: find TripleTerms that appear as subjects → assign nodeIDs ---
-    tt_nodeids: dict[TripleTerm, str] = {}
-    _counter = [0]
-
-    def _ensure_id(tt: TripleTerm) -> str:
-        if tt not in tt_nodeids:
-            tt_nodeids[tt] = f'tt{_counter[0]}'
-            _counter[0] += 1
-        return tt_nodeids[tt]
-
-    for s, _p, _o in sg.triples((None, None, None)):
-        if isinstance(s, TripleTerm):
-            _ensure_id(s)
-
-    # --- Pass 2: group triples by subject ---
     by_subj: dict = defaultdict(list)
     for s, p, o in sg.triples((None, None, None)):
         by_subj[s].append((p, o))
 
-    # --- Pass 3: build XML ---
     root = ET.Element(f'{_R}RDF')
 
-    def _sort_key(node) -> str:
-        return str(node)
-
     for subj in sorted(by_subj.keys(), key=_sort_key):
-        pred_objs = by_subj[subj]
-
-        if isinstance(subj, TripleTerm):
-            # Top-level typed node element
-            desc = ET.SubElement(root, f'{_R}TripleTerm')
-            desc.set(f'{_R}nodeID', tt_nodeids[subj])
-            _inline_tt_structure(desc, subj, tt_nodeids)
-        elif isinstance(subj, URIRef):
-            desc = ET.SubElement(root, f'{_R}Description')
+        desc = ET.SubElement(root, f'{_R}Description')
+        if isinstance(subj, URIRef):
             desc.set(f'{_R}about', str(subj))
         else:  # BNode
-            desc = ET.SubElement(root, f'{_R}Description')
             desc.set(f'{_R}nodeID', str(subj))
 
-        for pred, obj in sorted(pred_objs, key=lambda x: (str(x[0]), str(x[1]))):
+        for pred, obj in sorted(by_subj[subj], key=lambda x: (str(x[0]), str(x[1]))):
             prop_tag = _clark(str(pred))
             prop = ET.SubElement(desc, prop_tag)
-            _set_object(prop, obj, tt_nodeids)
+            _set_object(prop, obj)
 
     ET.indent(root, space='  ')
     body = ET.tostring(root, encoding='unicode')

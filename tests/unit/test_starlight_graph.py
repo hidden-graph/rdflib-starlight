@@ -102,6 +102,22 @@ class TestTripleTermAdd:
         sg.add((URIRef(EX+'r2'), RDF_REIFIES, (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))))
         assert len(sg) == 2
 
+    def test_nested_tt_object_fully_resolves(self, sg):
+        # A triple term whose own object is itself a triple term (valid - nesting
+        # is only disallowed in subject position). The outer TripleTerm's .object
+        # must come back as a real, fully-resolved TripleTerm, not a raw tuple or
+        # an unresolved tt:HASH URIRef.
+        inner = (URIRef(EX+'bob'), URIRef(EX+'knows'), URIRef(EX+'carol'))
+        sg.add((URIRef(EX+'alice'), URIRef(EX+'says'), (URIRef(EX+'stmt1'), URIRef(EX+'about'), inner)))
+
+        results = list(sg.triples((URIRef(EX+'alice'), URIRef(EX+'says'), None)))
+        assert len(results) == 1
+        _, _, outer = results[0]
+        assert isinstance(outer, TripleTerm)
+        assert isinstance(outer.object, TripleTerm)
+        assert outer == TripleTerm(URIRef(EX+'stmt1'), URIRef(EX+'about'), TripleTerm(*inner))
+        assert outer.object == TripleTerm(*inner)
+
 
 # ---------------------------------------------------------------------------
 # Encoding triples are hidden from traversal
@@ -505,22 +521,3 @@ class TestNativeConstruct:
         assert mock_post.called
         call_url = mock_post.call_args[0][0]
         assert 'update' in call_url
-
-    def test_update_rdfstar_rewrites_syntax(self):
-        """For rdf-star backends, <<( )>> is rewritten to << >> before sending."""
-        from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
-        store = SPARQLUpdateStore(
-            query_endpoint='http://fake.local/query',
-            update_endpoint='http://fake.local/update',
-        )
-        sg = StarlightGraph(store=store, backend='rdf-star')
-        update_resp = MagicMock()
-        update_resp.raise_for_status = lambda: None
-        with patch('requests.post', return_value=update_resp) as mock_post:
-            sg.update("""
-                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-                INSERT DATA { :s rdf:reifies <<( :a :b :c )>> . }
-            """)
-        sent_body = mock_post.call_args[1]['data'].decode('utf-8')
-        assert '<<(' not in sent_body
-        assert '<< :a :b :c >>' in sent_body

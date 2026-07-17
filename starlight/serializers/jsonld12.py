@@ -27,7 +27,8 @@ from __future__ import annotations
 import json
 from rdflib import URIRef, BNode, Literal
 from starlight.model.triple import TripleTerm
-from starlight.model.encoding import TT_NS
+from starlight.model.dirlangstring import DirLangString
+from starlight.model.encoding import TT_NS, encode_dirlang_datatype
 
 _RDF_NS = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
 _RDF_TRIPLE_TERM = _RDF_NS + 'TripleTerm'
@@ -57,6 +58,15 @@ def _node_to_jld(node) -> dict:
         # TripleTerms in value position are referenced by their tt:HASH URI.
         # The full TripleTerm definition is emitted as a separate top-level node.
         return {'@id': 'tt:' + _tt_local(node)}
+    if isinstance(node, DirLangString):
+        # Same internal-datatype-URI encoding as every other format (see
+        # starlight.model.encoding) rather than JSON-LD 1.1's native
+        # "@language"/"@direction" pair: rdflib's JSON-LD codec (RDF 1.1) has
+        # no concept of @direction and would silently drop it on parse. An
+        # explicit "@type" round-trips through rdflib's real JSON-LD parser
+        # unchanged, the same way rdf:TripleTerm nodes do below.
+        dt = str(encode_dirlang_datatype(node.language, node.direction))
+        return {'@value': node.value, '@type': dt}
     if isinstance(node, URIRef):
         return _uri_value(str(node))
     if isinstance(node, BNode):

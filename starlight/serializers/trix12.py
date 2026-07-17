@@ -17,6 +17,8 @@ import xml.etree.ElementTree as ET
 from rdflib import URIRef, BNode, Literal
 
 from starlight.model.triple import TripleTerm
+from starlight.model.dirlangstring import DirLangString
+from starlight.model.encoding import encode_dirlang_datatype
 
 TRIX_NS = 'http://www.w3.org/2004/03/trix/trix-1/'
 _XML_NS = 'http://www.w3.org/XML/1998/namespace'
@@ -41,6 +43,16 @@ def _term_elem(node, parent: ET.Element) -> ET.Element:
     if isinstance(node, BNode):
         el = ET.SubElement(parent, f'{_T}id')
         el.text = str(node)
+        return el
+
+    if isinstance(node, DirLangString):
+        # Same internal dirlang: datatype-URI encoding as every other format;
+        # <typedLiteral datatype=...> round-trips it unchanged since the TriX
+        # parser passes the datatype straight to Literal(text, datatype=...)
+        # with no langtag validation involved.
+        el = ET.SubElement(parent, f'{_T}typedLiteral')
+        el.set('datatype', str(encode_dirlang_datatype(node.language, node.direction)))
+        el.text = node.value
         return el
 
     if isinstance(node, Literal):

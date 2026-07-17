@@ -89,10 +89,16 @@ def sg():
 
 
 @pytest.fixture
-def sg_native():
-    """Fresh StarlightGraph backed by Fuseki in rdf-star native mode."""
+def sg_rdf12():
+    """Fresh StarlightGraph backed by Fuseki in rdf-1.2 native mode.
+
+    Fuseki 5.5.0 (verified 2026-07-16) speaks the final <<( s p o )>> syntax
+    and returns "type":"triple" in SPARQL JSON results - the milestone
+    docs/future_enhancements.md's "Fuseki RDF 1.2 Native Syntax" note was
+    waiting for. No starlight code changes were needed; only the backend flag.
+    """
     _clear_graph()
-    g = StarlightGraph(store=_make_store(), identifier=GRAPH_URI, backend='rdf-star')
+    g = StarlightGraph(store=_make_store(), identifier=GRAPH_URI, backend='rdf-1.2')
     g.bind('ex', EX)
     yield g
 
@@ -254,49 +260,34 @@ class TestFusekiBulkWrite:
 
 
 # ---------------------------------------------------------------------------
-# Native rdf-star backend (Jena << >> syntax, no encoding layer)
+# Native rdf-1.2 backend (final <<( s p o )>> syntax) - Fuseki 5.5.0+
 # ---------------------------------------------------------------------------
 
 @fuseki
-class TestFusekiNativeRdfStar:
+class TestFusekiNativeRdf12:
+    """Confirmed 2026-07-16: Fuseki 5.5.0 speaks the final RDF 1.2 <<( )>>
+    syntax and returns "type":"triple" correctly - this is the thing
+    docs/future_enhancements.md's "Fuseki RDF 1.2 Native Syntax" note said to
+    verify once available. It's available now, and it just works.
 
-    def test_plain_triple_write_read(self, sg_native):
-        s, p, o = URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob')
-        sg_native.add((s, p, o))
-        assert (s, p, o) in sg_native
+    (The older Jena draft << s p o >> bracket syntax, `backend='rdf-star'`,
+    was removed after this testing found it broken against current Fuseki -
+    see docs/future_enhancements.md.)
+    """
 
-    def test_triple_term_write_read(self, sg_native):
+    def test_triple_term_write_read(self, sg_rdf12):
         tt   = TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
         stmt = URIRef(EX+'stmt1')
-        sg_native.add((stmt, RDF_REIF, tt))
-        results = list(sg_native.triples((stmt, RDF_REIF, None)))
+        sg_rdf12.add((stmt, RDF_REIF, tt))
+        results = list(sg_rdf12.triples((stmt, RDF_REIF, None)))
         assert len(results) == 1
         _, _, restored = results[0]
         assert isinstance(restored, TripleTerm)
         assert restored == tt
 
-    def test_wildcard_triples(self, sg_native):
-        sg_native.add((URIRef(EX+'s1'), URIRef(EX+'p'), URIRef(EX+'o1')))
-        sg_native.add((URIRef(EX+'s2'), URIRef(EX+'p'), URIRef(EX+'o2')))
-        results = list(sg_native.triples((None, URIRef(EX+'p'), None)))
-        assert len(results) == 2
-
-    def test_contains(self, sg_native):
-        s, p, o = URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob')
-        assert (s, p, o) not in sg_native
-        sg_native.add((s, p, o))
-        assert (s, p, o) in sg_native
-
-    def test_query_plain_select(self, sg_native):
-        sg_native.add((URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob')))
-        q = f'SELECT ?o WHERE {{ GRAPH <{GRAPH_URI}> {{ <{EX}alice> <{EX}knows> ?o . }} }}'
-        rows = list(sg_native.query(q))
-        assert len(rows) == 1
-        assert rows[0][0] == URIRef(EX+'bob')
-
-    def test_query_triple_term_pattern(self, sg_native):
+    def test_query_triple_term_pattern(self, sg_rdf12):
         tt = TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
-        sg_native.add((URIRef(EX+'stmt1'), RDF_REIF, tt))
+        sg_rdf12.add((URIRef(EX+'stmt1'), RDF_REIF, tt))
         q = f"""
         PREFIX rdf: <{RDF_NS}>
         SELECT ?tt WHERE {{
@@ -305,33 +296,59 @@ class TestFusekiNativeRdfStar:
             }}
         }}
         """
-        rows = list(sg_native.query(q))
+        rows = list(sg_rdf12.query(q))
         assert len(rows) == 1
         assert isinstance(rows[0][0], TripleTerm)
         assert rows[0][0] == tt
 
-    def test_query_sparql12_syntax_rewritten(self, sg_native):
-        """SPARQL 1.2 <<( )>> is rewritten to << >> before sending to Fuseki."""
+    def test_construct_round_trip(self, sg_rdf12):
         tt = TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
-        sg_native.add((URIRef(EX+'stmt1'), RDF_REIF, tt))
-        q = f"""
-        PREFIX ex: <{EX}>
-        PREFIX rdf: <{RDF_NS}>
-        SELECT ?stmt WHERE {{
-            GRAPH <{GRAPH_URI}> {{
-                ?stmt rdf:reifies <<( ex:alice ex:knows ex:bob )>> .
-            }}
-        }}
-        """
-        rows = list(sg_native.query(q))
-        assert len(rows) == 1
-        assert rows[0][0] == URIRef(EX+'stmt1')
+        sg_rdf12.add((URIRef(EX+'stmt1'), RDF_REIF, tt))
+        r = sg_rdf12.query(f'CONSTRUCT {{ ?s ?p ?o }} WHERE {{ GRAPH <{GRAPH_URI}> {{ ?s ?p ?o }} }}')
+        assert (URIRef(EX+'stmt1'), RDF_REIF, tt) in r.graph
 
-    def test_no_encoding_triples_visible(self, sg_native):
-        """Native mode stores no tt:HASH encoding triples."""
-        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
-        sg_native.add((URIRef(EX+'stmt'), RDF_REIF, tt))
-        predicates = {p for _, p, _ in sg_native.triples((None, None, None))}
-        assert URIRef(RDF_NS + 'subject')   not in predicates
-        assert URIRef(RDF_NS + 'predicate') not in predicates
-        assert URIRef(RDF_NS + 'object')    not in predicates
+
+# ---------------------------------------------------------------------------
+# TRIPLE()/isTRIPLE() and the RDF 1.2 base-direction SPARQL functions,
+# passed through unchanged to Fuseki for the rdf-1.2 backend - confirmed
+# 2026-07-16 all natively supported by Fuseki 5.5.0.
+# ---------------------------------------------------------------------------
+
+@fuseki
+class TestFusekiRdf12SparqlFunctions:
+
+    def test_triple_constructor_function(self, sg_rdf12):
+        r = sg_rdf12.query(f"""
+            SELECT (TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>) AS ?t) WHERE {{}}
+        """)
+        assert r.bindings[0][r.vars[0]] == TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+
+    def test_is_triple_spec_name(self, sg_rdf12):
+        r = sg_rdf12.query(f"""
+            SELECT (isTRIPLE(TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>)) AS ?v) WHERE {{}}
+        """)
+        assert r.bindings[0][r.vars[0]] == Literal(True)
+
+    def test_dirlangstring_write_read(self, sg_rdf12):
+        from starlight.model.dirlangstring import DirLangString
+        d = DirLangString('hello', 'en', 'rtl')
+        sg_rdf12.add((URIRef(EX+'s'), URIRef(EX+'p'), d))
+        results = list(sg_rdf12.triples((URIRef(EX+'s'), URIRef(EX+'p'), None)))
+        assert results == [(URIRef(EX+'s'), URIRef(EX+'p'), d)]
+
+    def test_langdir_hasLangdir_strlangdir(self, sg_rdf12):
+        r = sg_rdf12.query("""
+            SELECT (LANGDIR("hi"@en--rtl) AS ?dir)
+                   (hasLANGDIR("hi"@en--rtl) AS ?hd)
+                   (STRLANGDIR("hi", "en", "ltr") AS ?sld)
+                   (LANG("hi"@en--rtl) AS ?l)
+                   (hasLANG("hi"@en--rtl) AS ?hl)
+            WHERE {}
+        """)
+        from starlight.model.dirlangstring import DirLangString
+        row = r.bindings[0]
+        assert row[r.vars[0]] == Literal('rtl')
+        assert row[r.vars[1]] == Literal(True)
+        assert row[r.vars[2]] == DirLangString('hi', 'en', 'ltr')
+        assert row[r.vars[3]] == Literal('en')
+        assert row[r.vars[4]] == Literal(True)

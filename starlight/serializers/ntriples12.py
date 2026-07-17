@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from rdflib import URIRef, BNode, Literal
 from starlight.model.triple import TripleTerm
+from starlight.model.dirlangstring import DirLangString
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +38,10 @@ def _node_to_nt(node) -> str:
         p = _node_to_nt(node.predicate)
         o = _node_to_nt(node.object)
         return f'<<( {s} {p} {o} )>>'
+
+    if isinstance(node, DirLangString):
+        escaped = _escape_non_ascii(node.value.translate(_NT_ESCAPE))
+        return f'"{escaped}"@{node.language}--{node.direction}'
 
     if isinstance(node, URIRef):
         # Escape characters forbidden inside <> per N-Triples spec
@@ -84,12 +89,20 @@ def _sort_key(node) -> tuple:
         return (0, str(node))
     if isinstance(node, BNode):
         return (1, str(node))
+    if isinstance(node, DirLangString):
+        return (3, node.n3())
     return (3, str(node))
 
 
 def _triple_sort_key(triple) -> tuple:
     s, p, o = triple
     return (_sort_key(s), _sort_key(p), _sort_key(o))
+
+
+def _needs_version_header(g) -> bool:
+    if getattr(g, '_tt_nodes', None):
+        return True
+    return any(isinstance(o, DirLangString) for _, _, o in g.triples((None, None, None)))
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +115,7 @@ def serialize_ntriples12(g) -> str:
     One triple per line: ``subject predicate object .``
     Triple terms are written as ``<<( s p o )>>``.
     """
-    header = 'VERSION "1.2"\n' if getattr(g, '_tt_nodes', None) else ''
+    header = 'VERSION "1.2"\n' if _needs_version_header(g) else ''
     lines = []
     for s, p, o in sorted(g.triples((None, None, None)), key=_triple_sort_key):
         lines.append(f'{_node_to_nt(s)} {_node_to_nt(p)} {_node_to_nt(o)} .')
@@ -119,7 +132,7 @@ def serialize_nquads12(g, graph_uri=None, _include_header: bool = True) -> str:
         graph_uri = g.identifier
     g_term = _node_to_nt(graph_uri) if not isinstance(graph_uri, BNode) else None
 
-    header = 'VERSION "1.2"\n' if (_include_header and getattr(g, '_tt_nodes', None)) else ''
+    header = 'VERSION "1.2"\n' if (_include_header and _needs_version_header(g)) else ''
     lines = []
     for s, p, o in sorted(g.triples((None, None, None)), key=_triple_sort_key):
         s_t = _node_to_nt(s)

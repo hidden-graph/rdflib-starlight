@@ -26,15 +26,15 @@ Fuseki is an open-source RDF server that evaluates SPARQL queries natively. When
 
 Fuseki requires running a server.
 
-### Fuseki (rdf-star): further improvement through native storage
+### Fuseki (rdf-1.2): further improvement through native storage
 
-The rdf-star mode stores annotated facts as native quoted triples rather than as sets of component triples. This reduces the amount of data stored in Fuseki by 20%, and gives Fuseki's query engine a more direct rdf-star representation to work with. The result is a consistent 20–40% improvement in query speed across all query types: the same 250K scan drops from 580ms to 460ms, and a combined scan-and-filter query drops from 525ms to 317ms. At 500K facts the full-annotation scan is 1.0 second versus 1.2 seconds in rdf-1.1 mode.
+**`backend='rdf-star'` was removed 2026-07-16.** It targeted an older, pre-standardization Jena draft quoted-triple syntax (`<< s p o >>`); confirmed directly against a live Fuseki 5.5.0, that syntax no longer returns `"type":"triple"` in SPARQL JSON results (a plain blank node comes back instead), breaking triple-term round-tripping. The historical numbers below were measured against that mode before the regression and are kept only as a rough sense of what native quoted-triple storage (as opposed to the rdf-1.1 encoding-triples approach) bought in query speed: storing annotated facts as native quoted triples reduced the data stored in Fuseki by ~20%, and gave a consistent 20–40% improvement in query speed across query types (a 250K scan dropped from 580ms to 460ms; a combined scan-and-filter query dropped from 525ms to 317ms).
 
-Note that Fuseki supports an older rdf-star version than RDF 1.2.  
+**Use `backend='rdf-1.2'` instead** — confirmed working against Fuseki 5.5.0 (see `docs/future_enhancements.md`), which speaks the final `<<( s p o )>>` syntax natively. It has not been separately re-benchmarked under this backend flag; expect broadly similar or better characteristics to the historical rdf-star numbers above, since it's the same underlying native quoted-triple storage via a syntax Fuseki now supports directly rather than through a legacy compatibility path.
 
 ### Oxigraph (rdf-1.2): the fastest backend
 
-Oxigraph is a Rust-based RDF 1.2 store. Running in in-memory mode, it is the fastest backend for broad queries at every scale tested. At 250K annotated facts, the full-annotation scan takes 168ms — 4.8× faster than in-memory Python, 2.7× faster than rdf-star/Fuseki. The combined scan-and-filter query takes 122ms, versus 317ms in Fuseki and 1.49 seconds in memory. The advantage comes from Oxigraph's compiled Rust SPARQL engine, native RDF 1.2 quoted-triple storage, and zero JVM overhead.
+Oxigraph is a Rust-based RDF 1.2 store. Running in in-memory mode, it is the fastest backend for broad queries at every scale tested. At 250K annotated facts, the full-annotation scan takes 168ms — 4.8× faster than in-memory Python, 2.7× faster than Fuseki. The combined scan-and-filter query takes 122ms, versus 317ms in Fuseki and 1.49 seconds in memory. The advantage comes from Oxigraph's compiled Rust SPARQL engine, native RDF 1.2 quoted-triple storage, and zero JVM overhead.
 
 The only case where Oxigraph does not putperform is single lookups (finding all annotations for a specific subject or object), where Python's in-memory dict lookup at ~4ms beats Oxigraph's 30–100ms HTTP round-trip. For workloads dominated by broad scans or joins, Oxigraph is the clear choice. Like Fuseki, it requires running a server.
 

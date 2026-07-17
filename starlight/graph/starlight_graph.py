@@ -14,10 +14,11 @@ triples that define the encoding are hidden from callers.
 
 import re
 
-from rdflib import Graph, URIRef, BNode
+from rdflib import Graph, URIRef, BNode, Literal
 from rdflib.namespace import RDF
 from starlight.model.triple import TripleTerm
-from starlight.model.encoding import TT_NS, tt_hash
+from starlight.model.encoding import TT_NS, tt_hash, lookup_tt_hash
+from starlight.model.dirlangstring import DirLangString, encode_dirlangstring, decode_dirlangstring
 
 SL_NS           = 'https://github.com/hidden-graph/rdflib-starlight/ns#'
 SL_TRIPLE_TERM  = URIRef(SL_NS + 'TripleTerm')   # kept for export / backward compat
@@ -25,7 +26,7 @@ SL_REIFICATION  = URIRef(SL_NS + 'Reification')  # kept for export / backward co
 RDF_REIFIES     = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 
 # Valid backend mode identifiers
-VALID_BACKENDS = frozenset({'rdf-1.1', 'rdf-star', 'rdf-1.2'})
+VALID_BACKENDS = frozenset({'rdf-1.1', 'rdf-1.2'})
 
 # Predicates used in the internal TripleTerm URIRef encoding
 _ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
@@ -46,6 +47,14 @@ def _is_tt_like(node):
     return isinstance(node, (TripleTerm, tuple)) and (
         isinstance(node, TripleTerm) or len(node) == 3
     )
+
+
+def _needs_encoding(node):
+    """True if node is a Python value type that _coerce_tt/_coerce_tt_read
+    must translate to its internal store representation before it can be
+    written or matched: a TripleTerm/tuple (→ tt:HASH URIRef) or a
+    DirLangString (→ Literal with the internal dirlang: datatype)."""
+    return _is_tt_like(node) or isinstance(node, DirLangString)
 
 
 class StarlightGraph(Graph):
@@ -70,11 +79,11 @@ class StarlightGraph(Graph):
 
     @property
     def _is_native(self) -> bool:
-        """True when using a native RDF 1.2 backend (no tt:HASH encoding)."""
-        return self._backend in ('rdf-star', 'rdf-1.2')
+        """True when using the native RDF 1.2 backend (no tt:HASH encoding)."""
+        return self._backend == 'rdf-1.2'
 
     # ------------------------------------------------------------------
-    # Native backend (rdf-star / rdf-1.2)
+    # Native backend (rdf-1.2)
     # ------------------------------------------------------------------
 
     def _store_http(self) -> tuple:
@@ -101,9 +110,9 @@ class StarlightGraph(Graph):
         from starlight.backends.native import sparql_term, http_update
         from starlight.model.triple import TripleTerm as _TT
         q_url, u_url, hdrs = self._store_http()
-        s_str = sparql_term(s,   self._backend)
-        p_str = sparql_term(p,   self._backend)
-        o_str = sparql_term(obj, self._backend)
+        s_str = sparql_term(s)
+        p_str = sparql_term(p)
+        o_str = sparql_term(obj)
         # INSERT DATA disallows triple terms in subject position and nested
         # triple terms in some stores (SPARQL 1.2 restriction); INSERT...WHERE
         # with an empty WHERE is equivalent but unrestricted.
@@ -130,7 +139,7 @@ class StarlightGraph(Graph):
             if node is None:
                 free.append(var)
                 return f'?{var}'
-            return sparql_term(node, self._backend)
+            return sparql_term(node)
 
         s_str = _slot(s, 's')
         p_str = _slot(p, 'p')
@@ -157,13 +166,8 @@ class StarlightGraph(Graph):
 
     def _native_query(self, query_object, processor='sparql', result='sparql',
                       initNs=None, initBindings=None, use_store_provided=True, **kwargs):
-        from starlight.backends.native import (
-            rewrite_12_to_backend, http_select, http_ask, http_construct, build_result,
-        )
+        from starlight.backends.native import http_select, http_ask, http_construct, build_result
         q_url, _, hdrs = self._store_http()
-
-        if isinstance(query_object, str):
-            query_object = rewrite_12_to_backend(query_object, self._backend)
 
         sparql = query_object
 
@@ -195,7 +199,8 @@ class StarlightGraph(Graph):
     # ------------------------------------------------------------------
 
     def _coerce_tt(self, node):
-        """Translate a tuple/TripleTerm to its internal URIRef, creating it if new.
+        """Translate a tuple/TripleTerm to its internal URIRef, or a DirLangString
+        to its internal datatype-encoded Literal, creating it if new.
         Use only on write paths (add, add_reification). For reads use _coerce_tt_read."""
         if node is None:
             return None
@@ -205,11 +210,16 @@ class StarlightGraph(Graph):
             if all(x is not None for x in node):
                 return self._intern_tt(TripleTerm(*node))
             return None
+        if isinstance(node, DirLangString):
+            return encode_dirlangstring(node)
         return node
 
     def _coerce_tt_read(self, node):
-        """Translate a tuple/TripleTerm to its URIRef for read-only paths.
+        """Translate a tuple/TripleTerm to its URIRef, or a DirLangString to its
+        internal datatype-encoded Literal, for read-only paths.
         Returns _TT_NOT_FOUND if the TripleTerm is not registered — never creates.
+        A DirLangString always succeeds — unlike a TripleTerm, its encoding is a
+        pure function of its own value and needs no registry lookup to exist.
         Partial-wildcard tuples (containing None) are not handled here; callers
         should check _is_tt_wildcard and use _matching_tt_uris instead."""
         if node is None:
@@ -221,6 +231,8 @@ class StarlightGraph(Graph):
                 return self._tt_registry.get(TripleTerm(*node)._key(), _TT_NOT_FOUND)
             # Partial wildcard — caller must use _matching_tt_uris
             return _TT_NOT_FOUND
+        if isinstance(node, DirLangString):
+            return encode_dirlangstring(node)
         return node
 
     @staticmethod
@@ -257,13 +269,13 @@ class StarlightGraph(Graph):
         """
         if node is None:
             return None, False
-        if _is_tt_like(node):
+        if _needs_encoding(node):
             c = self._coerce_tt_read(node)
             return (None, True) if c is _TT_NOT_FOUND else (c, False)
         if isinstance(node, list):
             out = []
             for item in node:
-                if _is_tt_like(item):
+                if _needs_encoding(item):
                     c = self._coerce_tt_read(item)
                     if c is not _TT_NOT_FOUND:
                         out.append(c)
@@ -272,29 +284,74 @@ class StarlightGraph(Graph):
             return out, False
         return node, False
 
+    def _encode_init_bindings(self, init_bindings):
+        """Resolve TripleTerm/tuple values in a SPARQL initBindings mapping to
+        their internal tt:HASH URIRef, mirroring every other read path.
+
+        A triple term not already registered in this graph resolves to a fresh
+        BNode that cannot match anything in the store, giving correct "zero
+        rows" semantics rather than silently comparing a raw Python object
+        against store terms it can never equal.
+        """
+        if not init_bindings:
+            return init_bindings
+
+        encoded = {}
+        for var, value in init_bindings.items():
+            if _needs_encoding(value):
+                resolved = self._coerce_tt_read(value)
+                encoded[var] = resolved if resolved is not _TT_NOT_FOUND else BNode()
+            else:
+                encoded[var] = value
+        return encoded
+
     def _intern_tt(self, tt: TripleTerm) -> URIRef:
         """Return the content-addressed URIRef encoding of tt, creating it if new."""
         key = tt._key()
         if key in self._tt_registry:
             return self._tt_registry[key]
         # Coerce nested triple terms to their URIRef form first
-        s_n = self._coerce_tt(tt.subject) if _is_tt_like(tt.subject) else tt.subject
-        o_n = self._coerce_tt(tt.object)  if _is_tt_like(tt.object)  else tt.object
+        s_n = self._coerce_tt(tt.subject) if _needs_encoding(tt.subject) else tt.subject
+        o_n = self._coerce_tt(tt.object)  if _needs_encoding(tt.object)  else tt.object
         uri = URIRef(TT_NS + tt_hash(str(s_n), str(tt.predicate), str(o_n)))
         self._tt_registry[key] = uri
-        self._tt_nodes[uri] = tt
+        # Cache the normalized form (s_n/o_n, matching what's actually stored below),
+        # not the original tt - a nested triple-term component may still be a raw
+        # tuple or unnormalized TripleTerm on tt itself, which _restore() couldn't
+        # resolve further since it only follows tt:HASH URIRef chains.
+        self._tt_nodes[uri] = TripleTerm(s_n, tt.predicate, o_n)
         super().add((uri, RDF.subject,   s_n))
         super().add((uri, RDF.predicate, tt.predicate))
         super().add((uri, RDF.object,    o_n))
         return uri
 
     def _restore(self, node):
-        """Convert a TT URIRef to TripleTerm; pass all other nodes through."""
+        """Convert a TT URIRef to TripleTerm, or a dirlang-encoded Literal to a
+        DirLangString; pass all other nodes through.
+
+        Recurses for TripleTerm so a nested triple term (whose subject/object
+        component is itself an encoded tt:HASH URIRef) resolves fully rather
+        than leaving an inner URIRef unresolved. DirLangString decoding needs
+        no recursion — its encoding is a single self-describing Literal, not a
+        chain of triples.
+        """
         if isinstance(node, URIRef) and str(node).startswith(TT_NS):
             tt = self._tt_nodes.get(node)
+            if tt is None:
+                # Not registered in this graph - it may be a fully-ground
+                # TRIPLE()/<<( )>> value that was computed but never written
+                # anywhere (see starlight.model.encoding's TT_HASH_FN memo).
+                remembered = lookup_tt_hash(node)
+                if remembered is not None:
+                    tt = TripleTerm(*remembered)
             if tt is not None:
-                tt._namespace_manager = self.namespace_manager
-                return tt
+                restored = TripleTerm(self._restore(tt.subject), tt.predicate, self._restore(tt.object))
+                restored._namespace_manager = self.namespace_manager
+                return restored
+        elif isinstance(node, Literal):
+            dls = decode_dirlangstring(node)
+            if dls is not None:
+                return dls
         return node
 
     def _is_encoding_triple(self, s, p, o):
@@ -312,7 +369,7 @@ class StarlightGraph(Graph):
     def _build_registry_from_store(self):
         """Scan the underlying store for TT_NS URIRefs and populate the registry.
 
-        No-op for native backends (rdf-star, rdf-1.2) which store triple terms
+        No-op for the native rdf-1.2 backend, which stores triple terms
         directly in the backend rather than via tt:HASH encoding.
         """
         if self._is_native:
@@ -384,6 +441,10 @@ class StarlightGraph(Graph):
             raise ValueError(
                 "RDF 1.2: triple terms are not permitted in subject position of a triple."
             )
+        if isinstance(s, DirLangString):
+            raise ValueError(
+                "RDF 1.2: a literal (dirLangString) is not permitted in subject position of a triple."
+            )
         if self._is_native:
             self._native_add(s, p, obj)
             if self._invalidate_callback:
@@ -406,9 +467,9 @@ class StarlightGraph(Graph):
         if self._is_native:
             for s, p, o, c in quads:
                 if isinstance(c, Graph) and c.identifier is self.identifier:
-                    if isinstance(s, TripleTerm):
+                    if isinstance(s, (TripleTerm, DirLangString)):
                         raise ValueError(
-                            "RDF 1.2: triple terms are not permitted in subject position of a triple."
+                            "RDF 1.2: a triple term or literal is not permitted in subject position of a triple."
                         )
                     self._native_add(s, p, o)
             if self._invalidate_callback:
@@ -426,7 +487,8 @@ class StarlightGraph(Graph):
                    if isinstance(tt.subject, tuple) and len(tt.subject) == 3 else tt.subject)
             o_n = _collect(tt.object) if isinstance(tt.object, TripleTerm) else \
                   (_collect(TripleTerm(*tt.object))
-                   if isinstance(tt.object, tuple) and len(tt.object) == 3 else tt.object)
+                   if isinstance(tt.object, tuple) and len(tt.object) == 3 else
+                   (encode_dirlangstring(tt.object) if isinstance(tt.object, DirLangString) else tt.object))
             s_key = str(self._tt_registry.get(tt.subject._key(), s_n)
                         if isinstance(tt.subject, TripleTerm) else s_n)
             o_key = str(self._tt_registry.get(tt.object._key(),  o_n)
@@ -444,6 +506,8 @@ class StarlightGraph(Graph):
                 return _collect(node)
             if isinstance(node, tuple) and len(node) == 3 and all(x is not None for x in node):
                 return _collect(TripleTerm(*node))
+            if isinstance(node, DirLangString):
+                return encode_dirlangstring(node)
             return node
 
         for s, p, o, c in quads:
@@ -452,6 +516,10 @@ class StarlightGraph(Graph):
             if isinstance(s, TripleTerm):
                 raise ValueError(
                     "RDF 1.2: triple terms are not permitted in subject position of a triple."
+                )
+            if isinstance(s, DirLangString):
+                raise ValueError(
+                    "RDF 1.2: a literal (dirLangString) is not permitted in subject position of a triple."
                 )
             all_quads.append((_enc(s), p, _enc(o), self))
 
@@ -700,7 +768,8 @@ class StarlightGraph(Graph):
         format='nq12'      — N-Quads 1.2 (all named graphs merged into this graph)
         format='trig12'    — TriG 1.2 (all named graphs merged into this graph)
         format='trix12'    — TriX 1.2 XML (all named graphs merged into this graph)
-        format='rdfxml12'  — RDF/XML 1.2 with <rdf:TripleTerm> elements
+        format='rdfxml12'  — RDF/XML 1.2 with rdf:parseType="Triple" and
+                             rdf:annotation/rdf:annotationNodeID (RDF 1.2 XML Syntax)
         All other formats delegate to rdflib (no triple-term support).
         """
         if format in ('n3', 'n3-12', 'text/n3'):
@@ -780,11 +849,14 @@ class StarlightGraph(Graph):
 
         The rewritten query runs against a plain Graph view of the same store so
         that encoding triples (rdf:subject/predicate/object on tt: URIRefs) are
-        visible to the SPARQL engine. Results are post-processed to restore tt:HASH
+        visible to the SPARQL engine. TripleTerm/tuple values in ``initBindings``
+        are encoded to their internal tt:HASH URIRef first, the same way every
+        other read path in this class resolves triple terms before matching
+        against the store. Results are post-processed to restore tt:HASH
         URIRefs back to TripleTerm objects.
 
-        For native backends (rdf-star, rdf-1.2) the query is routed through
-        _native_query which uses the backend's own triple-term syntax.
+        For the native rdf-1.2 backend the query is routed through
+        _native_query which uses the endpoint's own triple-term syntax.
         """
         if self._is_native:
             return self._native_query(
@@ -803,8 +875,9 @@ class StarlightGraph(Graph):
         raw = Graph(store=self.store, identifier=self.identifier)
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
+        init_bindings = self._encode_init_bindings(initBindings)
         r = raw.query(query_object, processor=processor, result=result,
-                      initNs=initNs, initBindings=initBindings,
+                      initNs=initNs, initBindings=init_bindings,
                       use_store_provided=use_store_provided, **kwargs)
         if r.type == 'SELECT':
             r.bindings = [
@@ -823,8 +896,8 @@ class StarlightGraph(Graph):
               initNs=None, initBindings=None, use_store_provided=True, **kwargs):
         """Execute a SPARQL UPDATE. Triple-term patterns are rewritten to SPARQL 1.1.
 
-        For native backends (rdf-star, rdf-1.2) this raises NotImplementedError
-        until the native write path is implemented.
+        For the native rdf-1.2 backend the update is forwarded to the endpoint
+        via HTTP unchanged (see starlight.backends.native.http_update).
 
         Supported (rdf-1.1 path):
         - ``<<( )>>`` in WHERE clauses (DELETE/INSERT WHERE forms)
@@ -833,10 +906,8 @@ class StarlightGraph(Graph):
           via a post-processing SELECT pass against the same WHERE clause
         """
         if self._is_native:
-            from starlight.backends.native import rewrite_12_to_backend, http_update
+            from starlight.backends.native import http_update
             _, u_url, hdrs = self._store_http()
-            if isinstance(update_object, str):
-                update_object = rewrite_12_to_backend(update_object, self._backend)
             http_update(u_url, update_object, hdrs)
             return None
         from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11

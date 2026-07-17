@@ -731,11 +731,14 @@ class TestRDFXML12Serialize:
         assert 'http://www.w3.org/1999/02/22-rdf-syntax-ns#' in out
 
     def test_triple_term_object_emitted(self):
+        # RDF 1.2 XML Syntax sec 2.19: a triple term is rdf:parseType="Triple"
+        # wrapping a single <rdf:Description>, not an invented element name.
         g = StarlightGraph()
         tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
         g.add((ex('stmt'), RDF_REIFIES, tt))
         out = g.serialize(format='rdfxml12')
-        assert 'rdf:TripleTerm' in out
+        assert 'rdf:parseType="Triple"' in out
+        assert 'rdf:TripleTerm' not in out
         assert f'{EX}alice' in out
 
 
@@ -774,3 +777,97 @@ class TestRDFXML12RoundTrip:
         g.add((ex('s'), ex('p'), ex('o')))
         _, g2 = round_trip(g, 'rdfxml12')
         assert len(g2) == len(g)
+
+    def test_nested_triple_term_object(self):
+        # The inner property's own object is itself a triple term - recursive
+        # rdf:parseType="Triple" nesting (an extrapolation beyond the spec's
+        # single-level example, since RDF 1.2's abstract model permits nesting
+        # and nothing in the XML grammar forbids it).
+        g = StarlightGraph()
+        inner = TripleTerm(ex('bob'), ex('knows'), ex('dave'))
+        outer = TripleTerm(ex('alice'), ex('believes'), inner)
+        g.add((ex('r'), ex('about'), outer))
+        _, g2 = round_trip(g, 'rdfxml12')
+        result = next(g2.objects(ex('r'), ex('about')))
+        assert result == outer
+        assert result.object == inner
+
+
+class TestRDFXML12SpecInterop:
+    """Interop with the RDF 1.2 XML Syntax spec's own examples (sec 2.19-2.20) -
+    starlight's serializer never emits rdf:annotation/rdf:annotationNodeID
+    (it always uses the formal rdf:reifies + parseType="Triple" pattern), but
+    the parser accepts them so documents from other spec-conformant tools
+    still parse correctly.
+    """
+
+    def test_parse_type_triple_matches_spec_example(self):
+        # Verbatim shape from RDF 1.2 XML Syntax sec 2.19.
+        xml = (
+            '<?xml version="1.0"?>'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            ' xmlns:ex="http://example.org/stuff/1.0/">'
+            '<rdf:Description rdf:about="http://example.org/">'
+            '<ex:prop rdf:parseType="Triple">'
+            '<rdf:Description rdf:about="http://example.org/stuff/1.0/s">'
+            '<ex:p rdf:resource="http://example.org/stuff/1.0/o" />'
+            '</rdf:Description>'
+            '</ex:prop>'
+            '</rdf:Description></rdf:RDF>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='rdfxml12')
+        expected_tt = TripleTerm(
+            URIRef('http://example.org/stuff/1.0/s'),
+            URIRef('http://example.org/stuff/1.0/p'),
+            URIRef('http://example.org/stuff/1.0/o'),
+        )
+        assert (URIRef('http://example.org/'), URIRef('http://example.org/stuff/1.0/prop'), expected_tt) in g
+
+    def test_rdf_annotation_iri_reifier_matches_spec_example(self):
+        # Verbatim shape from RDF 1.2 XML Syntax sec 2.20.
+        xml = (
+            '<?xml version="1.0"?>'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            ' xmlns:ex="http://example.org/stuff/1.0/">'
+            '<rdf:Description rdf:about="http://example.org/">'
+            '<ex:prop rdf:annotation="http://example.org/triple1">blah</ex:prop>'
+            '</rdf:Description>'
+            '<rdf:Description rdf:about="http://example.org/triple1">'
+            '<ex:prop>foo</ex:prop>'
+            '</rdf:Description></rdf:RDF>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='rdfxml12')
+        base = URIRef('http://example.org/')
+        prop = URIRef('http://example.org/stuff/1.0/prop')
+        reifier = URIRef('http://example.org/triple1')
+        # Base triple still asserted
+        assert (base, prop, Literal('blah')) in g
+        # Reifier reifies exactly that triple term
+        assert list(g.reified_triples(reifier)) == [TripleTerm(base, prop, Literal('blah'))]
+        # Reifier's own separately-declared property survives
+        assert (reifier, prop, Literal('foo')) in g
+
+    def test_rdf_annotation_node_id_reifier_matches_spec_example(self):
+        # Verbatim shape from RDF 1.2 XML Syntax sec 2.20 (blank-node reifier variant).
+        xml = (
+            '<?xml version="1.0"?>'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            ' xmlns:ex="http://example.org/stuff/1.0/">'
+            '<rdf:Description rdf:about="http://example.org/">'
+            '<ex:prop rdf:annotationNodeID="triple1">blah</ex:prop>'
+            '</rdf:Description>'
+            '<rdf:Description rdf:nodeID="triple1">'
+            '<ex:prop>foo</ex:prop>'
+            '</rdf:Description></rdf:RDF>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='rdfxml12')
+        base = URIRef('http://example.org/')
+        prop = URIRef('http://example.org/stuff/1.0/prop')
+        assert (base, prop, Literal('blah')) in g
+        reifiers = list(g.reifiers(TT=TripleTerm(base, prop, Literal('blah'))))
+        assert len(reifiers) == 1
+        assert isinstance(reifiers[0], BNode)
+        assert (reifiers[0], prop, Literal('foo')) in g

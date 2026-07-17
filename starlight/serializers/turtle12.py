@@ -17,6 +17,7 @@ from rdflib import BNode, URIRef, Literal
 from rdflib.namespace import RDF
 
 from starlight.model.triple import TripleTerm
+from starlight.model.dirlangstring import DirLangString
 from starlight.model.encoding import TT_NS, RR_NS
 
 SL_NS = 'https://github.com/hidden-graph/rdflib-starlight/ns#'
@@ -26,6 +27,8 @@ _INTERNAL_NS = {SL_NS, TT_NS, RR_NS}
 
 def _node_to_ttl(node, ns_mgr):
     """Format an rdflib node as a Turtle token using namespace prefixes."""
+    if isinstance(node, DirLangString):
+        return node.n3(ns_mgr)
     if isinstance(node, URIRef):
         # Anonymous reifier URIs are internal — serialize as blank nodes so
         # re-parsing re-assigns them via _skolemize_encoding for round-trip stability.
@@ -88,6 +91,10 @@ def _sort_key(node):
 
 
 _RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
+
+
+def _graph_has_dirlangstring(sg) -> bool:
+    return any(isinstance(o, DirLangString) for _, _, o in sg.triples((None, None, None)))
 
 
 def _build_fold_map(sg):
@@ -256,7 +263,7 @@ def serialize_turtle12(graph) -> str:
 
     # --- Pass 2: emit version declaration and used prefix declarations ---
     prefix_lines = []
-    if getattr(sg, '_tt_nodes', None):
+    if getattr(sg, '_tt_nodes', None) or _graph_has_dirlangstring(sg):
         prefix_lines.append('@version "1.2" .')
     for prefix, ns_uri in sorted(sg.namespaces(), key=lambda x: x[0]):
         ns = str(ns_uri)
@@ -312,7 +319,7 @@ def serialize_longturtle12(graph) -> str:
     triple_lines.append('')
 
     prefix_lines = []
-    if getattr(sg, '_tt_nodes', None):
+    if getattr(sg, '_tt_nodes', None) or _graph_has_dirlangstring(sg):
         prefix_lines.append('@version "1.2" .')
     for prefix, ns_uri in sorted(sg.namespaces(), key=lambda x: x[0]):
         ns = str(ns_uri)

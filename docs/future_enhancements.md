@@ -2,22 +2,179 @@
 
 ---
 
+## Keeping in step with RDF 1.2/SPARQL 1.2 as the spec finalizes
+
+RDF 1.2 was at **Candidate Recommendation** (published 2026-04-07) as of this writing — not yet a final W3C Recommendation. Everything in this project (the gap analysis, the rewriter, the format modules) is checked against that CR-stage text. This project's own stated purpose (README: "intended to remain relevant until rdflib is updated to incorporate the final RDF 1.2 specification") means it has a deliberately limited lifespan, and needs periodic re-checking rather than a one-time gap analysis. Concrete steps for whoever picks this up as the spec progresses:
+
+1. **Re-run the gap analysis at each W3C stage transition** (CR → PR → REC). CR-stage text can still change in response to implementation/horizontal-review feedback before Proposed Recommendation; re-diff `docs/rdf12_sparql12_gap_analysis.md` against the current editor's draft whenever the spec's status changes, not just once.
+2. **Watch the CR exit criteria / implementation report.** The RDF-star Working Group's CR exit requires a set of independent conforming implementations. Whichever engines end up counted (Oxigraph and Fuseki are the two this project already tracks) are worth re-verifying starlight's rewriter against each time one of them ships a release claiming closer conformance — the live three-way comparison methodology used 2026-07-16 (see "Cross-backend behavior parity" below) is the reusable tool for that, not a one-off.
+3. **Watch for a real JSON-LD RDF-1.2 companion spec.** If the JSON-LD Working Group ever publishes an RDF-1.2-aware revision with its own native representation for quoted/triple terms, replace `starlight/serializers/jsonld12.py` and `starlight/parsers/jsonld12.py`'s invented `rdf:TripleTerm` convention with the real one, and update the module's docstring and the callout in `docs/starlight_vs_rdflib.md` accordingly (see "Formats with no real spec target" in the gap analysis). TriX has no standards body actively developing it, so `trix12` is unlikely to ever gain a real target to converge on — its "starlight convention, not a spec" status is probably permanent, and the documentation callout is the whole fix rather than a placeholder for a future code change.
+4. **Once rdflib ships native RDF 1.2 support** — re-evaluate this project's continued existence, per its own stated scope. At that point: (a) consider deprecating starlight's SPARQL 1.2→1.1 rewriter and in-memory triple-term encoding in favor of delegating straight to rdflib, and (b) check whether the `turtle12`/`nt12`/`nq12`/`trig12`/`rdfxml12` format modules can be dropped in favor of rdflib's own native parsers/serializers.
+5. **Revisit `VERSION "1.2"` / `-1.2-basic` directive validation** (gap analysis §1/§2, low priority today because starlight rewrites RDF 1.2 syntax unconditionally regardless of the directive). Once the spec is final, check whether conforming tooling is expected to validate the directive's presence/value strictly rather than ignore it.
+
+---
+
 ## Fuseki RDF 1.2 Native Syntax
 
-Jena 5.4+ introduced experimental RDF 1.2 support. If a future Fuseki release accepts the final `<<( s p o )>>` syntax natively, no code changes are needed — developers simply switch the backend flag:
+**Status: confirmed 2026-07-16, against a live Fuseki 5.5.0 (`secoresearch/fuseki:latest` Docker image) and Oxigraph 0.5.9 (`ghcr.io/oxigraph/oxigraph:latest`).** This is the thing the note below (kept for history) said to check once a stable release was available — it now is, and it works with zero code changes:
 
 ```python
-# Current: Fuseki rdf-star draft syntax << s p o >>
-g = StarlightGraph(backend='rdf-star', query_url=..., update_url=...)
-
-# Future: Fuseki with native RDF 1.2 <<( s p o )>> syntax
+# Fuseki 5.5+: speaks the final RDF 1.2 <<( s p o )>> syntax natively.
+# "type":"triple" comes back correctly in SPARQL JSON results.
 g = StarlightGraph(backend='rdf-1.2', query_url=..., update_url=...)
 ```
 
-Verify against a running Fuseki instance when a stable RDF 1.2 release is available.
+**`backend='rdf-star'` was removed 2026-07-16** (the older Jena draft `<< s p o >>`
+bracket syntax, pre-dating the final RDF 1.2 spec). Confirmed directly via raw
+HTTP that it's now broken for triple-term round-tripping against Fuseki 5.5.0:
+a value matched via `<< s p o >>` comes back in SPARQL JSON results as a plain
+`"type":"bnode"` instead of `"type":"triple"` — Fuseki appears to have retired
+JSON-result materialization for the old bracket form now that the final
+`<<( )>>` syntax is natively supported. Concretely:
+
+```sparql
+# Insert via the OLD draft syntax:
+INSERT DATA { << <http://example.org/alice> <http://example.org/knows> <http://example.org/bob> >>
+               <http://example.org/via> <http://example.org/x> . }
+
+# Query it back:
+SELECT ?tt WHERE { ?tt <http://example.org/via> <http://example.org/x> }
+# => {"tt": {"type": "bnode", "value": "b0"}}     -- no longer "type":"triple"
+```
+
+Plain triples, wildcard matching, and `__contains__` under the old `rdf-star`
+mode were all still fine — only the specific case of a triple term coming back
+as a *value* in results was affected. But with `backend='rdf-1.2'` fully
+confirmed working (see above) and strictly superior, there was no reason to
+keep the older, now partially-broken mode around: `VALID_BACKENDS` is now just
+`{'rdf-1.1', 'rdf-1.2'}`, `starlight/backends/native.py`'s `rewrite_12_to_backend()`
+and its Jena-draft-bracket-conversion logic were deleted outright (nothing left
+to rewrite - the sole remaining native backend speaks SPARQL 1.2 directly), and
+`sparql_term()` lost its now-single-valued `backend` parameter. The two
+regression tests that had briefly lived in
+`tests/integration/test_fuseki_backend.py::TestFusekiNativeRdfStar` as `xfail`
+were removed along with the class; `TestFusekiNativeRdf12` (below) is the
+replacement.
+
+Also confirmed working natively on **both** Fuseki 5.5.0 and Oxigraph 0.5.9,
+via `backend='rdf-1.2'`, with zero rewriting needed (the endpoint receives the
+SPARQL 1.2 query unchanged — see `starlight/backends/native.py`):
+- `TRIPLE(s, p, o)` and `isTRIPLE(...)` (both engines agree on `"type":"triple"`
+  in JSON results for `TRIPLE()`, and on boolean results for `isTRIPLE()`)
+- `LANGDIR`, `hasLANGDIR`, `STRLANGDIR`, and dirLangString-aware `LANG`/`hasLANG`
+- A `DirLangString` written via `sparql_term()`'s real `"text"@lang--dir"` form,
+  read back correctly including through `CONSTRUCT` (which routes through the
+  Turtle 1.2 parser)
+
+**Also confirmed and fixed as a result of this testing**: the SPARQL 1.2 JSON
+Results key for a dirLangString's base direction is **`"its:dir"`** (both
+Fuseki and Oxigraph agree independently) — mirroring the `its:dir` attribute
+RDF/XML 1.2 also uses. An earlier version of `_parse_json_term` in
+`starlight/backends/native.py` guessed `"direction"`, which was wrong; this is
+now fixed and verified, not a guess. See `tests/unit/test_dirlangstring.py::TestNativeBackend`
+and `tests/integration/test_fuseki_backend.py::TestFusekiRdf12SparqlFunctions`/
+`test_oxigraph_backend.py::TestOxigraphRdf12SparqlFunctions`.
+
+*Original note, kept for history: "Jena 5.4+ introduced experimental RDF 1.2
+support. If a future Fuseki release accepts the final `<<( s p o )>>` syntax
+natively, no code changes are needed — developers simply switch the backend
+flag. Verify against a running Fuseki instance when a stable RDF 1.2 release is
+available." — done.*
+
+---
+
+## Cross-backend behavior parity (in-memory vs Oxigraph vs Fuseki)
+
+**Status: systematically tested 2026-07-16** with a live three-way comparison script (13 scenarios run identically against the default in-memory rdf-1.1 backend, `backend='rdf-1.2'` against Oxigraph 0.5.9, and `backend='rdf-1.2'` against Fuseki 5.5.0). 8/13 matched immediately; the other 5 turned out to be 3 real bugs (fixed same day, isolated to the in-memory backend's SPARQL 1.2→1.1 rewriter) and 2 legitimate, deliberate architectural differences.
+
+**Bugs found and fixed** (all in `starlight/query/sparql12_to_11.py`):
+
+1. **`TRIPLE(s,p,o)` (or a bare `<<( s p o )>>`) used directly in a SELECT projection with no `BIND`** — e.g. `SELECT (TRIPLE(<a>,<b>,<c>) AS ?t) WHERE {}`. `_rewrite_group_content`'s pending-pattern flushing assumed a `<<( )>>` would always be followed by a `.` or `}` in the *same* scope shortly after; when it appears before the WHERE clause's own `{`, the scan recurses into that block as an opaque unit and never flushes the pending patterns there, so they fell through to the end-of-string handler and got appended *after* the query's closing brace — syntactically invalid SPARQL, a `ParseException`. Fixed by injecting any patterns still pending when the first `{}` block is encountered as a prefix to that block's own content (the same one `_rewrite_triple_functions` already does for `SUBJECT`/`PREDICATE`/`OBJECT` in this position, just via a different mechanism).
+2. **`isTRIPLE(TRIPLE(...))` / `isTripleTerm(TRIPLE(...))`** — a nested-expression argument, not a bare variable. `_IS_TT_RE`'s regex only ever matched `isTRIPLE(?x)`; run at its original point in the pipeline (before `<<( )>>` had been reduced to a variable), it silently failed to match the nested form, leaving literal `isTRIPLE(...)` text in the output for the *later* pass to walk straight past — the SPARQL 1.1 engine doesn't know that function name. Fixed by moving the substitution to run last, after every other pass has had a chance to reduce a nested `TRIPLE(...)`/`<<( )>>` argument down to a plain variable, and re-checking the regex fresh at that point rather than trusting the early (pre-rewrite) detection flag.
+3. **A `"text"@lang--dir` literal written directly in a query** (as opposed to a variable bound from already-stored data, which worked already) — e.g. `LANGDIR("hi"@en--rtl)`. Nothing rewrote the *lexical form* itself, only the function-call wrappers around it, so it reached rdflib's SPARQL 1.1 parser unchanged and failed on the `--` it doesn't understand. Fixed with a new early pass, `_rewrite_dirlang_literals()`, that finds every such literal (any quote style) anywhere in the query text and rewrites it to a call to the same registered `dirlang:` constructor function `STRLANGDIR()` already uses.
+
+Fixing bug 2 also surfaced a **pre-existing, independent rdflib limitation**, unrelated to this codebase: `EXISTS {...} && ...` raises an internal exception (`"What do I do with this CompValue?"`) when used inside a `(expr AS ?var)` position (`SELECT` projection or `BIND`), while the identical expression works fine inside `FILTER(...)`. Reproduced with a bare `rdflib.Graph()`, no StarlightGraph involved. Every prior `isTripleTerm()`/`isTRIPLE()` test happened to only ever use it inside `FILTER`, so this had never been triggered before. Worked around (not just avoided) by dropping the `EXISTS` half of the check entirely: `STRSTARTS(STR(?x), TT_NS_PREFIX)` alone is sufficient and correct, since every `TT_NS`-prefixed URIRef is created exclusively by `_intern_tt()`, which always writes its `rdf:subject`/`predicate`/`object` encoding triples in the same call — there's no state where the prefix matches without them. This also matches every *other* `TT_NS` membership check already in this codebase (`_is_encoding_triple`, `_restore()`, `_build_registry_from_store()`), none of which do a separate existence check either.
+
+**`STRLANGDIR("x","en","sideways")` (invalid direction) — resolved 2026-07-16: changed to match native soft-failure semantics.** Originally raised a hard Python `ValueError` on the in-memory backend while producing a silently unbound variable on native backends (standard SPARQL "type error in expression → unbound" semantics) — confirmed as a real, concrete difference via a live multi-row example: a query selecting three rows where only the middle one has a bad direction returns all three rows on Oxigraph/Fuseki (the bad row just has that one variable missing) but raised and returned *zero* rows on the in-memory backend, discarding the two good ones along with the bad one. `_dirlang_construct_fn` now raises `rdflib.plugins.sparql.sparql.SPARQLError` instead of `ValueError` - rdflib's `evalExtend` (which handles `BIND`/`SELECT`-projection evaluation) specifically catches `SPARQLError` and converts it to "leave the variable unbound for this solution"; a plain `ValueError` isn't caught and propagates as a hard crash of the whole query. This was a deliberate choice to prioritize resilience (one bad value degrades gracefully) over the "fail fast with a clear diagnostic" behavior the original design favored - a real tradeoff, decided in favor of matching real engines rather than an oversight. See `tests/unit/test_dirlangstring.py::TestSparqlFunctions::test_strlangdir_invalid_direction_does_not_abort_other_rows` for the multi-row regression test.
+
+**`TRIPLE(a,b,c)`/`<<( a b c )>>` used as a value with all components ground — resolved 2026-07-16: now constructs, matching native "always constructible" semantics.** Previously, on the in-memory backend, a *ground* (variable-free) triple term used as a value (SELECT projection, `BIND`) had *matching* semantics, not *constructing* semantics: if `(a,b,c)` had never been registered anywhere in the graph, the query returned zero rows instead of the value. Native backends have no registry at all — a triple term is just a value, always constructible, exactly like an IRI that isn't in the graph is still a valid term to ask about. Explicit design direction for the fix: *"we certainly dont want a query asking about a triple that does not exist to cause that triple to exist. but we should be able to handle such a query similar to how a query would act about an IRI that did not exist."* Two things had to both be true simultaneously, which is why this wasn't just "always register on construction": (1) constructing the value must have **zero side effects** — it must not write anything to the graph or its registry, and (2) *graph-pattern matching* on a ground triple term (e.g. a reverse `rdf:reifies` lookup, or `<<( ?s ?p ?o )>>` enumeration) must still require the term to actually exist, unchanged from before.
+
+The fix, in `starlight/query/sparql12_to_11.py`'s `_rewrite_triple_term()`: a fully-ground `<<( s p o )>>` (recursively, including nested ground triple terms) is now rewritten to `BIND(<tt#fn/hash>(s, p, o) AS ?__ttN)` — a pure, content-addressed hash computation with no graph read or write — instead of the old `?__ttN rdf:subject s . ?__ttN rdf:predicate p . ?__ttN rdf:object o .` matching pattern. A triple term with *any* variable component keeps the old matching-pattern behavior unchanged, since that's a lookup/enumeration, not a value construction. The registered `TT_HASH_FN` SPARQL function (which already existed, for `CONSTRUCT`-template minting) now also calls a new `remember_tt_hash()` (in `starlight/model/encoding.py`) as a side effect at *query-evaluation* time (after rdflib has resolved prefixes) — populating a process-wide, deterministic memo so `StarlightGraph._restore()` can still reconstruct a proper `TripleTerm` object for a hash that was computed but never written to any graph's own `_tt_nodes` registry. Ground `BIND`s are hoisted to the very start of the `WHERE` clause (a new `state.pending_ground_binds`, distinct from the existing template-minting `state.pending_binds` which goes at the *end* — see the docstring on `_rewrite_construct_query` for why the two need opposite placement) so they precede any statement that consumes the resulting variable in the same textual position, e.g. `?stmt rdf:reifies <<( :a :b :c )>> .`.
+
+Fixing this surfaced two more real, independent bugs during triage, both also fixed same day:
+- `starlight/query/sparql_api.py`'s `_restore_sparql12_in_tree()` (used by `parseQuery`/`parseUpdate` to reconstruct `TripleTerm` nodes in the parse tree) only recognized the old rdf:subject/predicate/object matching-triple encoding shape, not the new `BIND(tt_hash(...) AS ?__ttN)` shape — so ground triple terms silently stopped round-tripping through the parse-tree API. Fixed by also detecting `Bind` nodes whose expression is a call to the registered hash function (unwrapping rdflib's no-op `ConditionalOrExpression → ... → MultiplicativeExpression` single-child wrapper ladder to reach the actual `Function` CompValue).
+- `_inject_ground_binds_into_where()` located the injection point by searching for the literal `WHERE {` text — but the `WHERE` keyword is optional in SPARQL for `SELECT`/`ASK`/`DESCRIBE` (e.g. plain `ASK { ... }`), so any ground triple term inside such a query silently failed to get its `BIND` injected at all, leaving `?__ttN` completely unbound and matching everything — e.g. `ASK { GRAPH <g> { ?stmt rdf:reifies <<( :nobody :knows :nobody )>> . } }` incorrectly returned `true` on a graph containing *any* `rdf:reifies` triple, not just one involving `:nobody`. Fixed by falling back to the first top-level `{` in the query text when no explicit `WHERE` keyword is found (safe: neither the prologue nor a `SELECT` variable list/dataset clause can contain a `{`).
+
+Regression tests: `tests/unit/test_sparql12_to_11.py` (rewriter-level, including the pre-existing `TestParseQueryTripleTermSubject`/`Object`/`NestedTripleTerm`/`OptionalBlock` classes in `test_sparql12_parse.py` which exercise the parse-tree reconstruction), `tests/unit/test_sparql12_query.py::TestQ21` (end-to-end: zero side effects on construction, matching still requires registration, nested ground terms, mixed ground/variable unaffected, `isTRIPLE()` on an unregistered value, `CONSTRUCT`-template minting unaffected), `tests/unit/test_dataset_query.py::TestAsk::test_ask_false_when_no_match` (the `ASK`-without-`WHERE` regression).
 
 ---
 
 ## rdflib 8 Compatibility
 
 rdflib 8.0.0a0 (pre-release) was tested; Revisit when a stable release arrives.
+
+---
+
+## `rdf:dirLangString` (RDF 1.2 base-direction-tagged literals)
+
+**Status: implemented (2026-07-16).** `"text"@lang--dir` (e.g. `"مرحبا"@ar--rtl`) is
+supported end to end. This surfaced from the starShacl side while closing SHACL
+1.2 Core's changelog (Issue 737, referenced by `sh:uniqueLang`) — see starShacl's
+`docs/shacl12-gap-matrix.md` (`rdf:dirLangString` row) for the discovery context;
+`sh:uniqueLang` itself is still direction-unaware and is the actual follow-up
+this unblocks on the starShacl side.
+
+**Encoding**: `starlight/model/dirlangstring.py`'s `DirLangString(value, language,
+direction)` is the public value type — analogous to `TripleTerm`, immutable,
+value-typed (`__eq__`/`__hash__` by `(value, language, direction)`), language tag
+case-folded per RDF 1.2 Concepts sec 3.4.1. Internally it's a plain
+`rdflib.Literal` whose `datatype=` URI packs `(language, direction)` — e.g.
+`https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#en--rtl` — since
+`Literal(text, lang="en--rtl")` raises (rdflib's langtag validator has no notion
+of `--dir`) but validation never fires for `datatype=`. Unlike `TripleTerm`,
+this needs **no registry**: the encoding is a pure function of the value itself
+(no side-table of rdf:subject/predicate/object triples), so decoding happens
+lazily wherever `StarlightGraph._restore()` already runs — no analogue of
+`_build_registry_from_store()` was needed.
+
+**Where it's wired in**:
+- `starlight/graph/starlight_graph.py` — `_coerce_tt`/`_coerce_tt_read` encode on
+  write, `_restore()` decodes on read; `_needs_encoding()` (renamed from
+  `_is_tt_like` at two call sites) recognizes it for `triples_choices()`,
+  `initBindings`, and nesting inside a `TripleTerm`'s object. Subject position is
+  rejected the same way a `TripleTerm` is.
+- Parsers/serializers: Turtle 1.2, N-Triples 1.2, N-Quads 1.2 (and TriG 1.2,
+  which reuses the Turtle parser/serializer per named graph) support the real
+  `"text"@lang--dir` lexical form natively. RDF/XML 1.2 and TriX 1.2 use their
+  existing `rdf:datatype`/`typedLiteral[datatype=]` mechanisms with the internal
+  dirlang: URI (no langtag validation on that path either). JSON-LD 1.2 uses
+  `{"@value": ..., "@type": "<dirlang-uri>"}` rather than JSON-LD 1.1's native
+  `@direction` keyword, since rdflib's JSON-LD codec (RDF 1.1) has no concept of
+  `@direction` and would silently drop it — `@type` round-trips through
+  rdflib's real parser unchanged.
+- SPARQL: `starlight/query/sparql12_to_11.py` adds `LANGDIR(?x)`, `hasLANGDIR(?x)`,
+  and `STRLANGDIR(lex, lang, dir)` (SPARQL 1.2 Query sec 17.4.2), and upgrades
+  `LANG(?x)`/adds `hasLANG(?x)` so both also recognize a dirLangString the way
+  they already handle a plain `rdf:langString`. `LANGDIR`/`hasLANGDIR`/`LANG`/
+  `hasLANG` rewrite to plain SPARQL 1.1 expression built-ins (`DATATYPE`/`STR`/
+  `STRSTARTS`/`STRAFTER`/`STRBEFORE`/`IF`). `STRLANGDIR` rewrites to a registered
+  custom function (`DIRLANG_CONSTRUCT_FN`, same pattern as `TT_HASH_FN`) rather
+  than a pure expression, so a malformed direction argument raises immediately
+  at query time instead of silently building a bad value. `_rewrite_dirlang_and_strlangdir()`
+  is a recursive-descent rewriter (like `_rewrite_triple_calls`) — every argument
+  is rewritten before being spliced into its enclosing call, so arbitrary nesting
+  (`LANGDIR(STRLANGDIR(...))`, `hasLANGDIR(IF(..., ?x, ?y))`) resolves correctly,
+  not just a bare variable.
+
+**Known limitations, not addressed**:
+- RDF 1.2's "1.2-basic" (no dirLangString/no triple terms) conformance level
+  isn't modeled — starlight has no opt-out mode. Low priority, no known use case
+  blocked.
+
+~~Native backends: the exact SPARQL 1.2 JSON Results key for dirLangString's
+base direction was unverified~~ — **resolved 2026-07-16**, see the "Fuseki RDF
+1.2 Native Syntax" section above: confirmed as `"its:dir"` against live Fuseki
+5.5.0 and Oxigraph 0.5.9, and `starlight/backends/native.py` was corrected from
+the earlier `"direction"` guess.
+
+Tests: `tests/unit/test_dirlangstring.py`.

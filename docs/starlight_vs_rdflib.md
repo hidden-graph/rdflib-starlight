@@ -13,7 +13,7 @@ Summary of all public `rdflib.Graph` methods and status in `StarlightGraph`.
 
 ## Core Mutation
 
-TripleTerm as used below can refer to either a plain 3-tuple `(s, p, o)` in object position, or a `TripleTerm` instance created as `TT = TripleTerm(s, p, o)`.
+TripleTerm as used below can refer to either a plain 3-tuple `(s, p, o)` in object position, or a `TripleTerm` instance created as `TT = TripleTerm(s, p, o)`. A `DirLangString(value, language, direction)` instance (RDF 1.2 base-direction-tagged literal, `"text"@lang--dir`) is accepted anywhere an object may appear, with the same read/write transparency as TripleTerm, but no tuple shorthand and no registry — see [Starlight Classes](#starlight-classes) below.
 
 ✅ `g.add(triple)` — Adds one triple. Allows triple term as an object.
 
@@ -83,13 +83,15 @@ The following functions have no TripleTerm involvement.
 
 ## Serialization / Parsing
 
-All rdflib formats are supported. Six additional RDF 1.2 formats add TripleTerm support.
+All rdflib formats are supported. Eight additional RDF 1.2 formats add TripleTerm support.
 
-✅ `g.parse(...)` — Six additional RDF 1.2 formats supported: `turtle12`, `nt12`, `nq12`, `trig12`, `trix12`, `rdfxml12`.
+✅ `g.parse(...)` — Eight additional RDF 1.2 formats supported: `turtle12`, `nt12`, `nq12`, `trig12`, `trix12`, `rdfxml12`, `jsonld12`, `longturtle12`.
 
-✅ `g.serialize(...)` — All rdflib formats continue to work (e.g. ttl 1.1) but will expose internal encoding of triples. Six RDF 1.2 formats serialize TripleTerms correctly: `turtle12`, `longturtle12`, `nt12`, `nq12`, `trig12`, `trix12`.
+✅ `g.serialize(...)` — All rdflib formats continue to work (e.g. ttl 1.1) but will expose internal encoding of triples. All eight RDF 1.2 formats serialize TripleTerms correctly.
 
 ✅ `g.print(...)` — Overridden to default to `turtle12`. Calling `g.print()` with no arguments produces clean RDF 1.2 output.
+
+> **Not all eight are spec-backed.** `turtle12`, `nt12`, `nq12`, `trig12`, `longturtle12`, and `rdfxml12` target real W3C companion documents to RDF 1.2 (Turtle, N-Triples, N-Quads, TriG, XML Syntax — longturtle is a pretty-printed Turtle variant). **`jsonld12` and `trix12` are not** — there is no W3C JSON-LD 1.2 spec, and TriX was never a W3C spec at all (RDF 1.1 or otherwise), just a long-standing HP Labs/Jena convention. Both extend their non-RDF-1.2 base format with starlight-invented conventions (an `rdf:TripleTerm` node shape, and a `dirlang:` datatype URI for `dirLangString`) that round-trip only through starlight's own parser/serializer for that format — not through any external JSON-LD or TriX tool. See `docs/rdf12_sparql12_gap_analysis.md` §6 and `docs/future_enhancements.md`'s "Keeping in step with RDF 1.2/SPARQL 1.2 as the spec finalizes" for what would need to change if either format ever does get a real spec target.
 
 ---
 
@@ -97,7 +99,7 @@ All rdflib formats are supported. Six additional RDF 1.2 formats add TripleTerm 
 
 SPARQL 1.2 syntax is fully supported. See [sparql12_design.md](sparql12_design.md) for full details.
 
-✅ `g.query(...)` — Accepts SPARQL 1.2 queries including `<<( )>>` triple-term patterns, `{| |}` annotation blocks, `~?r` reifier binding, and `isTripleTerm()`. For the default rdf-1.1 backend, queries are rewritten to SPARQL 1.1 internally. For native backends (rdf-star, rdf-1.2), queries go directly to the endpoint via HTTP. CONSTRUCT can return RDF 1.2 graph.
+✅ `g.query(...)` — Accepts SPARQL 1.2 queries including `<<( )>>` triple-term patterns, `{| |}` annotation blocks, `~?r` reifier binding, `TRIPLE(s,p,o)`, `isTripleTerm()`/`isTRIPLE()` (the SPARQL 1.2 spec's own name, accepted as an alias), and the base-direction functions `LANGDIR()`/`hasLANGDIR()`/`STRLANGDIR()` plus a `LANG()`/`hasLANG()` that also recognize a DirLangString. For the default rdf-1.1 backend, queries are rewritten to SPARQL 1.1 internally. For the native rdf-1.2 backend, queries go directly to the endpoint via HTTP. CONSTRUCT can return RDF 1.2 graph.
 
 ✅ `g.update(...)` — Accepts SPARQL 1.2 UPDATE with triple-term patterns in WHERE, INSERT, and DELETE clauses. For the default rdf-1.1 backend, triple terms are encoded before writing. For native backends, the update goes directly to the endpoint via HTTP.
 
@@ -191,6 +193,10 @@ New classes introduced by Starlight with no direct rdflib equivalent.
 
 ✅ `TripleTerm` — Represents an RDF 1.2 triple term `<<( s p o )>>` as a Python value. Two TripleTerms with the same components are equal regardless of how they were created. Accepts nested TripleTerms. A plain 3-tuple in object position is automatically treated as a TripleTerm. Implements `.n3()` so rdflib can format it as `<<( :bob :knows :carol )>>` wherever a node is expected.
 
+### starlight/model/dirlangstring.py
+
+✅ `DirLangString(value, language, direction)` — Represents an RDF 1.2 base-direction-tagged literal `"text"@lang--dir`. Value-typed like `TripleTerm` (equal/hashable by `(value, language, direction)`; language tag case-folded per RDF 1.2). `direction` must be `'ltr'` or `'rtl'`. Implements `.n3()` (`"text"@lang--dir`). Unlike `TripleTerm`, has no tuple shorthand and needs no registry — `encode_dirlangstring()`/`decode_dirlangstring()` convert to/from the internal `Literal(text, datatype=<dirlang: URI>)` encoding as a pure function of the value itself.
+
 ### starlight/graph/starlight_graph.py
 
 ✅ `StarlightGraph` — Subclass of `rdflib.Graph`; the main public API for single-graph RDF 1.2. Stores TripleTerms as content-addressed `tt:HASH` URIRefs internally and hides the encoding from all callers. See method tracker above.
@@ -227,7 +233,7 @@ g = StarlightGraph(backend='rdf-1.2')  # native RDF 1.2 endpoint
 
 ### starlight/parsers/ntriples12.py
 
-✅ `parse_ntriples12(text)` — Parses N-Triples 1.2 text line-by-line; returns a list of `(s, p, o)` triples where subjects/objects may be `TripleTerm` instances. Handles full IRIs, blank nodes, plain/typed/language-tagged literals, and `<<( )>>` triple terms (including nested). Called by `StarlightGraph.parse(format='nt12')`.
+✅ `parse_ntriples12(text)` — Parses N-Triples 1.2 text line-by-line; returns a list of `(s, p, o)` triples where subjects/objects may be `TripleTerm` instances. Handles full IRIs, blank nodes, plain/typed/language-tagged/direction-tagged (`"text"@lang--dir`) literals, and `<<( )>>` triple terms (including nested). Called by `StarlightGraph.parse(format='nt12')`.
 
 ✅ `parse_nquads12(text)` — Parses N-Quads 1.2 text; returns a list of `(s, p, o, g)` quads. Called by `StarlightGraph.parse(format='nq12')`; the graph component `g` is discarded when merging into a single-graph `StarlightGraph`.
 
@@ -247,7 +253,7 @@ g = StarlightGraph(backend='rdf-1.2')  # native RDF 1.2 endpoint
 
 ### starlight/query/sparql12_to_11.py
 
-✅ `rewrite_sparql12_to_11(query)` — Public entry point. Rewrites SPARQL 1.2 syntax to SPARQL 1.1: triple-term patterns `<<( )>>`, annotation subjects `<< >>`, inline annotation blocks `{| |}`, reifier binding `~?r`, `SUBJECT()`/`PREDICATE()`/`OBJECT()` function calls, and `isTripleTerm()` filter. Passes plain queries through unchanged.
+✅ `rewrite_sparql12_to_11(query)` — Public entry point. Rewrites SPARQL 1.2 syntax to SPARQL 1.1: triple-term patterns `<<( )>>`, the `TRIPLE(s,p,o)` constructor (desugared to `<<( )>>`), annotation subjects `<< >>`, inline annotation blocks `{| |}`, reifier binding `~?r`, `SUBJECT()`/`PREDICATE()`/`OBJECT()` function calls, `isTripleTerm()`/`isTRIPLE()` filter, and the base-direction functions `LANGDIR()`/`hasLANGDIR()`/`STRLANGDIR()` plus a dirLangString-aware `LANG()`/`hasLANG()`. Passes plain queries through unchanged.
 
 ➖ `_RewriteState` — Internal counter for generating unique `?__ttN` variable names across a single rewrite pass. Not part of the public API.
 
@@ -265,7 +271,7 @@ Module-level functions that are part of the internal encoding but not public API
 
 ## Summary
 
-✅ Done — 35 (13 rdflib.Graph methods overridden; 10 RDF 1.2 additions; 12 Starlight classes/functions)
+✅ Done — 36 (13 rdflib.Graph methods overridden; 10 RDF 1.2 additions; 13 Starlight classes/functions)
 🔗 Inherited (works) — 13
 ⚠️ Partial / caveats — 1 (see below)
 ➖ Not relevant — 20

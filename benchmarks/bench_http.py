@@ -3,11 +3,11 @@ benchmarks/bench_http.py
 
 Phase 2 performance benchmarks: StarlightGraph against HTTP backends.
 
-Compares rdf-1.1, rdf-star (Fuseki), and rdf-1.2 (Oxigraph) modes at
+Compares rdf-1.1 and rdf-1.2 (Fuseki 5.5+ and Oxigraph) modes at
 the same scale points used in bench_inmemory.py.
 
 Requirements:
-  Fuseki:   docker run -d --name fuseki-bench -p 3030:3030 -e ADMIN_PASSWORD=admin stain/jena-fuseki
+  Fuseki:   docker run -d --name fuseki-bench -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest
             curl -s -X POST http://localhost:3030/$/datasets -u admin:admin \\
                  -H "Content-Type: application/x-www-form-urlencoded" \\
                  --data "dbName=bench&dbType=mem"
@@ -57,8 +57,8 @@ BACKENDS = [
         'ping':        'http://localhost:3030/$/ping',
     },
     {
-        'label':       'rdf-star / Fuseki',
-        'backend':     'rdf-star',
+        'label':       'rdf-1.2 / Fuseki',
+        'backend':     'rdf-1.2',
         'query_url':   'http://localhost:3030/bench/query',
         'update_url':  'http://localhost:3030/bench/update',
         'clear_url':   'http://localhost:3030/bench/update',

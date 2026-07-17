@@ -17,6 +17,7 @@ from __future__ import annotations
 import re as _re
 from rdflib import URIRef, BNode, Literal
 from starlight.model.triple import TripleTerm
+from starlight.model.encoding import encode_dirlang_datatype
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +163,18 @@ def _token_to_node(token: str):
         value = _unescape_nt(token[1:close])
         suffix = token[close + 1:]
         if suffix.startswith('@'):
-            return Literal(value, lang=suffix[1:])
+            lang_dir = suffix[1:]
+            if '--' in lang_dir:
+                # RDF 1.2 "text"@lang--dir (rdf:dirLangString) — see
+                # starlight.parsers.turtle_parser._to_node for the same encoding.
+                language, _, direction = lang_dir.rpartition('--')
+                direction = direction.lower()
+                if direction not in ('ltr', 'rtl'):
+                    raise ValueError(
+                        f'RDF 1.2: base direction must be "ltr" or "rtl", got {direction!r} in @{lang_dir}'
+                    )
+                return Literal(value, datatype=encode_dirlang_datatype(language.lower(), direction))
+            return Literal(value, lang=lang_dir)
         if suffix.startswith('^^<') and suffix.endswith('>'):
             return Literal(value, datatype=URIRef(_unescape_nt(suffix[3:-1])))
         return Literal(value)

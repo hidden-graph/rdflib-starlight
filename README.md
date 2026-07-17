@@ -9,7 +9,7 @@ RDF 1.2 wrapper for rdflib.
 
 rdflib-starlight works by translating RDF 1.2 data and queries into RDF 1.1 format internally, so that rdflib can process them natively. It can operate fully in-memory, or use the backend storage options supported by rdflib — including Fuseki, SQL, and Oxigraph. When the backend natively supports RDF 1.2, rdflib-starlight delegates storage and querying to it directly.
 
-> **Scope note:** rdflib-starlight focuses on reification — the RDF 1.2 feature most immediately useful to developers. Other RDF 1.2 additions, such as base-direction support for language-tagged literals (`"text"@en--ltr`), are not currently implemented.
+> **Scope note:** rdflib-starlight focuses on reification and base-direction literals — the two RDF 1.2 data-model additions. Base-direction support for language-tagged literals (`"text"@en--ltr`, `rdf:dirLangString`) is available as `DirLangString`; see [rdflib-starlight.md](docs/rdflib-starlight.md) for details.
 
 ```
 pip install rdflib-starlight
@@ -21,7 +21,7 @@ pip install rdflib-starlight
 - **Full RDF 1.2 data model** — triple terms are first-class Python objects (`TripleTerm`), not encoded strings
 - **All annotation forms** — parses and serializes `{| |}`, `~ :r`, `<<( )>>`, and `<< >>` syntax
 - **SPARQL 1.2** — queries with triple term patterns are rewritten to SPARQL 1.1 for compatibility
-- **8 serialization formats** — Turtle, N-Triples, N-Quads, TriG, JSON-LD, TriX, RDF/XML, longturtle
+- **8 serialization formats** — Turtle, N-Triples, N-Quads, TriG, JSON-LD, TriX, RDF/XML, longturtle (JSON-LD and TriX are starlight-defined conventions, not W3C RDF 1.2 formats — see the note in [starlight_vs_rdflib.md](docs/starlight_vs_rdflib.md#serialization--parsing))
 - **W3C conformance** — passes the W3C Turtle 1.2 test suite
 - **Multiple backends** — in-memory, SQL (via rdflib-sqlalchemy), Apache Fuseki, Oxigraph
 
@@ -99,8 +99,8 @@ g = StarlightGraph(backend='rdf-1.1',
                    query_url='http://localhost:3030/ds/sparql',
                    update_url='http://localhost:3030/ds/update')
 
-# Apache Fuseki — SPARQL endpoint with RDF star encoding (not RDF 1.2 compliant)
-g = StarlightGraph(backend='rdf-star',
+# Apache Fuseki 5.5+ — speaks the final RDF 1.2 <<( s p o )>> syntax natively
+g = StarlightGraph(backend='rdf-1.2',
                    query_url='http://localhost:3030/ds/sparql',
                    update_url='http://localhost:3030/ds/update')
 

@@ -541,3 +541,286 @@ class TestQ15:
         assert leaked == [], (
             f'{len(leaked)} encoding triple(s) leaked into SPARQL results: {leaked}'
         )
+
+
+# ---------------------------------------------------------------------------
+# Q16 — initBindings with a TripleTerm value
+# ---------------------------------------------------------------------------
+
+class TestQ16:
+    """A TripleTerm passed in ``initBindings`` must resolve against the store
+    the same way every other read path (triples(), __contains__, ...) does —
+    by first encoding it to its internal tt:HASH URIRef.
+    """
+
+    def test_registered_triple_term_binding_matches(self, g):
+        tt = TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))
+        r = g.query(
+            'SELECT ?s WHERE { ?s :says ?tt }',
+            initNs={'': EX},
+            initBindings={'tt': tt},
+        )
+        assert _uris(r.bindings, r.vars[0]) == {URIRef(EX + 'alice')}
+
+    def test_unregistered_triple_term_binding_yields_no_rows(self, g):
+        tt = TripleTerm(URIRef(EX + 'nobody'), URIRef(EX + 'knows'), URIRef(EX + 'noone'))
+        r = g.query(
+            'SELECT ?s WHERE { ?s :says ?tt }',
+            initNs={'': EX},
+            initBindings={'tt': tt},
+        )
+        assert list(r.bindings) == []
+
+
+# ---------------------------------------------------------------------------
+# Q17 — CONSTRUCT minting a triple term from variables bound by WHERE patterns
+# ---------------------------------------------------------------------------
+
+class TestQ17:
+    def test_construct_mints_triple_term_from_where_bound_variables(self):
+        # The triple term minted in the template (<<( ?this :reach ?z )>>) uses
+        # ?z, which is bound only by ordinary WHERE matching (transitive reach),
+        # not a constant and not otherwise matched as a triple-term pattern. The
+        # injected BIND must come after those WHERE patterns so ?z is already
+        # bound when it evaluates - this is the same rule-construction shape a
+        # SHACL-AF sh:construct rule uses to reify a freshly-derived fact.
+        g = StarlightGraph()
+        g.parse(data="""
+            @prefix : <http://example.org/> .
+            :a :reach :b .
+            :b :reach :c .
+        """, format='turtle')
+
+        r = g.query("""
+            PREFIX : <http://example.org/>
+            CONSTRUCT {
+              ?this :reach ?z .
+              ?this :witness <<( ?this :reach ?z )>> .
+            }
+            WHERE {
+              ?this :reach ?y .
+              ?y :reach ?z .
+            }
+        """)
+
+        witnesses = list(r.graph.triples((None, URIRef(EX + 'witness'), None)))
+        assert len(witnesses) == 1
+        _, _, obj = witnesses[0]
+        assert isinstance(obj, TripleTerm)
+        assert obj == TripleTerm(URIRef(EX + 'a'), URIRef(EX + 'reach'), URIRef(EX + 'c'))
+
+
+# ---------------------------------------------------------------------------
+# Q18 — TRIPLE(s, p, o) constructor, end to end
+# ---------------------------------------------------------------------------
+
+class TestQ18:
+    def test_triple_constructor_matches_literal_syntax_in_pattern_position(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?stmt WHERE {
+              ?stmt rdf:reifies TRIPLE(:bob, :knows, :carol) .
+            }
+        """)
+        stmts = _uris(r.bindings, r.vars[0])
+        assert URIRef(EX + 'stmt1') in stmts
+
+    def test_triple_constructor_in_bind_matches_registered_term(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?stmt WHERE {
+              BIND(TRIPLE(:bob, :knows, :carol) AS ?tt)
+              ?stmt rdf:reifies ?tt .
+            }
+        """)
+        stmts = _uris(r.bindings, r.vars[0])
+        assert URIRef(EX + 'stmt1') in stmts
+
+    def test_triple_constructor_mints_new_term_in_construct(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            CONSTRUCT {
+              :newstmt rdf:reifies TRIPLE(:bob, :knows, :carol) .
+            }
+            WHERE { }
+        """)
+        RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
+        result = list(r.graph.triples((URIRef(EX + 'newstmt'), RDF_REIFIES, None)))
+        assert len(result) == 1
+        assert result[0][2] == TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))
+
+
+# ---------------------------------------------------------------------------
+# Q19 — isTRIPLE() spec-name alias for isTripleTerm()
+# ---------------------------------------------------------------------------
+
+class TestQ19:
+    def test_is_triple_alias_matches_is_triple_term(self, g):
+        via_spec_name = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT DISTINCT ?t WHERE {
+              ?sub ?pred ?t .
+              FILTER(isTRIPLE(?t))
+            }
+        """)
+        via_starlight_name = g.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT DISTINCT ?t WHERE {
+              ?sub ?pred ?t .
+              FILTER(isTripleTerm(?t))
+            }
+        """)
+        got = {row[via_spec_name.vars[0]] for row in via_spec_name.bindings}
+        expected = {row[via_starlight_name.vars[0]] for row in via_starlight_name.bindings}
+        assert got == expected
+        assert got == {TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))}
+
+
+# ---------------------------------------------------------------------------
+# Q20 — TRIPLE()/isTRIPLE() used directly in a SELECT projection, no BIND
+#
+# Found broken via a live three-way comparison against Fuseki/Oxigraph
+# 2026-07-16 (a ParseException, not a wrong answer - the component-matching
+# patterns landed after the query's closing brace). Fixed same day.
+# ---------------------------------------------------------------------------
+
+class TestQ20:
+    def test_triple_bare_in_select_projection(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (TRIPLE(:bob, :knows, :carol) AS ?t) WHERE {}
+        """)
+        assert r.bindings[0][r.vars[0]] == TripleTerm(
+            URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol')
+        )
+
+    def test_is_triple_of_nested_triple_in_select_projection(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (isTRIPLE(TRIPLE(:bob, :knows, :carol)) AS ?v) WHERE {}
+        """)
+        assert r.bindings[0][r.vars[0]] == Literal(True)
+
+    def test_is_triple_term_of_nested_triple_in_select_projection(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (isTripleTerm(TRIPLE(:bob, :knows, :carol)) AS ?v) WHERE {}
+        """)
+        assert r.bindings[0][r.vars[0]] == Literal(True)
+
+
+# ---------------------------------------------------------------------------
+# Q21 — A ground TRIPLE()/<<( )>> used as a value must behave like a literal
+# IRI: always constructible, restorable to a proper TripleTerm, but with no
+# side effect of writing/registering the triple term into the graph. Asking
+# about a triple that doesn't exist must not cause it to exist - the same way
+# asking about an IRI that isn't in the graph doesn't add it. Graph-pattern
+# *matching* on a ground triple term (e.g. a reverse rdf:reifies lookup) must
+# still require the term to actually be registered.
+#
+# Added 2026-07-16 per explicit design direction; see docs/future_enhancements.md.
+# ---------------------------------------------------------------------------
+
+class TestQ21:
+    def test_ground_triple_constructed_on_empty_graph_has_no_side_effects(self):
+        empty = StarlightGraph()
+        assert len(empty) == 0
+        r = empty.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (TRIPLE(:bob, :knows, :carol) AS ?t) WHERE {}
+        """)
+        assert r.bindings[0][r.vars[0]] == TripleTerm(
+            URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol')
+        )
+        # Constructing the value must not have written or registered anything.
+        assert len(empty) == 0
+        assert list(empty.triple_terms()) == []
+
+    def test_ground_triple_pattern_matching_still_requires_registration(self):
+        empty = StarlightGraph()
+        r = empty.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?stmt WHERE {
+              ?stmt rdf:reifies TRIPLE(:bob, :knows, :carol) .
+            }
+        """)
+        assert r.bindings == []
+
+        empty.add((URIRef(EX + 'stmt1'), URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies'),
+                   TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))))
+        r2 = empty.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?stmt WHERE {
+              ?stmt rdf:reifies TRIPLE(:bob, :knows, :carol) .
+            }
+        """)
+        assert _uris(r2.bindings, r2.vars[0]) == {URIRef(EX + 'stmt1')}
+
+    def test_nested_ground_triple_restores_correctly_without_registration(self):
+        empty = StarlightGraph()
+        r = empty.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (TRIPLE(:alice, :believes, TRIPLE(:bob, :knows, :carol)) AS ?t) WHERE {}
+        """)
+        assert len(empty) == 0
+        assert r.bindings[0][r.vars[0]] == TripleTerm(
+            URIRef(EX + 'alice'), URIRef(EX + 'believes'),
+            TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol')),
+        )
+
+    def test_mixed_ground_and_variable_triple_term_is_unaffected(self, g):
+        # A triple term with at least one variable component is a reverse
+        # lookup/enumeration, not a value construction - it must keep the old
+        # matching semantics (no match on an empty graph) rather than the new
+        # ground-value BIND path. Uses the dataset's own << >> (no-parens,
+        # reification-shorthand) encoding of :verifiedBy - see TestQ2.
+        empty = StarlightGraph()
+        r = empty.query("""
+            PREFIX :   <http://example.org/>
+            SELECT ?s WHERE {
+              << ?s :knows :carol >> :verifiedBy :ResearchTeam .
+            }
+        """)
+        assert r.bindings == []
+
+        r2 = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT ?s WHERE {
+              << ?s :knows :carol >> :verifiedBy :ResearchTeam .
+            }
+        """)
+        assert _uris(r2.bindings, r2.vars[0]) == {URIRef(EX + 'bob')}
+
+    def test_is_triple_of_unregistered_ground_value(self):
+        empty = StarlightGraph()
+        r = empty.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (isTRIPLE(TRIPLE(:bob, :knows, :carol)) AS ?v) WHERE {}
+        """)
+        assert r.bindings[0][r.vars[0]] == Literal(True)
+        assert len(empty) == 0
+
+    def test_construct_template_minting_unaffected_by_ground_value_path(self):
+        # CONSTRUCT-template minting (a *new* triple term written by the
+        # query) is a distinct code path from ground-value construction in a
+        # SELECT/ASK/BIND context, and must keep working unchanged.
+        empty = StarlightGraph()
+        r = empty.query("""
+            PREFIX :   <http://example.org/>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            CONSTRUCT {
+              :newstmt rdf:reifies TRIPLE(:bob, :knows, :carol) .
+            }
+            WHERE { }
+        """)
+        RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
+        result = list(r.graph.triples((URIRef(EX + 'newstmt'), RDF_REIFIES, None)))
+        assert len(result) == 1
+        assert result[0][2] == TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))

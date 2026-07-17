@@ -291,6 +291,8 @@ _:rr2    | <<( :carol :knows :dave )>> | :carol  | :knows   | :dave
 
 `isTripleTerm(?x)` returns `true` when `?x` is a triple term value. Use it to find
 triple terms anywhere in the graph without knowing which predicate carries them.
+`isTRIPLE(?x)` — the SPARQL 1.2 spec's own name for this function (§17.4.6) — is
+accepted as an exact alias; the two spellings rewrite identically.
 
 ```sparql
 PREFIX :   <http://example.org/>
@@ -401,13 +403,37 @@ All remaining properties of that reifier are projected via `?p`/`?o`.
 
 ---
 
+### QF12 — `TRIPLE()` constructor function
+
+`TRIPLE(s, p, o)` is the SPARQL 1.2 spec's function-call form of a triple term
+(§17.4.6) — an alternative spelling of `<<( s p o )>>`, useful when the subject,
+predicate, or object come from expressions rather than being written literally.
+It is rewritten to `<<( s p o )>>` before any other processing, so it works
+anywhere that syntax does: graph-pattern position, `BIND`, and CONSTRUCT
+templates (including minting a triple term that has no existing match, the
+same way QF11 combined with the CONSTRUCT-template case in the test suite does).
+
+```sparql
+PREFIX :   <http://example.org/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+SELECT ?stmt WHERE {
+  ?stmt rdf:reifies TRIPLE(:bob, :knows, :carol) .
+}
+```
+
+is exactly equivalent to writing `?stmt rdf:reifies <<( :bob :knows :carol )>> .`
+(QF1's formal form) — same expected result: `:stmt1` plus both anonymous reifiers.
+
+---
+
 ## How the Rewriter Works
 
 `StarlightGraph.query()` routes each query based on the configured backend.
 
 **rdf-1.1 backend (default, including in-memory):** the query is translated into SPARQL 1.1, executed against the underlying rdflib store, then any triple term values in the results are restored. Queries with no RDF 1.2 constructs and no triple term results pass through unchanged. This translation has three phases.
 
-**Native backends (rdf-star, rdf-1.2):** the query is forwarded directly to the
+**Native rdf-1.2 backend:** the query is forwarded directly to the
 SPARQL endpoint via HTTP. No phase 1–3 processing applies — the backend handles
 triple terms natively.
 

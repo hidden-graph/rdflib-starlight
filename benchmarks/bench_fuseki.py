@@ -1,11 +1,12 @@
 """
 benchmarks/bench_fuseki.py
 
-rdf-1.1/Fuseki vs rdf-star/Fuseki at 50K and 250K TTs.
+rdf-1.1/Fuseki vs rdf-1.2/Fuseki at 50K and 250K TTs.
 
 Both backends use identical datasets. rdf-1.1 expands TripleTerms to
-tt:HASH URIRefs + 3 encoding triples before sending to Fuseki; rdf-star
-stores native quoted triples. In both cases Fuseki receives and evaluates
+tt:HASH URIRefs + 3 encoding triples before sending to Fuseki; rdf-1.2
+(Fuseki 5.5+, confirmed 2026-07-16) stores native quoted triples via the
+final <<( s p o )>> syntax. In both cases Fuseki receives and evaluates
 the complete SPARQL query — there is no N×M round-trip problem.
 
 Queries tested (same three as bench_comparison.py):
@@ -14,7 +15,7 @@ Queries tested (same three as bench_comparison.py):
   3. Partial TT match — TT with bound predicate   : <<( ?s <pred> ?o )>>
 
 Fuseki requirements:
-  docker run -d --name fuseki-bench -p 3030:3030 -e ADMIN_PASSWORD=admin stain/jena-fuseki
+  docker run -d --name fuseki-bench -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest
   curl -s -X POST http://localhost:3030/$/datasets -u admin:admin \\
        -H "Content-Type: application/x-www-form-urlencoded" \\
        --data "dbName=bench&dbType=mem"
@@ -132,12 +133,12 @@ def _flush(buf):
     buf.clear()
 
 
-def _batch_insert(triples, backend):
+def _batch_insert(triples):
     buf = []
     for s, p, o in triples:
-        s_str = sparql_term(s, backend)
-        p_str = sparql_term(p, backend)
-        o_str = sparql_term(o, backend)
+        s_str = sparql_term(s)
+        p_str = sparql_term(p)
+        o_str = sparql_term(o)
         buf.append(f'    {s_str} {p_str} {o_str} .\n')
         if len(buf) >= BATCH_SIZE:
             _flush(buf)
@@ -232,7 +233,7 @@ def run(backend, n_tt):
 
     _clear()
     t0 = time.perf_counter()
-    _batch_insert(load_triples, backend)
+    _batch_insert(load_triples)
     load_t = time.perf_counter() - t0
 
     stored = _triple_count()
@@ -264,12 +265,12 @@ if __name__ == '__main__':
         print('ERROR: Fuseki not reachable at localhost:3030 — start it first.')
         sys.exit(1)
 
-    print('StarlightGraph — rdf-1.1 vs rdf-star / Fuseki comparison')
+    print('StarlightGraph — rdf-1.1 vs rdf-1.2 / Fuseki comparison')
     print(f'Python {sys.version.split()[0]}')
     print(f'Fuseki: {QUERY_URL}')
 
     for n in SCALES:
-        for backend in ('rdf-1.1', 'rdf-star'):
+        for backend in ('rdf-1.1', 'rdf-1.2'):
             run(backend, n)
 
     print('\nDone.')
