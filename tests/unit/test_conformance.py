@@ -19,6 +19,7 @@ query to rdflib's SPARQL 1.1 parser.
 import pytest
 
 from starlight.graph.starlight_graph import StarlightGraph, _check_native_version_conformance
+from starlight.graph.starlight_dataset import StarlightDataset
 from starlight.model.conformance import RDF12ConformanceWarning
 
 EX = 'http://example.org/'
@@ -173,3 +174,106 @@ class TestTurtleVersionDirective:
         g = StarlightGraph()
         with pytest.warns(RDF12ConformanceWarning, match='1.1'):
             g.parse(data=data, format='turtle12')
+
+
+class TestNTriplesNQuadsVersionDirective:
+    """N-Triples/N-Quads: the VERSION line was already recognized by the
+    parser but only to discard it like a comment, never extracting the
+    label - found by asking "does our VERSION support extend to other
+    formats?" and actually checking, same day as the Turtle/SPARQL fix."""
+
+    def test_1_2_basic_with_triple_term_warns_nt(self):
+        data = (
+            'VERSION "1.2-basic"\n'
+            f'<{EX}stmt> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> '
+            f'<<( <{EX}a> <{EX}b> <{EX}c> )>> .\n'
+        )
+        g = StarlightGraph()
+        with pytest.warns(RDF12ConformanceWarning, match='1.2-basic'):
+            g.parse(data=data, format='nt12')
+
+    def test_1_2_basic_with_triple_term_warns_nq(self):
+        data = (
+            'VERSION "1.2-basic"\n'
+            f'<{EX}stmt> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> '
+            f'<<( <{EX}a> <{EX}b> <{EX}c> )>> <{EX}g> .\n'
+        )
+        g = StarlightGraph()
+        with pytest.warns(RDF12ConformanceWarning, match='1.2-basic'):
+            g.parse(data=data, format='nq12')
+
+    def test_no_version_directive_does_not_warn(self, recwarn):
+        data = f'<{EX}s> <{EX}p> <{EX}o> .\n'
+        g = StarlightGraph()
+        g.parse(data=data, format='nt12')
+        assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)
+
+    def test_version_1_2_full_does_not_warn(self, recwarn):
+        data = (
+            'VERSION "1.2"\n'
+            f'<{EX}stmt> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> '
+            f'<<( <{EX}a> <{EX}b> <{EX}c> )>> .\n'
+        )
+        g = StarlightGraph()
+        g.parse(data=data, format='nt12')
+        assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)
+
+    def test_dataset_nq12_warns(self):
+        data = (
+            'VERSION "1.2-basic"\n'
+            f'<{EX}stmt> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> '
+            f'<<( <{EX}a> <{EX}b> <{EX}c> )>> <{EX}g> .\n'
+        )
+        ds = StarlightDataset()
+        with pytest.warns(RDF12ConformanceWarning, match='1.2-basic'):
+            ds.parse(data=data, format='nq12')
+
+
+class TestTrigVersionDirective:
+    """TriG: the document-level VERSION directive was silently dropped
+    entirely - the per-GRAPH-block Turtle parser calls never surfaced it to
+    either StarlightGraph.parse() or StarlightDataset.parse()."""
+
+    def test_starlight_graph_trig12_warns(self):
+        data = f"""VERSION "1.2-basic"
+            PREFIX : <{EX}>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            GRAPH :g1 {{
+              :stmt rdf:reifies <<( :bob :knows :carol )>> .
+            }}
+        """
+        g = StarlightGraph()
+        with pytest.warns(RDF12ConformanceWarning, match='1.2-basic'):
+            g.parse(data=data, format='trig12')
+
+    def test_starlight_dataset_trig12_warns(self):
+        data = f"""VERSION "1.2-basic"
+            PREFIX : <{EX}>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            GRAPH :g1 {{
+              :stmt rdf:reifies <<( :bob :knows :carol )>> .
+            }}
+        """
+        ds = StarlightDataset()
+        with pytest.warns(RDF12ConformanceWarning, match='1.2-basic'):
+            ds.parse(data=data, format='trig12')
+
+    def test_no_version_directive_does_not_warn(self, recwarn):
+        data = f"""PREFIX : <{EX}>
+            GRAPH :g1 {{ :s :p :o . }}
+        """
+        g = StarlightGraph()
+        g.parse(data=data, format='trig12')
+        assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)
+
+    def test_version_1_2_full_does_not_warn(self, recwarn):
+        data = f"""VERSION "1.2"
+            PREFIX : <{EX}>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            GRAPH :g1 {{
+              :stmt rdf:reifies <<( :bob :knows :carol )>> .
+            }}
+        """
+        g = StarlightGraph()
+        g.parse(data=data, format='trig12')
+        assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)

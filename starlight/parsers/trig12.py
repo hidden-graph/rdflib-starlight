@@ -164,6 +164,29 @@ def _split_trig_blocks(text: str) -> list[str]:
     return [chunk for _, chunk in _split_trig_blocks_with_ids(text)]
 
 
+def extract_version_directive(text: str) -> str | None:
+    """Return the document-level declared VERSION label, or None.
+
+    TriG's VERSION directive (if present) applies to the whole document, not
+    per-GRAPH-block - it must be the very first statement, before any
+    @prefix/PREFIX declaration or GRAPH block. Each per-block chunk handed to
+    StarlightTurtleParser by _split_trig_blocks*() never includes this
+    leading directive as such (it either lands, stripped of significance,
+    in the default-graph chunk, or is absent from every GRAPH-block chunk
+    entirely), so callers need this dedicated top-level scan instead - see
+    StarlightGraph.parse()/StarlightDataset.parse()'s 'trig12' branches,
+    which use it for the RDF12ConformanceWarning check
+    (starlight.model.conformance). Reuses starlight.parsers.syntax's
+    existing statement splitter/classifier rather than duplicating that
+    grammar.
+    """
+    from starlight.parsers.syntax import split_statements, classify_statement, extract_fields
+    stmts = split_statements(text)
+    if not stmts or classify_statement(stmts[0]) != 'version':
+        return None
+    return extract_fields(stmts[0], 'version').get('version')
+
+
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------

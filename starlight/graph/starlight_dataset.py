@@ -244,7 +244,7 @@ class StarlightDataset(Dataset):
         text = self._read_source(source, publicID, location, file, data)
 
         if format == 'trig12':
-            from starlight.parsers.trig12 import parse_trig12_named
+            from starlight.parsers.trig12 import parse_trig12_named, extract_version_directive as _trig_version
             for graph_id, triples, namespaces in parse_trig12_named(text):
                 identifier = DATASET_DEFAULT_GRAPH_ID if graph_id is None else graph_id
                 sg = self._load_context(identifier, namespaces)
@@ -252,9 +252,10 @@ class StarlightDataset(Dataset):
                     _raw_graph_add(sg, triple)
                 sg._build_registry_from_store()
                 self._register_sg(sg)
+            self._check_document_version_conformance(_trig_version(text), context='TriG document')
 
         elif format == 'nq12':
-            from starlight.parsers.ntriples12 import parse_nquads12
+            from starlight.parsers.ntriples12 import parse_nquads12, extract_version_directive as _nq_version
             from collections import defaultdict
             by_graph: dict = defaultdict(list)
             for s, p, o, graph_id in parse_nquads12(text):
@@ -265,6 +266,7 @@ class StarlightDataset(Dataset):
                 for triple in triples:
                     sg.add(triple)
                 self._register_sg(sg)
+            self._check_document_version_conformance(_nq_version(text), context='N-Quads document')
 
         elif format == 'trix12':
             from starlight.parsers.trix12 import parse_trix12_named
@@ -277,6 +279,31 @@ class StarlightDataset(Dataset):
 
         self._raw_execution_graph = None
         return self
+
+    def _check_document_version_conformance(self, declared_version, *, context: str) -> None:
+        """Warn (RDF12ConformanceWarning, never a hard error) if a document-
+        level VERSION directive declares "1.2-basic"/"1.1" but any graph in
+        this dataset actually uses a triple term or dirLangString.
+
+        The directive applies to the whole document, not per named graph
+        (see trig12.py's extract_version_directive()), so this checks the
+        union across every context rather than each one independently.
+        No-op if declared_version is None (nothing declared).
+        """
+        if declared_version is None:
+            return
+        from starlight.model.conformance import check_version_conformance
+        from starlight.model.dirlangstring import DirLangString
+        check_version_conformance(
+            declared_version,
+            uses_triple_term=any(bool(sg._tt_nodes) for sg in self.contexts()),
+            uses_dirlangstring=any(
+                isinstance(o, DirLangString)
+                for sg in self.contexts()
+                for _, _, o in sg.triples((None, None, None))
+            ),
+            context=context,
+        )
 
     # ------------------------------------------------------------------
     # Query / Update with SPARQL-star support

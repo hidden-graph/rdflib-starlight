@@ -849,6 +849,7 @@ class StarlightGraph(Graph):
                     )
 
             elif format in ('nt12', 'nq12'):
+                from starlight.parsers.ntriples12 import extract_version_directive
                 if format == 'nt12':
                     from starlight.parsers.ntriples12 import parse_ntriples12
                     triples = parse_ntriples12(text)
@@ -859,11 +860,35 @@ class StarlightGraph(Graph):
                 for triple in triples:
                     self.add(triple)
 
+                declared_version = extract_version_directive(text)
+                if declared_version is not None:
+                    from starlight.model.conformance import check_version_conformance
+                    check_version_conformance(
+                        declared_version,
+                        uses_triple_term=bool(self._tt_nodes),
+                        uses_dirlangstring=any(
+                            isinstance(o, DirLangString) for _, _, o in self.triples((None, None, None))
+                        ),
+                        context='N-Triples/N-Quads document',
+                    )
+
             elif format == 'trig12':
-                from starlight.parsers.trig12 import parse_trig12
+                from starlight.parsers.trig12 import parse_trig12, extract_version_directive as _trig_version
                 for triple in parse_trig12(text):
                     super().add(triple)
                 self._build_registry_from_store()
+
+                declared_version = _trig_version(text)
+                if declared_version is not None:
+                    from starlight.model.conformance import check_version_conformance
+                    check_version_conformance(
+                        declared_version,
+                        uses_triple_term=bool(self._tt_nodes),
+                        uses_dirlangstring=any(
+                            isinstance(o, DirLangString) for _, _, o in self.triples((None, None, None))
+                        ),
+                        context='TriG document',
+                    )
 
             elif format == 'trix12':
                 from starlight.parsers.trix12 import parse_trix12

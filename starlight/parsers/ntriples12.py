@@ -223,6 +223,35 @@ def _parse_nt_line(line: str, lineno: int, quads: bool = False) -> tuple | None:
 
 
 # ---------------------------------------------------------------------------
+# VERSION directive (RDF 1.2 N-Triples grammar: 'VERSION' STRING_LITERAL_QUOTE,
+# first non-blank/comment line only)
+# ---------------------------------------------------------------------------
+
+_VERSION_LINE_RE = _re.compile(r'VERSION\s*([\'"])((?:(?!\1).)*)\1\s*$', _re.IGNORECASE)
+
+
+def extract_version_directive(text: str) -> str | None:
+    """Return the declared VERSION label (e.g. "1.2-basic"), or None.
+
+    _parse_nt_line() already recognizes a VERSION line but only to discard it
+    like a comment - it never surfaces the label. This is a separate,
+    lightweight scan so parse_ntriples12()/parse_nquads12() keep their
+    existing list[tuple] return signature; StarlightGraph.parse() calls this
+    alongside them for the RDF12ConformanceWarning check (see
+    starlight.model.conformance). Per the grammar, VERSION - if present -
+    must be the first statement, so only the first non-blank/comment line is
+    examined.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        m = _VERSION_LINE_RE.match(stripped)
+        return m.group(2) if m else None
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 

@@ -87,6 +87,29 @@ Two existing tests asserted the old `<tripleTerm>` tag directly (`TestTriX12Seri
 
 ---
 
+## VERSION-directive support extended to every text-directive format (2026-07-17)
+
+Prompted by a direct follow-up question — "does our VERSION support extend to other formats?" — rather than assuming the Turtle/SPARQL fix above covered everything, checked each format against its own spec text (or confirmed the spec doesn't apply). Result, spec mechanism vs. implementation:
+
+| Format | Spec mechanism | Implemented? |
+|---|---|---|
+| SPARQL query/update | `VERSION "label"` prologue | ✅ (prior fix) |
+| Turtle/longturtle | `@version "label" .` / `VERSION "label"` | ✅ (prior fix) |
+| N-Triples/N-Quads | `VERSION "label"` (confirmed via spec fetch — bare form, same grammar as SPARQL's) | ❌ → **fixed today** |
+| TriG | inherits Turtle's directive, but document-scoped, not per-`GRAPH`-block | ❌ → **fixed today** |
+| RDF/XML | `rdf:version` attribute on a node element (confirmed via spec fetch) — structurally different, not a text directive at all | ❌ **still open**, deliberately deferred (different shape, doesn't fit the pattern below) |
+| JSON-LD, TriX | no real RDF 1.2 spec exists for either | N/A, correctly out of scope |
+
+**N-Triples/N-Quads**: `ntriples12.py`'s line parser already had `stripped.upper().startswith('VERSION')` — but only to skip the line like a comment, never extracting the label. New `extract_version_directive(text)` does a lightweight separate scan of just the first non-blank/comment line, keeping `parse_ntriples12()`/`parse_nquads12()`'s existing `list[tuple]` return signature untouched (same "don't change a tested public signature" approach used for `split_statements()` during the Turtle-parser strictness work). `StarlightGraph.parse()` calls it alongside the existing parse call.
+
+**TriG**: worse than N-Triples — completely silent, not just partially. The document-level directive isn't per-`GRAPH`-block, but `trig12.py`'s parser works by splitting into blocks and running each one through `StarlightTurtleParser` separately; whichever block happens to contain the leading `VERSION` line captures it *internally* on its own throwaway parse result, but neither `parse_trig12()` nor `parse_trig12_named()` ever propagated that attribute out — confirmed live that a `VERSION "1.2-basic"` + triple-term TriG document produced zero warnings before the fix. New `extract_version_directive(text)` in `trig12.py` scans the raw document once via `syntax.split_statements()`/`classify_statement()` (reusing the already-tested Turtle statement splitter rather than duplicating its grammar) and checks whether the *first* statement is a version directive — matching the grammar's requirement that VERSION, if present, comes first. Wired into both `StarlightGraph.parse(format='trig12')` and `StarlightDataset.parse(format='trig12')` (added a new `_check_document_version_conformance()` helper on `StarlightDataset` since the directive covers the whole document, so the check runs against the union of every resulting named graph, not each one independently); `StarlightDataset.parse(format='nq12')` got the same treatment as a byproduct since it shares the pattern.
+
+**RDF/XML deliberately left open**: its version mechanism is an `rdf:version` XML attribute on a node element, not a prologue-style text directive — a fundamentally different detection shape that doesn't fit `extract_version_directive()`'s pattern, so it wasn't bundled in. Tracked in the gap analysis as its own open item.
+
+9 new tests added to `tests/unit/test_conformance.py` (`TestNTriplesNQuadsVersionDirective`, `TestTrigVersionDirective`; 26 total in that file now). Full suite: 636 passing, zero regressions, re-verified in a clean-venv CI simulation.
+
+---
+
 ## Fuseki RDF 1.2 Native Syntax
 
 **Status: confirmed 2026-07-16, against a live Fuseki 5.5.0 (`secoresearch/fuseki:latest` Docker image) and Oxigraph 0.5.9 (`ghcr.io/oxigraph/oxigraph:latest`).** This is the thing the note below (kept for history) said to check once a stable release was available — it now is, and it works with zero code changes:
