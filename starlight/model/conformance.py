@@ -32,8 +32,14 @@ class RDF12ConformanceWarning(UserWarning):
 
 def check_version_conformance(declared_version, *, uses_triple_term: bool,
                                uses_dirlangstring: bool, context: str) -> None:
-    """Warn if declared_version is unrecognized, or is "1.2-basic" while a
-    triple term and/or dirLangString is actually present.
+    """Warn if declared_version is unrecognized, or is "1.2-basic"/"1.1" while
+    a triple term and/or dirLangString is actually present.
+
+    "1.1" is included alongside "1.2-basic" here, not just "1.2-basic": "1.1"
+    means plain RDF 1.1 syntax/semantics, which by definition has neither of
+    the two RDF 1.2 additions this project tracks (see the README's own
+    scope note) - so it excludes triple terms/dirLangString at least as
+    strictly as "1.2-basic" does, not more permissively.
 
     declared_version -- the VERSION directive's label, or None if no
                          directive was present (in which case this is a no-op)
@@ -52,14 +58,14 @@ def check_version_conformance(declared_version, *, uses_triple_term: bool,
         )
         return
 
-    if declared_version == '1.2-basic':
+    if declared_version in ('1.2-basic', '1.1'):
         used = [name for name, present in (
             ('a triple term', uses_triple_term),
             ('a directional language-tagged literal (dirLangString)', uses_dirlangstring),
         ) if present]
         if used:
             warnings.warn(
-                f'{context} declares VERSION "1.2-basic" but uses {" and ".join(used)}, '
-                'which "1.2-basic" conformance excludes (RDF 1.2 Concepts sec 2.1)',
+                f'{context} declares VERSION {declared_version!r} but uses {" and ".join(used)}, '
+                f'which {declared_version!r} conformance excludes (RDF 1.2 Concepts sec 2.1)',
                 RDF12ConformanceWarning, stacklevel=3,
             )

@@ -468,6 +468,11 @@ class TestVersionDeclarationTriG12:
 # ---------------------------------------------------------------------------
 
 class TestTriX12Parse:
+    """Uses starlight's original <TriX>/<tripleTerm> spelling - kept working
+    for backward compatibility only, no longer emitted by the serializer
+    (see TestTriX12ParseJenaConvention for the current, Jena-matching form
+    and docs/future_enhancements.md for why the switch happened)."""
+
     def test_plain_triple(self):
         xml = (
             '<?xml version="1.0"?>'
@@ -539,6 +544,66 @@ class TestTriX12Parse:
         assert (ex('x'), ex('y'), ex('z')) in g
 
 
+class TestTriX12ParseJenaConvention:
+    """Lowercase <trix> root element, and a nested <triple> (not a distinct
+    <tripleTerm> tag) for an RDF 1.2 triple term - matches Apache Jena's real
+    TriX writer, confirmed live against Fuseki 5.5.0 2026-07-16/17 (the only
+    production TriX implementation found to support triple terms at all;
+    Oxigraph doesn't implement TriX). This is what starlight's own
+    serializer now emits - see TestTriX12Serialize below."""
+
+    def test_lowercase_root_element(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<trix xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            '<graph>'
+            f'<triple><uri>{EX}s</uri><uri>{EX}p</uri><uri>{EX}o</uri></triple>'
+            '</graph></trix>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='trix12')
+        assert (ex('s'), ex('p'), ex('o')) in g
+
+    def test_nested_triple_as_triple_term(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<trix xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            '<graph>'
+            f'<triple><uri>{EX}stmt</uri>'
+            '<uri>http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies</uri>'
+            f'<triple><uri>{EX}alice</uri><uri>{EX}knows</uri><uri>{EX}bob</uri></triple>'
+            '</triple></graph></trix>'
+        )
+        g = StarlightGraph()
+        g.parse(data=xml, format='trix12')
+        assert g.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+
+    def test_parses_real_fuseki_output_verbatim(self):
+        # Captured live from a running Fuseki 5.5.0 (secoresearch/fuseki:latest)
+        # 2026-07-17: INSERT DATA a triple term, then CONSTRUCT it back out
+        # with Accept: application/trix+xml. This is the exact bytes Fuseki
+        # produced, not a hand-written approximation of its format.
+        fuseki_output = (
+            '<trix xmlns="http://www.w3.org/2004/03/trix/trix-1/">\n'
+            '  <graph>\n'
+            '    <triple>\n'
+            f'      <uri>{EX}stmt</uri>\n'
+            '      <uri>http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies</uri>\n'
+            '      <triple>\n'
+            f'        <uri>{EX}a</uri>\n'
+            f'        <uri>{EX}b</uri>\n'
+            f'        <uri>{EX}c</uri>\n'
+            '      </triple>\n'
+            '    </triple>\n'
+            '  </graph>\n'
+            '</trix>'
+        )
+        g = StarlightGraph()
+        g.parse(data=fuseki_output, format='trix12')
+        assert g.has_triple_term(ex('a'), ex('b'), ex('c'))
+        assert (ex('stmt'), RDF_REIFIES, TripleTerm(ex('a'), ex('b'), ex('c'))) in g
+
+
 class TestTriX12Serialize:
     def test_plain_triple(self):
         g = StarlightGraph()
@@ -550,11 +615,13 @@ class TestTriX12Serialize:
         assert '<triple>' in out
 
     def test_triple_term_as_object(self):
+        # Jena convention: a triple term is a nested <triple>, not a distinct
+        # <tripleTerm> tag - confirmed against a live Fuseki 5.5.0 2026-07-17.
         g = StarlightGraph()
         tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
         g.add((ex('stmt'), RDF_REIFIES, tt))
         out = g.serialize(format='trix12')
-        assert '<tripleTerm>' in out
+        assert out.count('<triple>') == 2  # outer statement + nested triple term
         assert f'{EX}alice' in out
 
     def test_named_graph_identifier_in_output(self):
@@ -637,7 +704,9 @@ class TestTriX12Dataset:
     def test_serialize_triple_term_present(self):
         ds = self._make_ds()
         out = ds.serialize(format='trix12')
-        assert '<tripleTerm>' in out
+        # g1's plain triple (1) + g2's reification statement (1) + its
+        # nested triple term (1) = 3 <triple> elements total.
+        assert out.count('<triple>') == 3
 
     def test_parse_preserves_graph_count(self):
         from starlight.graph import StarlightDataset

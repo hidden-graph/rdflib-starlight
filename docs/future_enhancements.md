@@ -56,6 +56,35 @@ Gap-analysis item "Version-directive validation, conformance levels" was filed a
 
 Verified: the exact spec-example query now executes end-to-end via a live `StarlightGraph().query(...)` call (previously raised); full suite run clean (zero regressions, 618 passing including 15 new tests: `tests/unit/test_syntax.py`'s version-extraction cases and the new `tests/unit/test_conformance.py`).
 
+**Two follow-up gaps found the same day by asking "is this consistent with our two native-backend comparables?" and actually checking, rather than assuming yes:**
+
+1. **`"1.1"` was missing from the mismatch check.** The initial version only special-cased `"1.2-basic"` for the "excludes triple terms/dirLangString" warning — but `"1.1"` (plain RDF 1.1 syntax/semantics) excludes those features at least as strictly, not more permissively. `check_version_conformance()` now treats `"1.2-basic"` and `"1.1"` identically for this check.
+2. **The native (`rdf-1.2`) backend never ran the conformance check at all.** `StarlightGraph.query()`/`.update()` return early for `self._is_native` — straight into `_native_query()`/`http_update()` — before `rewrite_sparql12_to_11()` (and therefore the conformance check inside it) is ever reached. Confirmed live against Fuseki 5.5.0 and Oxigraph: both execute a `VERSION "1.2-basic"` query containing a `<<( )>>` pattern completely normally (HTTP 200, no error, no warning anywhere in the response) — so without a fix, a `backend='rdf-1.2'` graph would silently never emit `RDF12ConformanceWarning` for the exact query the default in-memory backend does warn on. Added `_check_native_version_conformance()` (`starlight_graph.py`) to both native branches — it only replicates the *warning*, deliberately not the stripping, since the real endpoint needs to see the directive itself (and already understands it correctly, confirmed by the same live test). Covered by `tests/unit/test_conformance.py::TestNativeBackendVersionConformance` (tests the check function directly — it's pure Python with no network dependency, the HTTP call happens after it).
+
+Re-verified full suite clean at 684 passing (including live integration tests, run this time with Fuseki/Oxigraph containers up).
+
+---
+
+## TriX: adopted Jena's real convention instead of starlight's own invention (2026-07-17)
+
+Prompted by a direct question — "how does our format support compare to our two 1.2-native backends, are we over-supporting?" — checked live against Fuseki 5.5.0 and Oxigraph rather than assuming. Read/write matrix (Graph Store Protocol both directions):
+
+| Format | Fuseki | Oxigraph |
+|---|---|---|
+| Turtle/N-Triples/N-Quads/TriG/RDF-XML | read+write | read+write |
+| JSON-LD (plain) | read+write | read+write |
+| JSON-LD with a triple term | **write fails (HTTP 500)** | **write fails ("not supported yet")** |
+| TriX (plain and with a triple term) | **read+write, fully working** | **not supported at all (HTTP 415/406)** |
+
+Two things fell out of this:
+
+1. **JSON-LD**: starlight is ahead of, not behind, both real backends — neither will serialize a triple term to JSON-LD at all. Left as-is; genuinely speculative (no real spec, no real implementation to compare against) but not contradicted by anything either.
+2. **TriX turned out to be the interesting one.** The gap analysis (§6) had assumed "no external tool to round-trip through" for TriX, same as JSON-LD — that assumption was wrong, not just unverified. Apache Jena has a real, working TriX writer/reader, and it does support RDF 1.2 triple terms. Starlight's own invented TriX convention — `<TriX>` (capital) root element, a distinct `<tripleTerm>` tag — was incompatible with Jena's actual output in *both* respects, confirmed the direct way: feeding Fuseki's live TriX output into `starlight.parsers.trix12.parse_trix12()` raised `ValueError: Expected <TriX> root element, got '{...}trix'`.
+
+**Fixed**: `starlight/serializers/trix12.py` now emits Jena's exact convention — lowercase `<trix>` root, and a triple term as a `<triple>` nested in a term position (reusing the same element used for an ordinary asserted statement; TriX disambiguates by structural position, not tag name, and Jena has no separate "triple term" tag at all). `starlight/parsers/trix12.py` accepts this new form and still accepts the old `<TriX>`/`<tripleTerm>` spelling for backward compatibility with anything already serialized by the prior version, though nothing writes that form anymore. Re-verified live, both directions: Fuseki accepts starlight's new TriX output completely unmodified (HTTP 201), and starlight correctly parses Fuseki's real TriX output byte-for-byte — `tests/unit/test_rdf12_formats.py::TestTriX12ParseJenaConvention::test_parses_real_fuseki_output_verbatim` embeds the literal captured bytes from a live Fuseki 5.5.0 response, not a hand-written guess at what its output looks like.
+
+Two existing tests asserted the old `<tripleTerm>` tag directly (`TestTriX12Serialize`/`TestTriX12Dataset`) and were updated to check for the new nested-`<triple>` count instead. Full suite: 687 passing, zero regressions.
+
 ---
 
 ## Fuseki RDF 1.2 Native Syntax

@@ -54,6 +54,42 @@ def _needs_encoding(node):
     return _is_tt_like(node) or isinstance(node, DirLangString)
 
 
+def _check_native_version_conformance(text: str) -> None:
+    """Run the same RDF12ConformanceWarning check the in-memory backend's
+    rewrite pipeline runs, for a native (rdf-1.2) backend's raw SPARQL text.
+
+    The native backend sends text straight through to a real endpoint via
+    HTTP with zero rewriting (see starlight.backends.native's module
+    docstring) - correct, since Fuseki/Oxigraph understand VERSION natively
+    (confirmed live 2026-07-17: both execute a VERSION-declared query
+    normally regardless of a conformance mismatch, HTTP 200). But neither
+    surfaces any warning back to the caller for a mismatch - confirmed the
+    same day, sending VERSION "1.2-basic" plus a <<( )>> pattern to both
+    got a normal 200 response with no signal anywhere in it. Without this
+    check, a StarlightGraph(backend='rdf-1.2') would silently never emit
+    RDF12ConformanceWarning at all, while the default in-memory backend
+    does for the identical query - an inconsistency between backends this
+    project otherwise takes care to avoid (see
+    tests/integration/test_cross_backend_parity.py). Only the *warning* is
+    replicated here, never the VERSION-stripping - the native endpoint
+    needs to see the directive itself, unlike rdflib's SPARQL 1.1 parser.
+    """
+    from starlight.query.sparql12_to_11 import _strip_version_directive
+    from starlight.model.conformance import check_version_conformance
+
+    _, declared_version = _strip_version_directive(text)
+    if declared_version is None:
+        return
+    check_version_conformance(
+        declared_version,
+        uses_triple_term=bool(
+            "<<(" in text or re.search(r'<<[^(]|\{\|', text) or '~' in text
+        ),
+        uses_dirlangstring='--' in text,
+        context='SPARQL query',
+    )
+
+
 class StarlightGraph(Graph):
     """rdflib.Graph extended with RDF 1.2 triple-term support.
 
@@ -868,6 +904,8 @@ class StarlightGraph(Graph):
         _native_query which uses the endpoint's own triple-term syntax.
         """
         if self._is_native:
+            if isinstance(query_object, str):
+                _check_native_version_conformance(query_object)
             return self._native_query(
                 query_object, processor=processor, result=result,
                 initNs=initNs, initBindings=initBindings,
@@ -909,6 +947,8 @@ class StarlightGraph(Graph):
         """
         if self._is_native:
             from starlight.backends.native import http_update
+            if isinstance(update_object, str):
+                _check_native_version_conformance(update_object)
             _, u_url, hdrs = self._store_http()
             http_update(u_url, update_object, hdrs)
             return None

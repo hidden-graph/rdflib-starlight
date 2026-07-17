@@ -4,9 +4,17 @@ starlight.serializers.trix12
 Serialize a StarlightGraph or StarlightDataset context to TriX 1.2 XML.
 
 TriX is an XML-based named-graph format (http://www.w3.org/2004/03/trix/).
-Each graph is a <graph> element containing <triple> elements.  This serializer
-extends the standard with <tripleTerm> for RDF 1.2 triple terms, which may
-appear in both subject and object positions.
+Each graph is a <graph> element containing <triple> elements. RDF 1.2 triple
+terms are represented by nesting another <triple> element in a term position
+(subject or object) - the same tag used for an asserted statement, since
+TriX disambiguates by structural position, not a distinct tag name. This
+matches Apache Jena's real TriX writer (confirmed empirically 2026-07-17
+against a live Fuseki 5.5.0), including its lowercase <trix> root element -
+the only production TriX implementation found to support RDF 1.2 triple
+terms at all, since Oxigraph doesn't implement TriX. See the parser module
+(starlight.parsers.trix12) for the corresponding read side, which still
+accepts starlight's original <TriX>/<tripleTerm> spelling for backward
+compatibility even though it's no longer emitted here.
 
 Entry point:  serialize_trix12(g) -> str
 """
@@ -29,7 +37,9 @@ _T = f'{{{TRIX_NS}}}'    # shorthand: '{ns}' prefix for element tags
 def _term_elem(node, parent: ET.Element) -> ET.Element:
     """Append a TriX term element for *node* to *parent* and return it."""
     if isinstance(node, TripleTerm):
-        tt = ET.SubElement(parent, f'{_T}tripleTerm')
+        # Jena convention: reuse the ordinary <triple> tag, nested in a term
+        # position - not a distinct <tripleTerm> tag (see module docstring).
+        tt = ET.SubElement(parent, f'{_T}triple')
         _term_elem(node.subject,   tt)
         _term_elem(node.predicate, tt)
         _term_elem(node.object,    tt)
@@ -93,12 +103,13 @@ def serialize_trix12(g) -> str:
 
     Named graph identifier → <uri> as first child of <graph>.
     BNode identifier        → anonymous <graph> (default/unnamed graph).
-    Triple terms emitted as <tripleTerm> with three nested term elements.
+    Triple terms emitted as a nested <triple> (Jena convention), not a
+    distinct <tripleTerm> tag.
     """
     ET.register_namespace('', TRIX_NS)
     ET.register_namespace('xml', _XML_NS)
 
-    root = ET.Element(f'{_T}TriX')
+    root = ET.Element(f'{_T}trix')
     _append_graph(g, root)
 
     ET.indent(root, space='  ')
@@ -114,7 +125,7 @@ def serialize_trix12_dataset(ds) -> str:
     ET.register_namespace('', TRIX_NS)
     ET.register_namespace('xml', _XML_NS)
 
-    root = ET.Element(f'{_T}TriX')
+    root = ET.Element(f'{_T}trix')
     for sg in ds.contexts():
         if len(sg) == 0:
             continue

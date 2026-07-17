@@ -4,9 +4,19 @@ starlight.parsers.trix12
 Parse TriX 1.2 XML into triples, preserving or merging named-graph structure.
 
 TriX is an XML-based named-graph format. Each <graph> block contains <triple>
-elements whose three children are term nodes.  This parser extends standard
-TriX with <tripleTerm> for RDF 1.2 triple terms, which may appear in both
-subject and object positions.
+elements whose three children are term nodes. RDF 1.2 triple terms are
+represented by nesting another <triple> element in a term position (subject
+or object) - the same element used for an asserted statement, disambiguated
+only by structural position, not a distinct tag name. This matches Apache
+Jena's real TriX writer/reader (confirmed empirically 2026-07-17 against a
+live Fuseki 5.5.0: it emits a lowercase <trix> root element and nests
+<triple> for a triple term - the only production TriX implementation found
+to actually support RDF 1.2 triple terms, since Oxigraph doesn't implement
+TriX at all). Starlight originally invented its own <TriX>/<tripleTerm>
+spelling before this was checked against a real implementation; both the
+old root-tag capitalization and <tripleTerm> are still accepted here for
+backward compatibility with anything already serialized by this parser's
+own prior convention, but are no longer emitted (see trix12.py serializer).
 
 Entry points:
     parse_trix12(text)        -> list of (s, p, o)            (merges all graphs)
@@ -27,9 +37,11 @@ _TAG_URI         = f'{{{TRIX_NS}}}uri'
 _TAG_ID          = f'{{{TRIX_NS}}}id'
 _TAG_PLAIN       = f'{{{TRIX_NS}}}plainLiteral'
 _TAG_TYPED       = f'{{{TRIX_NS}}}typedLiteral'
-_TAG_TRIPLE_TERM = f'{{{TRIX_NS}}}tripleTerm'
 _TAG_TRIPLE      = f'{{{TRIX_NS}}}triple'
 _TAG_GRAPH       = f'{{{TRIX_NS}}}graph'
+# Starlight's original (pre-Jena-comparison) spelling for a triple term -
+# still accepted on read for backward compatibility, never written anymore.
+_TAG_TRIPLE_TERM_LEGACY = f'{{{TRIX_NS}}}tripleTerm'
 
 
 def _parse_term(elem: ET.Element):
@@ -50,11 +62,14 @@ def _parse_term(elem: ET.Element):
         datatype = elem.get('datatype', '')
         return Literal(elem.text or '', datatype=URIRef(datatype))
 
-    if tag == _TAG_TRIPLE_TERM:
+    if tag in (_TAG_TRIPLE, _TAG_TRIPLE_TERM_LEGACY):
+        # A <triple> nested in a term position (subject/object) is a triple
+        # term (RDF 1.2) - the Jena convention. <tripleTerm> is the legacy
+        # starlight-only spelling, accepted for backward compatibility only.
         children = list(elem)
         if len(children) != 3:
             raise ValueError(
-                f'<tripleTerm> must have exactly 3 children, got {len(children)}'
+                f'<{elem.tag.split("}")[-1]}> must have exactly 3 children, got {len(children)}'
             )
         return TripleTerm(
             _parse_term(children[0]),
@@ -98,10 +113,12 @@ def _parse_graph(graph_elem: ET.Element) -> tuple[URIRef | None, list[tuple]]:
 def _iter_graphs(text: str):
     """Yield (graph_id, triples) pairs from a TriX document."""
     root = ET.fromstring(text)
-    tag_trix = f'{{{TRIX_NS}}}TriX'
-    # Accept both the namespaced and the bare root tag for robustness
-    if root.tag not in (tag_trix, 'TriX'):
-        raise ValueError(f'Expected <TriX> root element, got {root.tag!r}')
+    # Lowercase <trix> matches Apache Jena's real implementation (confirmed
+    # live 2026-07-17); <TriX> is starlight's own legacy spelling, accepted
+    # for backward compatibility only - see module docstring.
+    accepted = (f'{{{TRIX_NS}}}trix', 'trix', f'{{{TRIX_NS}}}TriX', 'TriX')
+    if root.tag not in accepted:
+        raise ValueError(f'Expected <trix> root element, got {root.tag!r}')
     for child in root:
         if child.tag == _TAG_GRAPH:
             yield _parse_graph(child)
