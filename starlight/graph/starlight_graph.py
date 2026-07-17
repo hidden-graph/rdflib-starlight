@@ -800,6 +800,18 @@ class StarlightGraph(Graph):
                     super().add(triple)
                 self._build_registry_from_store()
 
+                declared_version = getattr(raw, '_declared_version', None)
+                if declared_version is not None:
+                    from starlight.model.conformance import check_version_conformance
+                    check_version_conformance(
+                        declared_version,
+                        uses_triple_term=bool(self._tt_nodes),
+                        uses_dirlangstring=any(
+                            isinstance(o, DirLangString) for _, _, o in self.triples((None, None, None))
+                        ),
+                        context='Turtle document',
+                    )
+
             elif format in ('nt12', 'nq12'):
                 if format == 'nt12':
                     from starlight.parsers.ntriples12 import parse_ntriples12

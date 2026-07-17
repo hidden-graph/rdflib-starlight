@@ -147,6 +147,22 @@ class TestExtractFields:
         fields = extract_fields('@base <http://example.org/>', 'base')
         assert fields['iri'] == 'http://example.org/'
 
+    def test_version_dotted_form(self):
+        fields = extract_fields('@version "1.2" .', 'version')
+        assert fields['version'] == '1.2'
+
+    def test_version_bare_form(self):
+        fields = extract_fields('VERSION "1.2"', 'version')
+        assert fields['version'] == '1.2'
+
+    def test_version_single_quoted(self):
+        fields = extract_fields("@version '1.2-basic' .", 'version')
+        assert fields['version'] == '1.2-basic'
+
+    def test_version_basic_label(self):
+        fields = extract_fields('VERSION "1.2-basic"', 'version')
+        assert fields['version'] == '1.2-basic'
+
     def test_simple_triple(self):
         fields = extract_fields(':s :p :o .', 'triple', [0])
         ts = fields['triple_set']

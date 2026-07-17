@@ -41,6 +41,23 @@ Verified with a full test-suite run after each change (zero regressions among ~6
 
 ---
 
+## VERSION directive: real bug fix + conformance warnings (2026-07-17)
+
+Gap-analysis item "Version-directive validation, conformance levels" was filed as low priority with no known blocked use case — re-checking it against the live spec text (RDF 1.2 Concepts sec 2.1, RDF 1.2 Turtle's VERSION grammar, SPARQL 1.2 Query sec 4.3) turned up a real bug hiding behind that label, not just a missing nice-to-have.
+
+**Confirmed from the spec**: three version labels exist — `"1.2"` (full), `"1.2-basic"` (RDF 1.2 syntax but *excludes* triple terms and `dirLangString`), `"1.1"` (legacy, discouraged in a VERSION directive since it'd needlessly break RDF 1.1 parsers). The directive is explicitly only a hint: "parsers are not required to reject features that are outside the announced version (but could signal them with a warning)"; the SPARQL side says processors "may treat unrecognized labels as an error or as a warning." Neither is mandatory.
+
+**The real bug**: `VERSION "1.2"\nSELECT * WHERE { ?s ?p ?o }` — the spec's own example form — raised `pyparsing.ParseException` outright on the in-memory backend. `sparql12_to_11.py` never stripped the directive before handing the query to rdflib's SPARQL 1.1 parser, which has no notion of it at all. Fixed with `_strip_version_directive()`, run first in the rewrite pipeline, before any other pass. This one fix covers both `StarlightGraph.query()` and `.update()` (both funnel through the same rewriter); the native `rdf-1.2` backend was never affected since it passes queries straight through to a real endpoint that already understands `VERSION` natively.
+
+**The conformance-checking half** (declaring `"1.2-basic"` while actually using a triple term or `dirLangString` anyway) is warning-only by design — `RDF12ConformanceWarning` (`starlight/model/conformance.py`), never a hard error, matching the spec's own permissive framing and this project's established posture of accepting RDF 1.2 syntax unconditionally. (This is a different category from the Turtle-parser strictness work above: that was about *malformed* syntax that should never parse to anything; this is about self-inconsistent-but-otherwise-valid documents/queries, where turning a stale VERSION line into a hard failure would do more harm than good.) One shared `check_version_conformance()` function is called from both sides so the warning wording isn't duplicated:
+
+- **SPARQL side**: called right after `needs_tt`/`needs_ann` are computed in `_rewrite_sparql12_to_11_tracked`, using those existing flags plus a `'--' in query` check (captured *before* `_rewrite_dirlang_literals` runs, since that pass rewrites away the `--` in a literal `"text"@lang--dir`) as the "uses a triple term / dirLangString" signals.
+- **Turtle side**: the version label was previously recognized-but-discarded (`turtle_parser.py`: `if typ == 'version': pass`) — `syntax.py`'s `extract_fields()` now actually extracts it (both the dotted `@version "1.2" .` and bare `VERSION "1.2"` spellings), and `turtle_parser.py` staples it onto the returned `Graph` as `g._declared_version` (an attribute, not a signature change, to avoid touching the half-dozen existing call sites of `StarlightTurtleParser().parse()`). `StarlightGraph.parse()` reads it back after `_build_registry_from_store()` and checks it against `self._tt_nodes`/a `DirLangString` scan. `trig12.py` is passthrough-only for now (no separate per-named-graph check) — it already tolerated the directive fine, just discarded it, same as before.
+
+Verified: the exact spec-example query now executes end-to-end via a live `StarlightGraph().query(...)` call (previously raised); full suite run clean (zero regressions, 618 passing including 15 new tests: `tests/unit/test_syntax.py`'s version-extraction cases and the new `tests/unit/test_conformance.py`).
+
+---
+
 ## Fuseki RDF 1.2 Native Syntax
 
 **Status: confirmed 2026-07-16, against a live Fuseki 5.5.0 (`secoresearch/fuseki:latest` Docker image) and Oxigraph 0.5.9 (`ghcr.io/oxigraph/oxigraph:latest`).** This is the thing the note below (kept for history) said to check once a stable release was available — it now is, and it works with zero code changes:

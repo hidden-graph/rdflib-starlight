@@ -478,6 +478,7 @@ class StarlightTurtleParser:
         blank_counter = [0]
         canonical = {'prefixes': [], 'bases': [], 'triples': []}
         current_base = None
+        declared_version = None
 
         for stmt, cleaned_line in _syntax.split_statements_with_lines(data_clean):
             try:
@@ -487,7 +488,8 @@ class StarlightTurtleParser:
                 e.line = _orig_line(cleaned_line)
                 raise
             if typ == 'version':
-                pass  # informational hint; no data to extract
+                if 'version' in fields:
+                    declared_version = fields['version']
             elif typ == 'prefix' and 'prefix' in fields and 'iri' in fields:
                 canonical['prefixes'].append({'prefix': fields['prefix'], 'iri': fields['iri']})
             elif typ == 'base' and 'iri' in fields:
@@ -575,4 +577,13 @@ class StarlightTurtleParser:
                 raise
             g.add((s_node, p_node, o_node))
 
+        # Stapled on as an attribute rather than changing this method's
+        # return type, to avoid touching any of the several existing call
+        # sites that unpack the return value directly as a plain Graph (see
+        # starlight_graph.py, trig12.py, tests/unit/test_turtle12_serializer.py).
+        # Consumed by StarlightGraph.parse() for the RDF12ConformanceWarning
+        # check (starlight.model.conformance) - a Turtle document may
+        # declare VERSION "1.2-basic" but still use a triple term/
+        # dirLangString, which that label excludes (RDF 1.2 Concepts sec 2.1).
+        g._declared_version = declared_version
         return g

@@ -202,7 +202,14 @@ def classify_statement(stmt):
 def extract_fields(stmt, typ, blank_counter=None):
     """Parse a single statement string into a fields dict."""
     s = stmt.strip()
-    if typ == 'prefix':
+    if typ == 'version':
+        # Two spellings (RDF 1.2 Turtle): "@version "1.2" ." (dotted) and
+        # "VERSION "1.2"" (bare, SPARQL-style) - both a single quoted label,
+        # optionally followed by a '.'.
+        m = re.match(r'@?version\s*([\'"])((?:(?!\1).)*)\1\s*\.?\s*$', s, re.IGNORECASE)
+        if m:
+            return {'version': m.group(2)}
+    elif typ == 'prefix':
         m = re.match(r'@?prefix\s+([\w-]*)\s*:\s*<([^>]+)>', s, re.IGNORECASE)
         if m:
             return {'prefix': m.group(1), 'iri': m.group(2)}
