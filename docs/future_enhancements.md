@@ -110,6 +110,28 @@ Prompted by a direct follow-up question — "does our VERSION support extend to 
 
 ---
 
+## RDF/XML's `rdf:version` attribute: a real data-corruption bug, found by checking a real backend (2026-07-17)
+
+The RDF/XML gap analysis entry (§3) had noted `rdf:version` as a structurally different, low-priority, "not implemented" item — deliberately deferred out of the VERSION-directive fix above since it's an XML attribute, not a text directive. Asked directly whether Fuseki/Oxigraph support RDF/XML with RDF 1.2 features at all before deciding whether it was worth pursuing, rather than leaving it as a documentation footnote:
+
+- **Fuseki/Jena**: crashes outright (`HTTP 500`, an internal exception casting its triple-term type to `Literal`) trying to *write* a triple term to RDF/XML. Doesn't support this at all.
+- **Oxigraph**: works, and — this is the interesting part — genuinely emits `rdf:version` as a real attribute:
+  ```xml
+  <rdf:reifies rdf:version="1.2" rdf:parseType="Triple">
+    <rdf:Description rdf:about="http://example.org/a">
+      <b xmlns="http://example.org/" rdf:resource="http://example.org/c"/>
+    </rdf:Description>
+  </rdf:reifies>
+  ```
+
+Feeding that live output into starlight's own `rdfxml12.py` parser turned "not implemented" into "actively wrong": the triple term parsed correctly, but the parser also produced a **bogus extra triple** — `(TripleTerm(a,b,c), rdf:version, "1.2")`. `rdf:version` was never stripped by the existing XML-tree preprocessing (which only knows about `rdf:parseType="Triple"` and `rdf:annotation`/`rdf:annotationNodeID`), so it fell through untouched to rdflib's real `'xml'` parser — which, per ordinary RDF/XML 1.1 semantics, treats any attribute it doesn't specifically recognize on a property element as "attribute reification" shorthand and asserts a real triple from it. That's a legitimate RDF 1.1 mechanism being applied to the wrong attribute, not a bug in rdflib itself.
+
+**Fixed**: `_Preprocessor` (`starlight/parsers/rdfxml12.py`) now strips `rdf:version` wherever it's encountered — both node elements (`_resolve_node_element_subject`) and property elements (`_process_property`, plus the inner predicate-property inside a nested `rdf:parseType="Triple"` triple term) — before the tree ever reaches rdflib's parser. A new standalone `extract_version_directive(text)` does a separate, lightweight scan (mirroring the pattern already used for `ntriples12.py`/`trig12.py`) to surface the first value found for `StarlightGraph.parse()`'s `RDF12ConformanceWarning` check, without changing `parse_rdfxml12()`'s existing `list[tuple]` return contract.
+
+5 new tests in `tests/unit/test_conformance.py::TestRdfXmlVersionAttribute`, including one that embeds the literal captured Oxigraph bytes verbatim rather than a hand-written guess at its output shape. Full suite: 701 passing (with live Fuseki/Oxigraph containers up for this round), zero regressions.
+
+---
+
 ## Fuseki RDF 1.2 Native Syntax
 
 **Status: confirmed 2026-07-16, against a live Fuseki 5.5.0 (`secoresearch/fuseki:latest` Docker image) and Oxigraph 0.5.9 (`ghcr.io/oxigraph/oxigraph:latest`).** This is the thing the note below (kept for history) said to check once a stable release was available — it now is, and it works with zero code changes:

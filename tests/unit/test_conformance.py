@@ -17,12 +17,17 @@ query to rdflib's SPARQL 1.1 parser.
 """
 
 import pytest
+from rdflib import URIRef
 
 from starlight.graph.starlight_graph import StarlightGraph, _check_native_version_conformance
 from starlight.graph.starlight_dataset import StarlightDataset
 from starlight.model.conformance import RDF12ConformanceWarning
 
 EX = 'http://example.org/'
+
+
+def ex(local: str) -> URIRef:
+    return URIRef(EX + local)
 
 
 class TestSparqlVersionDirective:
@@ -276,4 +281,67 @@ class TestTrigVersionDirective:
         """
         g = StarlightGraph()
         g.parse(data=data, format='trig12')
+        assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)
+
+
+class TestRdfXmlVersionAttribute:
+    """RDF/XML's version mechanism is structurally different from every
+    other format's - an rdf:version XML attribute on a node/property
+    element (confirmed via spec fetch), not a prologue-line directive.
+
+    Found via a live Oxigraph 0.5.9 round trip (2026-07-17): it genuinely
+    emits rdf:version on the property element wrapping rdf:parseType="Triple"
+    for a reified triple term. Feeding that real output into starlight's own
+    parser revealed this wasn't just "unimplemented" - it was actively wrong:
+    rdflib's real 'xml' parser treats any attribute it doesn't specifically
+    recognize as ordinary RDF/XML "property attribute" shorthand, so an
+    unstripped rdf:version asserted a bogus extra triple
+    (subject, rdf:version, "1.2") into the graph.
+    """
+
+    # Captured verbatim from a live Oxigraph 0.5.9 CONSTRUCT response
+    # (Accept: application/rdf+xml) for a graph containing one reified
+    # triple term - not a hand-written approximation.
+    _OXIGRAPH_OUTPUT = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:its="http://www.w3.org/2005/11/its">\n'
+        f'\t<rdf:Description rdf:about="{EX}stmt">\n'
+        '\t\t<rdf:reifies rdf:version="1.2" rdf:parseType="Triple">\n'
+        f'\t\t\t<rdf:Description rdf:about="{EX}a">\n'
+        f'\t\t\t\t<b xmlns="{EX}" rdf:resource="{EX}c"/>\n'
+        '\t\t\t</rdf:Description>\n'
+        '\t\t</rdf:reifies>\n'
+        '\t</rdf:Description>\n'
+        '</rdf:RDF>'
+    )
+
+    def test_real_oxigraph_output_does_not_produce_bogus_triple(self):
+        g = StarlightGraph()
+        g.parse(data=self._OXIGRAPH_OUTPUT, format='rdfxml12')
+        # Exactly the one real triple (stmt rdf:reifies <<(a b c)>>) - no
+        # extra (TripleTerm(a,b,c), rdf:version, "1.2") triple.
+        assert len(g) == 1
+        assert g.has_triple_term(ex('a'), ex('b'), ex('c'))
+        rdf_version = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#version')
+        assert list(g.triples((None, rdf_version, None))) == []
+
+    def test_real_oxigraph_output_extracts_declared_version(self):
+        from starlight.parsers.rdfxml12 import extract_version_directive
+        assert extract_version_directive(self._OXIGRAPH_OUTPUT) == '1.2'
+
+    def test_1_2_basic_with_triple_term_warns(self):
+        data = self._OXIGRAPH_OUTPUT.replace('rdf:version="1.2"', 'rdf:version="1.2-basic"')
+        g = StarlightGraph()
+        with pytest.warns(RDF12ConformanceWarning, match='1.2-basic'):
+            g.parse(data=data, format='rdfxml12')
+
+    def test_no_version_attribute_does_not_warn(self, recwarn):
+        data = self._OXIGRAPH_OUTPUT.replace(' rdf:version="1.2"', '')
+        g = StarlightGraph()
+        g.parse(data=data, format='rdfxml12')
+        assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)
+
+    def test_version_1_2_full_does_not_warn(self, recwarn):
+        g = StarlightGraph()
+        g.parse(data=self._OXIGRAPH_OUTPUT, format='rdfxml12')
         assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)

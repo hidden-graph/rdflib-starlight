@@ -896,9 +896,21 @@ class StarlightGraph(Graph):
                     self.add(triple)
 
             elif format == 'rdfxml12':
-                from starlight.parsers.rdfxml12 import parse_rdfxml12
+                from starlight.parsers.rdfxml12 import parse_rdfxml12, extract_version_directive as _rx_version
                 for triple in parse_rdfxml12(text):
                     self.add(triple)
+
+                declared_version = _rx_version(text)
+                if declared_version is not None:
+                    from starlight.model.conformance import check_version_conformance
+                    check_version_conformance(
+                        declared_version,
+                        uses_triple_term=bool(self._tt_nodes),
+                        uses_dirlangstring=any(
+                            isinstance(o, DirLangString) for _, _, o in self.triples((None, None, None))
+                        ),
+                        context='RDF/XML document',
+                    )
 
             elif format == 'jsonld12':
                 # Delegate to rdflib's JSON-LD parser (handles @context expansion);

@@ -29,6 +29,21 @@ xml:base (if present on the document element) is honored for relative IRIs
 in the parts this module resolves itself; per-element xml:base overrides are
 not.
 
+RDF 1.2's third addition, the rdf:version announcement attribute (RDF 1.2
+XML Syntax - confirmed via spec fetch: "a version announcement on an
+in-scope node element with an rdf:version attribute"), is stripped wherever
+found on a node or property element this module resolves, and recorded -
+not just unhandled but actively dangerous to leave alone: confirmed
+empirically that rdflib's real 'xml' parser treats any attribute it doesn't
+specifically recognize as RDF/XML's ordinary "property attribute" shorthand,
+so an untouched rdf:version asserts a bogus extra triple
+(subject rdf:version "value") into the graph. Live Oxigraph 0.5.9 output
+(2026-07-17) genuinely emits this attribute (on the property element
+wrapping rdf:parseType="Triple", not just a node element), which is how this
+was found - not a hypothetical. See extract_version_directive() for the
+standalone scan used to surface the value for StarlightGraph.parse()'s
+RDF12ConformanceWarning check (starlight.model.conformance).
+
 Entry point:
     parse_rdfxml12(text) -> list of (s, p, o)
 """
@@ -54,6 +69,31 @@ _ENCODING_PREDS  = frozenset({RDF.type, RDF.subject, RDF.predicate, RDF.object})
 _R   = f'{{{_RDF_NS}}}'
 _X   = f'{{{_XML_NS}}}'
 _ITS = f'{{{_ITS_NS}}}'
+
+_RDF_VERSION_ATTR = _R + 'version'
+
+
+def extract_version_directive(text: str) -> str | None:
+    """Return the first rdf:version attribute value found anywhere in the
+    document, or None.
+
+    RDF 1.2 XML Syntax's version-announcement mechanism is structurally
+    different from every other format's - an XML attribute on an in-scope
+    node element, not a prologue-line directive - so it needs its own
+    detection rather than reusing syntax.extract_fields()'s text-directive
+    pattern. A separate, lightweight scan (rather than reusing
+    _Preprocessor's own version-stripping pass below) keeps this a simple
+    standalone function, matching ntriples12.py's/trig12.py's
+    extract_version_directive() so StarlightGraph.parse() can call it
+    alongside parse_rdfxml12() without changing that function's existing
+    list[tuple] return contract.
+    """
+    root = ET.fromstring(text)
+    for elem in root.iter():
+        version = elem.get(_RDF_VERSION_ATTR)
+        if version is not None:
+            return version
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +173,19 @@ class _Preprocessor:
         self._counter += 1
         return f'rx12_{self._counter}'
 
+    def _strip_version_attr(self, elem: ET.Element) -> None:
+        """Remove rdf:version if present on *elem* - it must never reach
+        rdflib's real 'xml' parser, which would otherwise misinterpret it as
+        an ordinary property attribute and assert a bogus extra triple (see
+        module docstring). Recording the value itself is extract_version_directive()'s
+        job via its own separate scan, not this method's - this only
+        prevents the corruption.
+        """
+        if elem.get(_RDF_VERSION_ATTR) is not None:
+            del elem.attrib[_RDF_VERSION_ATTR]
+
     def _resolve_node_element_subject(self, elem: ET.Element, base: str | None):
+        self._strip_version_attr(elem)
         about = elem.get(_R + 'about')
         if about is not None:
             return URIRef(urljoin(base, about) if base else about)
@@ -225,6 +277,7 @@ class _Preprocessor:
                 f'property (one predicate-object pair), found {len(prop_children)}'
             )
         prop_el = prop_children[0]
+        self._strip_version_attr(prop_el)
         inner_p = _local_to_uriref(prop_el.tag)
         if prop_el.get(_R + 'parseType') == 'Triple':
             inner_o = BNode(self._process_parse_type_triple(prop_el, base))
@@ -234,6 +287,7 @@ class _Preprocessor:
 
     def _process_property(self, elem: ET.Element, subject, base: str | None) -> None:
         """Rewrite a single property element of *subject* in place."""
+        self._strip_version_attr(elem)
         parse_type = elem.get(_R + 'parseType')
         annotation = elem.get(_R + 'annotation')
         annotation_node_id = elem.get(_R + 'annotationNodeID')
