@@ -4,7 +4,17 @@ starlight.parsers.lexer
 Character-level tokenization for Turtle 1.2. Handles all token forms:
 <<( )>> triple terms, << >> reification shorthand, <IRI>, quoted strings,
 [ ] blank nodes, ( ) collections, and plain whitespace-delimited tokens.
+
+Every form below that scans for a closing delimiter raises
+starlight.parsers.errors.TurtleSyntaxError if it reaches the end of the
+statement text without finding one, rather than silently treating "no
+closing delimiter found" as "the rest of the text is one token" - the
+statement-level TurtleSyntaxError.line is filled in by the caller
+(StarlightTurtleParser.parse()), since these functions only see
+already-extracted, single-statement text with no document-level line info.
 """
+
+from starlight.parsers.errors import TurtleSyntaxError
 
 
 def next_token(s):
@@ -25,7 +35,7 @@ def next_token(s):
                 i += 2
             else:
                 i += 1
-        return s, ''
+        raise TurtleSyntaxError('unterminated <<( )>> triple term', s, pos=len(s))
 
     if s.startswith('<<'):
         i, depth, in_iri = 2, 1, False
@@ -48,11 +58,13 @@ def next_token(s):
                 i += 1
             else:
                 i += 1
-        return s, ''
+        raise TurtleSyntaxError('unterminated << >> reification', s, pos=len(s))
 
     if s.startswith('<'):
         end = s.find('>', 1)
-        return (s[:end+1], s[end+1:].lstrip()) if end != -1 else (s, '')
+        if end == -1:
+            raise TurtleSyntaxError("unterminated IRI (missing '>')", s, pos=len(s))
+        return s[:end+1], s[end+1:].lstrip()
 
     if s.startswith('"""') or s.startswith("'''"):
         q = s[:3]
@@ -61,7 +73,7 @@ def next_token(s):
             if s[i:i+3] == q:
                 return s[:i+3], s[i+3:].lstrip()
             i += 1
-        return s, ''
+        raise TurtleSyntaxError(f'unterminated {q!r} string', s, pos=len(s))
 
     if s.startswith('"') or s.startswith("'"):
         q = s[0]
@@ -73,7 +85,7 @@ def next_token(s):
             if s[i] == q:
                 return s[:i+1], s[i+1:].lstrip()
             i += 1
-        return s, ''
+        raise TurtleSyntaxError(f'unterminated {q!r} string', s, pos=len(s))
 
     if s.startswith('['):
         i, depth, in_str, str_char = 1, 1, False, ''
@@ -89,6 +101,8 @@ def next_token(s):
             elif c == ']':
                 depth -= 1
             i += 1
+        if depth > 0:
+            raise TurtleSyntaxError("unclosed '[' blank node property list", s, pos=len(s))
         return s[:i], s[i:].lstrip()
 
     if s.startswith('('):
@@ -105,6 +119,8 @@ def next_token(s):
             elif c == ')':
                 depth -= 1
             i += 1
+        if depth > 0:
+            raise TurtleSyntaxError("unclosed '(' collection", s, pos=len(s))
         return s[:i], s[i:].lstrip()
 
     i = 0

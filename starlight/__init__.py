@@ -21,6 +21,7 @@ from starlight.model.triple import TripleTerm
 from starlight.model.dirlangstring import DirLangString
 from starlight.graph.starlight_graph import StarlightGraph
 from starlight.graph.starlight_dataset import StarlightDataset
+from starlight.parsers.errors import TurtleSyntaxError
 
 __all__ = [
     # rdflib primitives
@@ -42,4 +43,5 @@ __all__ = [
     "DirLangString",
     "StarlightGraph",
     "StarlightDataset",
+    "TurtleSyntaxError",
 ]

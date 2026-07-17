@@ -57,10 +57,21 @@ def _split_on_delimiter(text, delim):
     return parts
 
 
-def split_statements(data):
-    """Split Turtle text into a list of statement strings."""
+def _split_statements_impl(data):
+    """Split Turtle text into (statement, start_offset) pairs, start_offset
+    being the 0-based character offset in *data* where that statement's
+    buffering began - statement-start granularity, not byte-exact (newlines
+    are stripped while buffering a multi-line statement, so a precise
+    within-statement offset isn't recoverable here), which is enough to
+    convert to a "close enough" line number for error reporting. See
+    split_statements() and split_statements_with_lines() below, and
+    TurtleSyntaxError in starlight.parsers.errors.
+    """
+    from starlight.parsers.errors import TurtleSyntaxError
+
     stmts = []
     buf = ''
+    stmt_start = 0
     depth = {'[': 0, '(': 0, '{': 0, '<': 0}
     in_string = False
     string_char = ''
@@ -77,10 +88,13 @@ def split_statements(data):
                     stmt = data[i:line_end].strip()
                     if stmt:
                         if buf.strip():
-                            stmts.append(buf.strip())
+                            stmts.append((buf.strip(), stmt_start))
                             buf = ''
-                        stmts.append(stmt)
+                        stmts.append((stmt, i))
                     i = line_end + 1
+                    while i < len(data) and data[i] in ('\n', '\r'):
+                        i += 1
+                    stmt_start = i
                     found_directive = True
                     break
             if found_directive:
@@ -120,17 +134,57 @@ def split_statements(data):
         if c == '.' and all(v == 0 for v in depth.values()):
             if i + 1 < len(data) and data[i+1] in ('\n', '\r'):
                 buf += c
-                stmts.append(buf.strip())
+                stmts.append((buf.strip(), stmt_start))
                 buf = ''
-                i += 1
-                if i + 1 < len(data) and data[i] == '\r' and data[i+1] == '\n':
-                    i += 1
+                i += 1  # past '.'
+                # Consume every line terminator up to the next statement
+                # (including blank lines between statements), not just one -
+                # stmt_start must be captured after all of them, not before,
+                # so data[:stmt_start].count('\n') downstream counts
+                # correctly regardless of how many blank lines separate two
+                # statements. data[i] at this point is the first character
+                # of the next statement (or EOF).
+                while i < len(data) and data[i] in ('\n', '\r'):
+                    if data[i:i+2] == '\r\n':
+                        i += 2
+                    else:
+                        i += 1
+                stmt_start = i
                 continue
         buf += c
         i += 1
+
+    if in_string or any(d > 0 for d in depth.values()):
+        why = (f'unterminated {string_char!r} string at end of document' if in_string
+               else f'unclosed {next(c for c, d in depth.items() if d > 0)!r} at end of document')
+        line = data[:stmt_start].count('\n') + 1
+        raise TurtleSyntaxError(why, buf or data[stmt_start:], pos=len(buf or data[stmt_start:]), line=line)
+
     if buf.strip():
-        stmts.append(buf.strip())
+        stmts.append((buf.strip(), stmt_start))
     return stmts
+
+
+def split_statements(data):
+    """Split Turtle text into a list of statement strings.
+
+    See split_statements_with_lines() for the same split with each
+    statement's approximate source line number attached.
+    """
+    return [stmt for stmt, _offset in _split_statements_impl(data)]
+
+
+def split_statements_with_lines(data):
+    """Split Turtle text into a list of (statement, line) pairs, line being
+    the 1-based line number in *data* where that statement approximately
+    begins (statement-start granularity - see _split_statements_impl).
+    Raises TurtleSyntaxError if the document ends with an unterminated
+    string or an unclosed bracket.
+    """
+    return [
+        (stmt, data[:offset].count('\n') + 1)
+        for stmt, offset in _split_statements_impl(data)
+    ]
 
 
 def classify_statement(stmt):

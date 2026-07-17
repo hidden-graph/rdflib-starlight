@@ -17,6 +17,7 @@ from rdflib import Graph, URIRef, BNode, Literal
 from rdflib.namespace import RDF, XSD
 from starlight.parsers import lexer as _lexer
 from starlight.parsers import syntax as _syntax
+from starlight.parsers.errors import TurtleSyntaxError
 from starlight.model.encoding import TT_NS, RR_NS, tt_hash, encode_dirlang_datatype
 
 # Legacy sl: constants — kept for the intermediate build phase only;
@@ -136,6 +137,12 @@ def _split_literal(val):
 
     kind is '^^' for typed literals, '@' for language-tagged, '' for plain.
     Correctly skips ^^ and @ sequences that appear inside the quoted string.
+
+    val is normally already a lexer-validated, properly-closed literal token
+    by the time this is called (next_token() raises on an unterminated quote
+    before ever returning one) - the raise below is defense-in-depth for a
+    malformed val reaching this function some other way, not the primary
+    place this class of error is caught in the normal parsing pipeline.
     """
     q = val[:3] if val[:3] in ('"""', "'''") else val[0]
     i = len(q)
@@ -152,7 +159,7 @@ def _split_literal(val):
                 return content, rest[1:], '@'
             return content, '', ''
         i += 1
-    return val[len(q):], '', ''
+    raise TurtleSyntaxError(f'unterminated {q!r} string', val, pos=len(val))
 
 
 def _to_node(val, prefix_map, base_uri):
@@ -211,9 +218,24 @@ def _to_node(val, prefix_map, base_uri):
         return URIRef(val)
 
     if base_uri:
+        # Best-effort relative-reference resolution only - full IRI-reference
+        # grammar validation is out of scope here (see module docstring's
+        # sibling functions and TurtleSyntaxError's own docstring); a bare
+        # token that isn't a valid relative reference either will still
+        # produce a URIRef, just possibly a syntactically invalid one.
         return URIRef(urljoin(base_uri, val))
 
-    return Literal(val)
+    # No recognized term shape matched (not an IRI, prefixed name, blank
+    # node, quoted literal, or "a") and there's no base_uri to attempt a
+    # relative-reference resolution against - this is not valid Turtle 1.2,
+    # e.g. a stray unquoted token like "totally!bogus$$token". Previously
+    # silently became Literal(val) here, which is worse than raising: it
+    # makes a malformed document parse "successfully" with wrong data
+    # instead of failing where the problem actually is.
+    raise TurtleSyntaxError(
+        f'unrecognized term {val!r} (not an IRI, prefixed name, blank node, literal, or "a")',
+        val, pos=0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,16 +457,35 @@ class StarlightTurtleParser:
         triple terms and reification. Pass debug=True to print intermediate
         representations to stdout.
         """
-        lines = [l for l in data.splitlines() if l.strip() and not l.strip().startswith('#')]
+        # line_map[k] is the 1-based line number *in the original data* of the
+        # k-th surviving line in data_clean, so a line number computed against
+        # the blank/comment-stripped data_clean (by split_statements_with_lines
+        # below) can be translated back to where the user would actually look.
+        line_map = []
+        lines = []
+        for orig_lineno, l in enumerate(data.splitlines(), 1):
+            if l.strip() and not l.strip().startswith('#'):
+                lines.append(l)
+                line_map.append(orig_lineno)
         data_clean = '\n'.join(lines)
+
+        def _orig_line(cleaned_line: int) -> int:
+            if not line_map:
+                return cleaned_line
+            idx = min(max(cleaned_line, 1), len(line_map)) - 1
+            return line_map[idx]
 
         blank_counter = [0]
         canonical = {'prefixes': [], 'bases': [], 'triples': []}
         current_base = None
 
-        for stmt in _syntax.split_statements(data_clean):
-            typ = _syntax.classify_statement(stmt)
-            fields = _syntax.extract_fields(stmt, typ, blank_counter)
+        for stmt, cleaned_line in _syntax.split_statements_with_lines(data_clean):
+            try:
+                typ = _syntax.classify_statement(stmt)
+                fields = _syntax.extract_fields(stmt, typ, blank_counter)
+            except TurtleSyntaxError as e:
+                e.line = _orig_line(cleaned_line)
+                raise
             if typ == 'version':
                 pass  # informational hint; no data to extract
             elif typ == 'prefix' and 'prefix' in fields and 'iri' in fields:
@@ -454,11 +495,15 @@ class StarlightTurtleParser:
                 current_base = urljoin(current_base, raw) if current_base else raw
                 canonical['bases'].append({'iri': current_base})
             elif typ == 'triple' and 'triple_set' in fields:
-                triples = _syntax.expand_triple_set(fields['triple_set'], blank_counter)
+                try:
+                    triples = _syntax.expand_triple_set(fields['triple_set'], blank_counter)
+                except TurtleSyntaxError as e:
+                    e.line = _orig_line(cleaned_line)
+                    raise
                 for t in triples:
                     t['_base_uri'] = current_base
-                canonical['triples'].extend(triples
-                )
+                    t['_line'] = _orig_line(cleaned_line)
+                canonical['triples'].extend(triples)
 
         if debug:
             import json
@@ -469,16 +514,27 @@ class StarlightTurtleParser:
         for triple in canonical['triples']:
             s, p, o = triple['subject'], triple['predicate'], triple['object']
             t_base = triple.get('_base_uri')
-            s, p, o, extras = expander.expand_qt_in_triple(s, p, o)
-            expanded.append({'subject': s, 'predicate': p, 'object': o, '_base_uri': t_base})
+            t_line = triple.get('_line')
+            try:
+                s, p, o, extras = expander.expand_qt_in_triple(s, p, o)
+            except TurtleSyntaxError as e:
+                e.line = t_line
+                raise
+            expanded.append({'subject': s, 'predicate': p, 'object': o, '_base_uri': t_base, '_line': t_line})
             for e in extras:
                 e['_base_uri'] = t_base
+                e['_line'] = t_line
             expanded.extend(extras)
             if triple.get('annotations'):
                 ann_obj = o if isinstance(o, str) else triple.get('object_str', str(triple['object']))
-                ann_extras = expander.expand_annotation(s, p, ann_obj, triple['annotations'])
+                try:
+                    ann_extras = expander.expand_annotation(s, p, ann_obj, triple['annotations'])
+                except TurtleSyntaxError as e:
+                    e.line = t_line
+                    raise
                 for e in ann_extras:
                     e['_base_uri'] = t_base
+                    e['_line'] = t_line
                 expanded.extend(ann_extras)
 
         if debug:
@@ -490,13 +546,15 @@ class StarlightTurtleParser:
         prefix_map.setdefault('sl',  SL_NS)   # needed for intermediate sl:TripleTerm triples
 
         # Add sl:Reification markers so _skolemize_encoding can find reifier bnodes.
-        # Carry _base_uri from the rdf:reifies triple so relative subjects resolve correctly.
+        # Carry _base_uri/_line from the rdf:reifies triple so relative subjects
+        # resolve correctly and any later error on this marker is still located.
         reif_subjects = {
-            (t['subject'], t.get('_base_uri'))
+            (t['subject'], t.get('_base_uri'), t.get('_line'))
             for t in expanded if t['predicate'] == 'rdf:reifies'
         }
-        for subj, base in reif_subjects:
-            expanded.append({'subject': subj, 'predicate': 'rdf:type', 'object': 'sl:Reification', '_base_uri': base})
+        for subj, base, line in reif_subjects:
+            expanded.append({'subject': subj, 'predicate': 'rdf:type', 'object': 'sl:Reification',
+                              '_base_uri': base, '_line': line})
 
         g = Graph()
         for prefix, iri in prefix_map.items():
@@ -506,10 +564,15 @@ class StarlightTurtleParser:
 
         for triple in expanded:
             t_base = triple.get('_base_uri')
-            s_node = _to_node(triple['subject'], prefix_map, t_base)
-            p_raw = triple['predicate']
-            p_node = RDF.type if p_raw == 'a' else _to_node(p_raw, prefix_map, t_base)
-            o_node = _to_node(triple['object'], prefix_map, t_base)
+            t_line = triple.get('_line')
+            try:
+                s_node = _to_node(triple['subject'], prefix_map, t_base)
+                p_raw = triple['predicate']
+                p_node = RDF.type if p_raw == 'a' else _to_node(p_raw, prefix_map, t_base)
+                o_node = _to_node(triple['object'], prefix_map, t_base)
+            except TurtleSyntaxError as e:
+                e.line = t_line
+                raise
             g.add((s_node, p_node, o_node))
 
         return g

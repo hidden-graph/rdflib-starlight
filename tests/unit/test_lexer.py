@@ -7,6 +7,7 @@ annotation-block and object-annotation helpers.
 
 import pytest
 from starlight.parsers.lexer import next_token, consume_annotation_block, split_obj_and_annotations
+from starlight.parsers.errors import TurtleSyntaxError
 
 
 class TestNextTokenEmpty:
@@ -140,6 +141,40 @@ class TestNextTokenBrackets:
         tok, rest = next_token('( :a :b :c ) :q')
         assert tok == '( :a :b :c )'
         assert rest == ':q'
+
+
+class TestNextTokenUnterminated:
+    """next_token() must raise TurtleSyntaxError, not silently return the
+    rest of the text as one token, when a closing delimiter is never found -
+    see docs/future_enhancements.md and the 2026-07-17 architectural review."""
+
+    def test_unterminated_triple_term(self):
+        with pytest.raises(TurtleSyntaxError, match='unterminated <<\\( \\)>> triple term'):
+            next_token('<<( :s :p :o rest')
+
+    def test_unterminated_reification(self):
+        with pytest.raises(TurtleSyntaxError, match='unterminated << >> reification'):
+            next_token('<< :s :p :o rest')
+
+    def test_unterminated_iri(self):
+        with pytest.raises(TurtleSyntaxError, match="unterminated IRI"):
+            next_token('<http://example.org/unterminated')
+
+    def test_unterminated_triple_quoted_string(self):
+        with pytest.raises(TurtleSyntaxError, match='unterminated'):
+            next_token('"""unterminated triple quote')
+
+    def test_unterminated_single_quoted_string(self):
+        with pytest.raises(TurtleSyntaxError, match='unterminated'):
+            next_token('"unterminated single quote')
+
+    def test_unclosed_blank_node_property_list(self):
+        with pytest.raises(TurtleSyntaxError, match="unclosed '\\['"):
+            next_token('[ :p :o rest')
+
+    def test_unclosed_collection(self):
+        with pytest.raises(TurtleSyntaxError, match="unclosed '\\('"):
+            next_token('( :a :b rest')
 
 
 class TestConsumeAnnotationBlock:

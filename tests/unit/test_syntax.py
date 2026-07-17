@@ -10,9 +10,11 @@ from starlight.parsers.syntax import (
     coerce_object,
     classify_statement,
     split_statements,
+    split_statements_with_lines,
     extract_fields,
     expand_triple_set,
 )
+from starlight.parsers.errors import TurtleSyntaxError
 
 
 class TestCoerceObject:
@@ -80,6 +82,51 @@ class TestSplitStatements:
         data = ':s :p "hello.world" .\n'
         stmts = split_statements(data)
         assert len(stmts) == 1
+
+
+class TestSplitStatementsWithLines:
+    """split_statements_with_lines() - same split as split_statements(), plus
+    each statement's approximate 1-based starting line number. Added for the
+    2026-07-17 architectural review's "raise on malformed input" work; see
+    TurtleSyntaxError and tests/unit/test_turtle_parser_errors.py."""
+
+    def test_single_statement_line_one(self):
+        stmts = split_statements_with_lines(':s :p :o .\n')
+        assert stmts == [(':s :p :o .', 1)]
+
+    def test_multiple_statements_line_numbers(self):
+        data = ':s1 :p1 :o1 .\n:s2 :p2 :o2 .\n:s3 :p3 :o3 .\n'
+        stmts = split_statements_with_lines(data)
+        assert [line for _stmt, line in stmts] == [1, 2, 3]
+
+    def test_prefix_then_triples_line_numbers(self):
+        data = '@prefix : <http://example.org/>\n:s1 :p1 :o1 .\n:s2 :p2 :o2 .\n'
+        stmts = split_statements_with_lines(data)
+        assert [line for _stmt, line in stmts] == [1, 2, 3]
+
+    def test_blank_lines_do_not_shift_line_numbers(self):
+        # split_statements_with_lines() line numbers are relative to whatever
+        # text it's given - StarlightTurtleParser.parse() is responsible for
+        # translating back to original-document line numbers when blank/
+        # comment lines were stripped before calling this (see its line_map).
+        data = ':s1 :p1 :o1 .\n\n:s2 :p2 :o2 .\n'
+        stmts = split_statements_with_lines(data)
+        assert [line for _stmt, line in stmts] == [1, 3]
+
+    def test_multiline_triple_reports_start_line(self):
+        data = ':s1 :p1 :o1 .\n:s2\n    :p2\n    :o2 .\n'
+        stmts = split_statements_with_lines(data)
+        assert stmts[1][1] == 2  # the multi-line triple starts on line 2
+
+    def test_unclosed_bracket_at_end_of_document_raises(self):
+        data = ':s1 :p1 :o1 .\n:s2 :p2 [ :a :b .\n'
+        with pytest.raises(TurtleSyntaxError, match="unclosed '\\['"):
+            split_statements_with_lines(data)
+
+    def test_unterminated_string_at_end_of_document_raises(self):
+        data = ':s1 :p1 :o1 .\n:s2 :p2 "unterminated .\n'
+        with pytest.raises(TurtleSyntaxError, match='unterminated'):
+            split_statements_with_lines(data)
 
 
 class TestExtractFields:
