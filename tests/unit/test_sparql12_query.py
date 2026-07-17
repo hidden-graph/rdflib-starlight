@@ -824,3 +824,42 @@ class TestQ21:
         result = list(r.graph.triples((URIRef(EX + 'newstmt'), RDF_REIFIES, None)))
         assert len(result) == 1
         assert result[0][2] == TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))
+
+
+# ---------------------------------------------------------------------------
+# Q22 — SUBJECT()/PREDICATE()/OBJECT() applied directly to a <<( )>>/TRIPLE()
+# literal, not just a bound variable.
+#
+# Found missing via property-based fuzz testing 2026-07-17 - only the bare-
+# variable form (SUBJECT(?tt)) was handled; SUBJECT(<<( :a :b :c )>>) raised
+# a ParseException. Fixed same day.
+# ---------------------------------------------------------------------------
+
+class TestQ22:
+    def test_subject_of_triple_term_literal(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (SUBJECT(<<( :bob :knows :carol )>>) AS ?s) WHERE {}
+        """)
+        assert r.bindings[0][r.vars[0]] == URIRef(EX + 'bob')
+
+    def test_predicate_and_object_of_triple_constructor_literal(self, g):
+        r = g.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (PREDICATE(TRIPLE(:bob, :knows, :carol)) AS ?p)
+                   (OBJECT(TRIPLE(:bob, :knows, :carol)) AS ?o) WHERE {}
+        """)
+        row = r.bindings[0]
+        assert row[r.vars[0]] == URIRef(EX + 'knows')
+        assert row[r.vars[1]] == URIRef(EX + 'carol')
+
+    def test_subject_of_nested_triple_term_literal_restores_correctly(self):
+        empty = StarlightGraph()
+        r = empty.query("""
+            PREFIX :   <http://example.org/>
+            SELECT (SUBJECT(<<( <<( :bob :knows :carol )>> :p :o )>>) AS ?s) WHERE {}
+        """)
+        assert r.bindings[0][r.vars[0]] == TripleTerm(
+            URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol')
+        )
+        assert len(empty) == 0

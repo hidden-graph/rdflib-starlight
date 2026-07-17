@@ -1,0 +1,283 @@
+"""
+tests/integration/test_cross_backend_parity.py
+
+Systematic behavioral parity checks: the same operation, run against the
+default in-memory (rdf-1.1) backend and against each live native (rdf-1.2)
+backend in turn, must produce the same observable result.
+
+This project's core value proposition is "identical behavior regardless of
+backend" (see docs/future_enhancements.md's "Cross-backend behavior parity"
+section), but until now that was only verified by a one-off script
+(three_way_compare.py) run manually in a scratch directory. It found 3 real
+bugs the first time it was run. This module checks in that methodology as a
+standing, reusable test rather than something that only runs when someone
+remembers to.
+
+Requires a running Fuseki and/or Oxigraph instance - see the docstrings in
+test_fuseki_backend.py / test_oxigraph_backend.py for the docker run
+commands. Each backend's scenarios skip independently if that backend isn't
+reachable, so this still provides value with only one of the two running.
+
+Run:
+    .venv/bin/pytest tests/integration/test_cross_backend_parity.py -v
+"""
+
+import pytest
+import requests
+
+from rdflib import URIRef, Literal
+from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
+
+from starlight.graph import StarlightGraph
+from starlight.model.triple import TripleTerm
+from starlight.model.dirlangstring import DirLangString
+
+# See test_fuseki_backend.py's identical pytestmark for why this is here.
+pytestmark = pytest.mark.integration
+
+# ---------------------------------------------------------------------------
+# Endpoint config
+# ---------------------------------------------------------------------------
+
+FUSEKI_BASE = 'http://localhost:3030/starlight'
+FUSEKI_Q    = f'{FUSEKI_BASE}/query'
+FUSEKI_U    = f'{FUSEKI_BASE}/update'
+
+OXIGRAPH_BASE = 'http://localhost:7878'
+OXIGRAPH_Q    = f'{OXIGRAPH_BASE}/query'
+OXIGRAPH_U    = f'{OXIGRAPH_BASE}/update'
+
+GRAPH_URI = URIRef('http://example.org/test-graph')
+EX        = 'http://example.org/'
+RDF_REIF  = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
+
+
+def ex(local: str) -> URIRef:
+    return URIRef(EX + local)
+
+
+# ---------------------------------------------------------------------------
+# Availability / skip markers — duplicated from test_fuseki_backend.py /
+# test_oxigraph_backend.py rather than cross-imported, matching this
+# directory's existing convention of each integration test file being
+# self-contained.
+# ---------------------------------------------------------------------------
+
+def _fuseki_available() -> bool:
+    try:
+        return requests.get('http://localhost:3030/$/ping', timeout=2).status_code == 200
+    except Exception:
+        return False
+
+
+def _oxigraph_available() -> bool:
+    try:
+        return requests.get(OXIGRAPH_BASE, timeout=2).status_code == 200
+    except Exception:
+        return False
+
+
+fuseki = pytest.mark.skipif(
+    not _fuseki_available(),
+    reason='Fuseki not running — start with: docker run -d --name fuseki-test -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest '
+           '(then create the "starlight" dataset - see test_fuseki_backend.py); needs Fuseki 5.5+ for native RDF 1.2 <<( )>> syntax, not stain/jena-fuseki (which only reaches 5.1.0).',
+)
+oxigraph = pytest.mark.skipif(
+    not _oxigraph_available(),
+    reason='Oxigraph not running — start with: '
+           'docker run -d --name oxigraph-test -p 7878:7878 '
+           'ghcr.io/oxigraph/oxigraph serve --location /data --bind 0.0.0.0:7878',
+)
+
+
+def _clear_http(update_url: str, auth=None) -> None:
+    requests.post(
+        update_url,
+        data=f'CLEAR SILENT GRAPH <{GRAPH_URI}>',
+        headers={'Content-Type': 'application/sparql-update'},
+        auth=auth,
+        timeout=10,
+    ).raise_for_status()
+
+
+def _internal_graph() -> StarlightGraph:
+    return StarlightGraph()
+
+
+def _fuseki_graph() -> StarlightGraph:
+    _clear_http(FUSEKI_U, auth=('admin', 'admin'))
+    store = SPARQLUpdateStore(query_endpoint=FUSEKI_Q, update_endpoint=FUSEKI_U, auth=('admin', 'admin'))
+    return StarlightGraph(store=store, identifier=GRAPH_URI, backend='rdf-1.2')
+
+
+def _oxigraph_graph() -> StarlightGraph:
+    _clear_http(OXIGRAPH_U)
+    store = SPARQLUpdateStore(query_endpoint=OXIGRAPH_Q, update_endpoint=OXIGRAPH_U)
+    return StarlightGraph(store=store, identifier=GRAPH_URI, backend='rdf-1.2')
+
+
+# ---------------------------------------------------------------------------
+# Scenarios — ported directly from the scratchpad three_way_compare.py run
+# 2026-07-16. Each takes a StarlightGraph and returns a plain, comparable
+# Python value. Scenarios that need to know whether they're talking to a
+# native backend (to scope a query to GRAPH <...> the way the native HTTP
+# store requires) check g._is_native.
+# ---------------------------------------------------------------------------
+
+def _scenario_plain_triple(g):
+    g.add((ex('alice'), ex('knows'), ex('bob')))
+    return list(g.triples((ex('alice'), ex('knows'), None)))
+
+
+def _scenario_triple_term_write_read(g):
+    tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+    g.add((ex('stmt1'), RDF_REIF, tt))
+    rows = list(g.triples((ex('stmt1'), RDF_REIF, None)))
+    return [(s, p, str(o)) for s, p, o in rows]
+
+
+def _scenario_nested_triple_term(g):
+    inner = TripleTerm(ex('bob'), ex('knows'), ex('dave'))
+    outer = TripleTerm(ex('alice'), ex('believes'), inner)
+    g.add((ex('r'), ex('about'), outer))
+    result = list(g.triples((ex('r'), ex('about'), None)))[0][2]
+    return str(result)
+
+
+def _scenario_triple_term_subject_rejected(g):
+    tt = TripleTerm(ex('a'), ex('b'), ex('c'))
+    try:
+        g.add((tt, ex('prop'), ex('val')))
+        return 'NO ERROR RAISED'
+    except ValueError:
+        return 'ValueError raised'
+
+
+def _scenario_sparql_tt_pattern_match(g):
+    tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+    g.add((ex('stmt1'), RDF_REIF, tt))
+    where = (f'GRAPH <{GRAPH_URI}> {{ ?stmt rdf:reifies <<( ex:alice ex:knows ex:bob )>> . }}'
+              if g._is_native else '?stmt rdf:reifies <<( ex:alice ex:knows ex:bob )>> .')
+    q = f"""
+        PREFIX ex: <{EX}>
+        PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+        SELECT ?stmt WHERE {{ {where} }}
+    """
+    return sorted(str(r[0]) for r in g.query(q))
+
+
+def _scenario_triple_constructor_fn(g):
+    r = g.query(f'SELECT (TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>) AS ?t) WHERE {{}}')
+    row = r.bindings[0]
+    return str(row[r.vars[0]])
+
+
+def _scenario_is_triple_fn(g):
+    r = g.query(f'SELECT (isTRIPLE(TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>)) AS ?v) WHERE {{}}')
+    return bool(r.bindings[0][r.vars[0]])
+
+
+def _scenario_dirlangstring_write_read(g):
+    d = DirLangString('hello', 'en', 'rtl')
+    g.add((ex('s'), ex('p'), d))
+    result = list(g.triples((ex('s'), ex('p'), None)))[0][2]
+    if isinstance(result, DirLangString):
+        return (result.value, result.language, result.direction)
+    return repr(result)
+
+
+def _scenario_dirlang_functions(g):
+    r = g.query("""
+        SELECT (LANGDIR("hi"@en--rtl) AS ?dir)
+               (hasLANGDIR("hi"@en--rtl) AS ?hd)
+               (STRLANGDIR("hi", "en", "ltr") AS ?sld)
+               (LANG("hi"@en--rtl) AS ?l)
+               (hasLANG("hi"@en--rtl) AS ?hl)
+        WHERE {}
+    """)
+    row = r.bindings[0]
+    sld = row[r.vars[2]]
+    sld_repr = (sld.value, sld.language, sld.direction) if isinstance(sld, DirLangString) else repr(sld)
+    return (str(row[r.vars[0]]), bool(row[r.vars[1]]), sld_repr, str(row[r.vars[3]]), bool(row[r.vars[4]]))
+
+
+def _scenario_strlangdir_invalid_direction(g):
+    try:
+        g.query('SELECT (STRLANGDIR("x", "en", "sideways") AS ?v) WHERE {}')
+        return 'NO ERROR RAISED'
+    except Exception as e:
+        return f'{type(e).__name__} raised'
+
+
+def _scenario_construct_round_trip(g):
+    tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+    g.add((ex('stmt1'), RDF_REIF, tt))
+    g.add((ex('s'), ex('p'), DirLangString('hola', 'es', 'ltr')))
+    where = f'GRAPH <{GRAPH_URI}> {{ ?s ?p ?o }}' if g._is_native else '?s ?p ?o'
+    r = g.query(f'CONSTRUCT {{ ?s ?p ?o }} WHERE {{ {where} }}')
+    return sorted((str(s), str(p), str(o)) for s, p, o in r.graph.triples((None, None, None)))
+
+
+def _scenario_reifier_annotation_formal_pattern(g):
+    tt = TripleTerm(ex('bob'), ex('knows'), ex('carol'))
+    g.add((ex('stmt1'), RDF_REIF, tt))
+    g.add((ex('stmt1'), ex('confidence'), Literal('0.9')))
+    where = (f'GRAPH <{GRAPH_URI}> {{ ?r rdf:reifies <<( ex:bob ex:knows ex:carol )>> . ?r ?p ?o . }}'
+              if g._is_native else '?r rdf:reifies <<( ex:bob ex:knows ex:carol )>> . ?r ?p ?o .')
+    q = f"""
+        PREFIX ex: <{EX}>
+        PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+        SELECT ?p ?o WHERE {{ {where} }}
+    """
+    return sorted((str(r[0]), str(r[1])) for r in g.query(q))
+
+
+# isTripleTerm() (starlight's own pre-spec-stabilization alias for isTRIPLE())
+# is deliberately excluded here: it's not SPARQL syntax at all, only a name
+# _IS_TT_RE rewrites away before rdflib's real parser ever sees it (rdf-1.1
+# in-memory backend only). The native rdf-1.2 backend sends queries straight
+# through with zero rewriting by design (starlight/backends/native.py), so a
+# real SPARQL 1.2 engine correctly 400s on it as a parse error - confirmed
+# live against both Fuseki 5.5.0 and Oxigraph 0.5.9 while building this test.
+# That's not a parity bug to fix; isTRIPLE() (the real spec name, tested
+# below) already covers the same functionality and does match everywhere.
+SCENARIOS = [
+    ('plain triple write/read', _scenario_plain_triple),
+    ('triple term write/read', _scenario_triple_term_write_read),
+    ('nested triple term', _scenario_nested_triple_term),
+    ('triple term as subject rejected', _scenario_triple_term_subject_rejected),
+    ('<<( )>> pattern match', _scenario_sparql_tt_pattern_match),
+    ('TRIPLE() constructor', _scenario_triple_constructor_fn),
+    ('isTRIPLE()', _scenario_is_triple_fn),
+    ('DirLangString write/read', _scenario_dirlangstring_write_read),
+    ('LANGDIR/hasLANGDIR/STRLANGDIR/LANG/hasLANG', _scenario_dirlang_functions),
+    ('STRLANGDIR invalid direction', _scenario_strlangdir_invalid_direction),
+    ('CONSTRUCT round trip', _scenario_construct_round_trip),
+    ('reifier annotation formal pattern', _scenario_reifier_annotation_formal_pattern),
+]
+
+
+# ---------------------------------------------------------------------------
+# Parametrized parity tests — each scenario compared against the in-memory
+# backend independently per native backend, so a partial environment (only
+# one of Fuseki/Oxigraph running) still exercises everything it can.
+# ---------------------------------------------------------------------------
+
+@fuseki
+@pytest.mark.parametrize('name,fn', SCENARIOS, ids=[s[0] for s in SCENARIOS])
+def test_fuseki_matches_internal(name, fn):
+    internal_result = fn(_internal_graph())
+    fuseki_result = fn(_fuseki_graph())
+    assert fuseki_result == internal_result, (
+        f'{name}: fuseki={fuseki_result!r} != internal={internal_result!r}'
+    )
+
+
+@oxigraph
+@pytest.mark.parametrize('name,fn', SCENARIOS, ids=[s[0] for s in SCENARIOS])
+def test_oxigraph_matches_internal(name, fn):
+    internal_result = fn(_internal_graph())
+    oxigraph_result = fn(_oxigraph_graph())
+    assert oxigraph_result == internal_result, (
+        f'{name}: oxigraph={oxigraph_result!r} != internal={internal_result!r}'
+    )

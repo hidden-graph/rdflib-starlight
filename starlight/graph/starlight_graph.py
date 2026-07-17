@@ -17,7 +17,7 @@ import re
 from rdflib import Graph, URIRef, BNode, Literal
 from rdflib.namespace import RDF
 from starlight.model.triple import TripleTerm
-from starlight.model.encoding import TT_NS, tt_hash, lookup_tt_hash
+from starlight.model.encoding import TT_NS, tt_hash, lookup_tt_hash, ENCODING_PREDS as _ENCODING_PREDS, restore_select_bindings
 from starlight.model.dirlangstring import DirLangString, encode_dirlangstring, decode_dirlangstring
 
 SL_NS           = 'https://github.com/hidden-graph/rdflib-starlight/ns#'
@@ -27,9 +27,6 @@ RDF_REIFIES     = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 
 # Valid backend mode identifiers
 VALID_BACKENDS = frozenset({'rdf-1.1', 'rdf-1.2'})
-
-# Predicates used in the internal TripleTerm URIRef encoding
-_ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
 
 # rdf:TripleTerm type URI — emitted by the JSON-LD 1.2 serializer; treated as
 # internal encoding so it is never surfaced through triples() / __len__ etc.
@@ -880,14 +877,7 @@ class StarlightGraph(Graph):
                       initNs=initNs, initBindings=init_bindings,
                       use_store_provided=use_store_provided, **kwargs)
         if r.type == 'SELECT':
-            r.bindings = [
-                {var: self._restore(row.get(var)) if row.get(var) is not None else None
-                 for var in r.vars}
-                for row in r.bindings
-                if not (any(isinstance(v, URIRef) and str(v).startswith(TT_NS)
-                            for v in row.values())
-                        and _ENCODING_PREDS.intersection(row.values()))
-            ]
+            restore_select_bindings(r, self._restore)
         elif r.type == 'CONSTRUCT':
             r.graph = StarlightGraph.from_rdflib(r.graph)
         return r

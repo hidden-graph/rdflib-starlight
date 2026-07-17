@@ -32,6 +32,7 @@ classifiers = [
 
 [project.optional-dependencies]
 sqlalchemy = ["rdflib-sqlalchemy>=0.5"]
+test = ["pytest>=7", "hypothesis>=6"]
 
 [project.urls]
 Homepage = "https://github.com/hidden-graph/rdflib-starlight"

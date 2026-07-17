@@ -265,7 +265,7 @@ Module-level functions that are part of the internal encoding but not public API
 
 ### starlight/model/encoding.py
 
-✅ `tt_hash(s, p, o)` — Produces an 8-hex-char SHA-256 content address for a triple term. Same inputs always produce the same hash, so identical triple terms map to the same internal `tt:HASH` URIRef.
+✅ `tt_hash(s, p, o)` — Produces a 16-hex-char (64-bit) SHA-256 content address for a triple term. Same inputs always produce the same hash, so identical triple terms map to the same internal `tt:HASH` URIRef. Widened from 8 to 16 hex chars 2026-07-17 to keep birthday-bound collision risk negligible for graphs with heavy reification (see `docs/future_enhancements.md`).
 
 ---
 

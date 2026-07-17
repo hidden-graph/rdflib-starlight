@@ -5,7 +5,7 @@ Integration tests for StarlightGraph backed by Apache Jena Fuseki via
 rdflib's SPARQLUpdateStore.
 
 Requires a running Fuseki instance:
-    docker run -d --name fuseki-test -p 3030:3030 -e ADMIN_PASSWORD=admin stain/jena-fuseki
+    docker run -d --name fuseki-test -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest
 
 Create an in-memory dataset before running:
     curl -X POST http://localhost:3030/$/datasets -u admin:admin \\
@@ -25,6 +25,11 @@ from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
 
 from starlight.graph import StarlightGraph
 from starlight.model.triple import TripleTerm
+
+# Applies the "integration" marker (declared in pyproject.toml) to every test
+# in this module, so `pytest -m "not integration"` (used by CI) actually
+# excludes them rather than relying solely on the skipif fixtures below.
+pytestmark = pytest.mark.integration
 
 # ---------------------------------------------------------------------------
 # Endpoint config
@@ -55,7 +60,8 @@ def _fuseki_available() -> bool:
 
 fuseki = pytest.mark.skipif(
     not _fuseki_available(),
-    reason='Fuseki not running — start with: docker run -d --name fuseki-test -p 3030:3030 -e ADMIN_PASSWORD=admin stain/jena-fuseki',
+    reason='Fuseki not running — start with: docker run -d --name fuseki-test -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest '
+           '(needs Fuseki 5.5+ for the native RDF 1.2 tests below; stain/jena-fuseki only reaches 5.1.0)',
 )
 
 

@@ -32,12 +32,9 @@ import weakref
 from pathlib import Path
 from rdflib import Dataset, Graph, URIRef, BNode
 from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
-from rdflib.namespace import RDF
 
 from starlight.graph.starlight_graph import StarlightGraph, VALID_BACKENDS, _raw_triples
-from starlight.model.encoding import TT_NS
-
-_ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
+from starlight.model.encoding import TT_NS, ENCODING_PREDS as _ENCODING_PREDS, restore_select_bindings
 
 _raw_graph_add = Graph.add
 
@@ -336,14 +333,7 @@ class StarlightDataset(Dataset):
                       initNs=initNs, initBindings=initBindings,
                       use_store_provided=use_store_provided, **kwargs)
         if r.type == 'SELECT':
-            r.bindings = [
-                {var: self._restore_any(row.get(var)) if row.get(var) is not None else None
-                 for var in r.vars}
-                for row in r.bindings
-                if not (any(isinstance(v, URIRef) and str(v).startswith(TT_NS)
-                            for v in row.values())
-                        and _ENCODING_PREDS.intersection(row.values()))
-            ]
+            restore_select_bindings(r, self._restore_any)
         elif r.type == 'CONSTRUCT':
             r.graph = StarlightGraph.from_rdflib(r.graph)
         return r

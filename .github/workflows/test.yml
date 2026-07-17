@@ -20,7 +20,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install
-        run: pip install -e ".[sqlalchemy]" pytest
+        run: pip install -e ".[sqlalchemy,test]"
 
       - name: Run unit and W3C tests
         run: pytest tests/ -m "not integration" -v

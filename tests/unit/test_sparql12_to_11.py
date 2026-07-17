@@ -78,6 +78,24 @@ SELECT * WHERE {
     assert "?__tt0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> ?s ." in optional_block
 
 
+def test_rewrite_subject_function_in_select_projection_without_where_keyword():
+    # WHERE is optional in SPARQL for SELECT ("SELECT (...) { }" is valid).
+    # _rewrite_triple_functions used to locate its injection point by
+    # searching for literal "WHERE {" text with no fallback, silently
+    # dropping the injected rdf:subject binding triple when that keyword was
+    # absent - leaving ?__tt0 permanently unbound instead of raising or
+    # working. Fixed by _find_group_pattern_start, shared with the ground-
+    # TRIPLE()-as-value BIND injection (see test_dataset_query.py::TestAsk::
+    # test_ask_false_when_no_match for that sibling fix).
+    query = "SELECT (SUBJECT(?tt) AS ?s) { }"
+    rewritten = rewrite_sparql12_to_11(query)
+
+    assert "?tt <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> ?__tt0 ." in rewritten
+
+    from rdflib.plugins.sparql.parser import parseQuery
+    parseQuery(rewritten)  # must not raise
+
+
 def test_rewrite_accepts_dollar_sigil_for_accessor_functions():
     # $this/$value are the sigil convention SHACL-SPARQL constraints use for
     # focus-node/value bindings; $var and ?var are interchangeable valid SPARQL.
@@ -93,6 +111,74 @@ SELECT $this $value WHERE {
     assert "$value" in rewritten
     assert "PREDICATE(" not in rewritten
     assert "$value <http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate> ?__tt0 ." in rewritten
+
+
+def test_rewrite_subject_of_triple_term_literal_extracts_component_directly():
+    # SUBJECT(<<( s p o )>>) - the accessor applied directly to a literal, not
+    # a bound variable - needs no store lookup at all (unlike SUBJECT(?tt)):
+    # the components are already spelled out right there in the query text,
+    # so this desugars straight to the subject term, with no injected
+    # rdf:subject binding pattern. Found missing via property-based fuzz
+    # testing 2026-07-17 (_TRIPLE_FUNC_RE only ever matched a bare-variable
+    # argument); see _rewrite_triple_accessor_literals.
+    query = "PREFIX : <http://example.org/>\nSELECT (SUBJECT(<<( :a :b :c )>>) AS ?s) WHERE {}"
+
+    rewritten = rewrite_sparql12_to_11(query)
+
+    assert "SUBJECT(" not in rewritten
+    assert rewritten == "PREFIX : <http://example.org/>\nSELECT (:a AS ?s) WHERE {}"
+
+    from rdflib.plugins.sparql.parser import parseQuery
+    parseQuery(rewritten)  # must not raise
+
+
+def test_rewrite_predicate_and_object_of_triple_constructor_literal():
+    # Same as above but via the TRIPLE(...) constructor spelling, and for
+    # PREDICATE()/OBJECT() rather than SUBJECT() - TRIPLE(...) is desugared to
+    # <<( )>> before _rewrite_triple_accessor_literals runs, so both spellings
+    # are handled uniformly.
+    query = "PREFIX : <http://example.org/>\nSELECT (PREDICATE(TRIPLE(:a, :b, :c)) AS ?p) (OBJECT(TRIPLE(:a, :b, :c)) AS ?o) WHERE {}"
+
+    rewritten = rewrite_sparql12_to_11(query)
+
+    assert "TRIPLE(" not in rewritten
+    assert "PREDICATE(" not in rewritten
+    assert "OBJECT(" not in rewritten
+    assert ":b AS ?p" in rewritten
+    assert ":c AS ?o" in rewritten
+
+
+def test_rewrite_subject_of_nested_ground_triple_term_literal_still_constructs():
+    # The extracted component can itself be a triple term (nesting) - it must
+    # still go through the normal ground-value BIND construction path (see
+    # test_rewrite_nested_triple_term), not leak as raw <<( )>> text.
+    query = (
+        "PREFIX : <http://example.org/>\n"
+        "SELECT (SUBJECT(<<( <<( :a :b :c )>> :p :o )>>) AS ?s) WHERE {}"
+    )
+
+    rewritten = rewrite_sparql12_to_11(query)
+
+    assert "SUBJECT(" not in rewritten
+    assert "<<(" not in rewritten
+    assert "BIND(<https://github.com/hidden-graph/rdflib-starlight/ns/tt#fn/hash>(:a, :b, :c) AS ?__tt0)" in rewritten
+    assert "SELECT (?__tt0 AS ?s)" in rewritten
+
+    from rdflib.plugins.sparql.parser import parseQuery
+    parseQuery(rewritten)  # must not raise
+
+
+def test_rewrite_object_of_triple_term_literal_with_variable_component():
+    # A variable inside the literal argument passes through unchanged - this
+    # is a pure textual extraction, not a match/lookup.
+    query = (
+        "PREFIX : <http://example.org/>\n"
+        "ASK { FILTER(OBJECT(<<( ?s :p :c )>>) = :c) }"
+    )
+
+    rewritten = rewrite_sparql12_to_11(query)
+
+    assert rewritten == "PREFIX : <http://example.org/>\nASK { FILTER(:c = :c) }"
 
 
 def test_rewrite_accepts_dollar_sigil_for_is_triple_term():

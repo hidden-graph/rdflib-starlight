@@ -53,12 +53,33 @@ def _register_tt_hash_function() -> None:
     register_custom_function(URIRef(TT_HASH_FN[1:-1]), _tt_hash_fn, override=True)
 
 
+# Deliberate import-time side effect: this mutates rdflib's *global*
+# CUSTOM_EVALS/function registry the moment this module is imported, not on
+# first use. override=True is intentional too - re-importing this module (or
+# a reload) re-registers idempotently under the same TT_HASH_FN URI rather
+# than raising on a duplicate registration, since it's always the same
+# function. The tradeoff: nothing else in the process may register a
+# different function at this exact URI and expect it to stick - acceptable
+# here since TT_NS/DIRLANG_NS are starlight's own namespaces, not shared with
+# any other library.
 _register_tt_hash_function()
 
 _TRIPLE_FUNC_RE = _re.compile(
     r'\b(SUBJECT|PREDICATE|OBJECT)\s*\(\s*([?$][A-Za-z_][A-Za-z0-9_]*)\s*\)',
     _re.IGNORECASE,
 )
+
+# SUBJECT/PREDICATE/OBJECT applied directly to a <<( )>> literal rather than
+# a bound variable, e.g. SUBJECT(<<( :a :b :c )>>) - detected separately from
+# _TRIPLE_FUNC_RE above (which only matches a bare-variable argument) and
+# desugared by _rewrite_triple_accessor_literals(), which runs much earlier
+# in the pipeline. Lookahead only, like _TRIPLE_CALL_RE - the actual call is
+# consumed with _consume_balanced() since its content can itself contain
+# nested parens/triple terms that a regex can't reliably bound.
+_TRIPLE_ACCESSOR_LITERAL_RE = _re.compile(
+    r'\b(SUBJECT|PREDICATE|OBJECT)\s*(?=\(\s*<<\()', _re.IGNORECASE,
+)
+_ACCESSOR_TO_INDEX = {'SUBJECT': 0, 'PREDICATE': 1, 'OBJECT': 2}
 # isTRIPLE is the SPARQL 1.2 spec's own name (17.4.6); isTripleTerm is starlight's
 # original, more descriptive spelling predating that section's stabilization. Both
 # are accepted so a query copied verbatim from the spec or another RDF 1.2 tool
@@ -128,6 +149,8 @@ def _register_dirlang_construct_function() -> None:
     register_custom_function(URIRef(DIRLANG_CONSTRUCT_FN[1:-1]), _dirlang_construct_fn, override=True)
 
 
+# Same deliberate import-time global-registry mutation as
+# _register_tt_hash_function() above, and the same reasoning applies.
 _register_dirlang_construct_function()
 
 
@@ -377,6 +400,31 @@ def _try_split_construct_where(query: str):
     return prologue, template_span[1:-1], where_span[1:-1], epilogue
 
 
+def _find_group_pattern_start(query: str) -> int | None:
+    """Index just after the outermost group graph pattern's opening brace.
+
+    Prefers an explicit ``WHERE {``. Falls back to the first ``{`` in the
+    query when the WHERE keyword is absent - it's optional in SPARQL for
+    SELECT/ASK/DESCRIBE (e.g. plain ``ASK { ... }``), and neither the
+    prologue (BASE/PREFIX) nor a SELECT variable list/dataset clause can
+    contain a brace, so the first one is always the group graph pattern's.
+    Returns None only if the query has no ``{`` at all.
+
+    Shared by every pass that needs to inject content at the very start of
+    the WHERE clause: _inject_ground_binds_into_where (ground TRIPLE()/
+    <<( )>> BINDs) and _rewrite_triple_functions (SUBJECT/PREDICATE/OBJECT
+    binding triples for a SELECT-projection call). Both used to search for
+    literal "WHERE {" text with no fallback, silently dropping their
+    injected content on a WHERE-less query - fixed once here rather than
+    per call site.
+    """
+    where_m = _re.search(r'\bWHERE\s*\{', query, _re.IGNORECASE)
+    if where_m:
+        return where_m.end()
+    brace_m = _re.search(r'\{', query)
+    return brace_m.end() if brace_m else None
+
+
 def _inject_ground_binds_into_where(query: str, state: "_RewriteState") -> str:
     """Insert state.pending_ground_binds right after the WHERE clause's own
     opening brace, so they precede everything else in the query - see
@@ -386,20 +434,10 @@ def _inject_ground_binds_into_where(query: str, state: "_RewriteState") -> str:
     """
     if not state.pending_ground_binds:
         return query
-    where_m = _re.search(r'\bWHERE\s*\{', query, _re.IGNORECASE)
-    if where_m:
-        insert_pos = where_m.end()
-    else:
-        # The WHERE keyword is optional in SPARQL for SELECT/ASK/DESCRIBE
-        # (e.g. "ASK { ... }"), so its absence is not an error - the group
-        # graph pattern's opening brace is still the first "{" in the query,
-        # since neither the prologue (BASE/PREFIX) nor a SELECT variable
-        # list/dataset clause can contain one.
-        brace_m = _re.search(r'\{', query)
-        if not brace_m:
-            state.pending_ground_binds.clear()
-            return query
-        insert_pos = brace_m.end()
+    insert_pos = _find_group_pattern_start(query)
+    if insert_pos is None:
+        state.pending_ground_binds.clear()
+        return query
     prefix = "\n  " + "\n  ".join(state.pending_ground_binds) + "\n  "
     state.pending_ground_binds.clear()
     return query[:insert_pos] + prefix + query[insert_pos:]
@@ -479,6 +517,57 @@ def _rewrite_triple_calls(query: str) -> str:
     return ''.join(result)
 
 
+def _rewrite_triple_accessor_literals(query: str) -> str:
+    """Desugar SUBJECT/PREDICATE/OBJECT(<<( s p o )>>) - the accessor applied
+    directly to a triple-term literal - to the relevant component (s, p, or
+    o) directly.
+
+    This is an exact, pass-order-independent textual equivalence, unlike
+    SUBJECT(?tt): a bound-variable argument needs a store lookup (an injected
+    ?tt rdf:subject ?fresh binding pattern - see _rewrite_triple_functions /
+    _rewrite_group_content's inline handling), but a literal <<( s p o )>>
+    argument already spells out all three components right there in the
+    query text, so there is nothing to look up - SUBJECT(<<( s p o )>>) means
+    exactly s. Runs right after _rewrite_triple_calls (so a TRIPLE(...)-
+    spelled argument has already become <<( )>> uniformly) and before every
+    other pass, so a component that is itself a nested <<( )>>/TRIPLE(...)
+    is left as plain text at this call's former position for the normal
+    downstream passes to rewrite - the same as if it had been written
+    directly there to begin with. Also means this works identically whether
+    the call sits inside a WHERE-clause block or bare in a SELECT projection,
+    with no separate "outside any block yet" injection logic needed at all
+    (contrast the bare-variable case's _rewrite_triple_functions).
+
+    Found missing via property-based fuzz testing 2026-07-17 - the bare-
+    variable-only _TRIPLE_FUNC_RE regex silently failed to match this form,
+    reaching rdflib's SPARQL 1.1 parser as literal, unparseable text.
+    """
+    result: list[str] = []
+    i = 0
+    while True:
+        m = _TRIPLE_ACCESSOR_LITERAL_RE.search(query, i)
+        if not m:
+            result.append(query[i:])
+            break
+        result.append(query[i:m.start()])
+        paren_start = query.index('(', m.end())
+        call_span, end = _consume_balanced(query, paren_start, '(', ')')
+        inner = call_span[1:-1].strip()
+        tt_token, tt_end = _consume_triple_term(inner, 0)
+        if tt_end != len(inner):
+            raise ValueError(
+                f"{m.group(1).upper()}() applied to a triple-term literal takes exactly "
+                f"one <<( )>> argument: {query[m.start():end]}"
+            )
+        parts = _split_top_level_terms(tt_token[3:-3].strip())
+        if len(parts) != 3:
+            raise ValueError(f"Triple term must contain exactly 3 terms: {tt_token}")
+        idx = _ACCESSOR_TO_INDEX[m.group(1).upper()]
+        result.append(_rewrite_triple_accessor_literals(parts[idx]))
+        i = end
+    return ''.join(result)
+
+
 def _split_top_level_args(text: str) -> list[str]:
     """Split a ``TRIPLE(...)`` argument list on top-level commas.
 
@@ -546,6 +635,14 @@ def _rewrite_sparql12_to_11_tracked(query: str) -> tuple[str, frozenset]:
 
     if _TRIPLE_CALL_RE.search(query):
         query = _rewrite_triple_calls(query)
+
+    if _TRIPLE_ACCESSOR_LITERAL_RE.search(query):
+        # Must run after _rewrite_triple_calls (so a TRIPLE(...)-spelled
+        # argument is already <<( )>> by now) and before needs_tt/needs_func
+        # are computed below, so those flags reflect what's actually left in
+        # the query rather than a SUBJECT(<<( )>>) call this pass already
+        # resolved away.
+        query = _rewrite_triple_accessor_literals(query)
 
     if 'LANG' in query.upper():
         query = _rewrite_dirlang_and_strlangdir(query)
@@ -768,9 +865,8 @@ def _rewrite_triple_functions(query: str, state: _RewriteState) -> str:
     result = _TRIPLE_FUNC_RE.sub(replacer, query)
 
     if injected:
-        where_m = _re.search(r'\bWHERE\s*\{', result, _re.IGNORECASE)
-        if where_m:
-            insert_pos = where_m.end()
+        insert_pos = _find_group_pattern_start(result)
+        if insert_pos is not None:
             result = (result[:insert_pos]
                       + "\n  " + "\n  ".join(injected)
                       + result[insert_pos:])

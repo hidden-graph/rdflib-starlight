@@ -24,6 +24,9 @@ from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
 from starlight.graph import StarlightGraph
 from starlight.model.triple import TripleTerm
 
+# See test_fuseki_backend.py's identical pytestmark for why this is here.
+pytestmark = pytest.mark.integration
+
 # ---------------------------------------------------------------------------
 # Endpoint config
 # ---------------------------------------------------------------------------
