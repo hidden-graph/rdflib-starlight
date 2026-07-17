@@ -1,5 +1,5 @@
 """
-scripts/sqlalchemy_store_demo.py
+examples/sqlalchemy_store_demo.py
 
 Demonstrates StarlightGraph backed by a SQLAlchemy (SQLite) persistent store.
 
@@ -10,13 +10,14 @@ Steps:
   4. Run a SPARQL 1.2 query against the reloaded graph
   5. Assert expected results
 
+Requires the `sqlalchemy` extra: pip install -e ".[sqlalchemy]"
+
 Run from the project root:
-    .venv/bin/python scripts/sqlalchemy_store_demo.py
+    .venv/bin/python examples/sqlalchemy_store_demo.py
 """
 
 import os
 import tempfile
-import sys
 
 # --- register the SQLAlchemy store plugin (Python 3.14 compat workaround) ---
 import rdflib_sqlalchemy

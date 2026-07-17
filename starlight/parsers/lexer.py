@@ -174,10 +174,20 @@ def split_obj_and_annotations(s):
     while rest:
         if rest.startswith('~'):
             rest = rest[1:].lstrip()
-            reifier, rest = next_token(rest)
-            rest = rest.strip()
-            if not reifier:
-                break
+            if rest.startswith('{|'):
+                # reifier ::= '~' (iri|BlankNode)? - the name is optional.
+                # A bare '~' directly followed by an annotation block is an
+                # anonymous/empty reifier that the block attaches to (W3C
+                # turtle12-ann-8, "empty reifier with annotation block" -
+                # see tests/w3c/). Must not call next_token() here: it has
+                # no '{' case, so it would mis-tokenize the block's own
+                # opening "{|" as if it were a reifier name.
+                reifier = None
+            else:
+                reifier, rest = next_token(rest)
+                rest = rest.strip()
+                if not reifier:
+                    break
             if rest.startswith('{|'):
                 body, rest = consume_annotation_block(rest)
                 annotations.append((reifier, body))
@@ -189,5 +199,19 @@ def split_obj_and_annotations(s):
             annotations.append((None, body))
             rest = rest.strip()
         else:
-            break
+            # By the time this function runs, s holds exactly one
+            # comma-split object (plus any ~reifier/{| |} annotation
+            # suffixes) - the caller already split the surrounding
+            # predicateObjectList on ','/';'. Anything left over here is
+            # unexpected trailing content on that single object, e.g. a
+            # second term with no separator ("{| :s :p :o |}" as an
+            # annotation body: pred=:s takes ":p :o" as its object slot,
+            # next_token grabs just ":p", leaving stray ":o" - previously
+            # silently dropped instead of being flagged as the malformed
+            # input it is).
+            raise TurtleSyntaxError(
+                f'unexpected trailing content {rest!r} after object '
+                f'(expected "," ";" "." or end of input)',
+                rest, pos=0,
+            )
     return obj_tok, annotations

@@ -13,8 +13,7 @@ Entry point:  serialize_trig12(g) -> str
 
 from __future__ import annotations
 
-import re as _re
-from rdflib import BNode, URIRef
+from rdflib import BNode
 from starlight.serializers.turtle12 import serialize_turtle12
 
 

@@ -29,11 +29,10 @@ Typical usage::
 from __future__ import annotations
 
 import weakref
-from pathlib import Path
 from rdflib import Dataset, Graph, URIRef, BNode
 from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 
-from starlight.graph.starlight_graph import StarlightGraph, VALID_BACKENDS, _raw_triples
+from starlight.graph.starlight_graph import StarlightGraph, VALID_BACKENDS, _raw_triples, _read_source_text
 from starlight.model.encoding import TT_NS, ENCODING_PREDS as _ENCODING_PREDS, restore_select_bindings
 
 _raw_graph_add = Graph.add
@@ -178,21 +177,13 @@ class StarlightDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _read_source(self, source, publicID, location, file, data) -> str:
-        """Resolve any of the rdflib source arguments to a text string."""
-        if data is not None:
-            return data
-        if file is not None:
-            return file.read() if hasattr(file, 'read') else Path(file).read_text()
-        if location is not None:
-            return Path(location).read_text()
-        if source is not None:
-            p = Path(source) if isinstance(source, (str, Path)) else None
-            if p and p.exists():
-                return p.read_text()
-            if isinstance(source, str):
-                return source
-            raise ValueError(f'Cannot read source: {source!r}')
-        raise ValueError('No source data provided')
+        """Resolve any of the rdflib source arguments to a text string.
+
+        publicID is accepted (matching every rdflib parse()-style signature
+        in this codebase) but unused, same as before this was factored out
+        - see _read_source_text(), shared with StarlightGraph.parse().
+        """
+        return _read_source_text(source=source, file=file, location=location, data=data)
 
     def _load_context(self, identifier, namespaces=()) -> StarlightGraph:
         """Create (or update) a StarlightGraph context and register its namespaces."""
@@ -287,23 +278,12 @@ class StarlightDataset(Dataset):
 
         The directive applies to the whole document, not per named graph
         (see trig12.py's extract_version_directive()), so this checks the
-        union across every context rather than each one independently.
-        No-op if declared_version is None (nothing declared).
+        union across every context rather than each one independently -
+        see check_version_conformance_for_graphs(), shared with
+        StarlightGraph.parse()'s equivalent per-format checks.
         """
-        if declared_version is None:
-            return
-        from starlight.model.conformance import check_version_conformance
-        from starlight.model.dirlangstring import DirLangString
-        check_version_conformance(
-            declared_version,
-            uses_triple_term=any(bool(sg._tt_nodes) for sg in self.contexts()),
-            uses_dirlangstring=any(
-                isinstance(o, DirLangString)
-                for sg in self.contexts()
-                for _, _, o in sg.triples((None, None, None))
-            ),
-            context=context,
-        )
+        from starlight.model.conformance import check_version_conformance_for_graphs
+        check_version_conformance_for_graphs(declared_version, self.contexts(), context=context)
 
     # ------------------------------------------------------------------
     # Query / Update with SPARQL-star support

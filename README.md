@@ -1,4 +1,7 @@
 # rdflib-starlight
+
+*Last reviewed: 2026-07-17*
+
 RDF 1.2 wrapper for rdflib.
 
 **RDF 1.2** was published as a W3C Candidate Recommendation on April 7, 2026. It represents the formal standardization of RDF-star, a community-driven extension to RDF that had been under development since 2019. The primary change RDF 1.2 introduces is **reification** — the ability to make statements *about* statements. RDF 1.2 makes reification a first-class feature of the data model through **triple terms** — triples that can themselves appear as the object of other triples.
@@ -22,7 +25,7 @@ pip install rdflib-starlight
 - **All annotation forms** — parses and serializes `{| |}`, `~ :r`, `<<( )>>`, and `<< >>` syntax
 - **SPARQL 1.2** — queries with triple term patterns are rewritten to SPARQL 1.1 for compatibility
 - **8 serialization formats** — Turtle, N-Triples, N-Quads, TriG, JSON-LD, TriX, RDF/XML, longturtle (JSON-LD and TriX are starlight-defined conventions, not W3C RDF 1.2 formats — see the note in [starlight_vs_rdflib.md](docs/starlight_vs_rdflib.md#serialization--parsing))
-- **W3C conformance** — passes the W3C Turtle 1.2 test suite
+- **W3C conformance** — passes the full W3C RDF 1.2 Turtle syntax and eval test suite (103 tests: 29 `TestTurtleEval`, 41 `TestTurtlePositiveSyntax`, 33 `TestTurtleNegativeSyntax`; see [tests/w3c/README.md](tests/w3c/README.md) for scope and licensing)
 - **Multiple backends** — in-memory, SQL (via rdflib-sqlalchemy), Apache Fuseki, Oxigraph
 
 ## Requirements
@@ -109,6 +112,11 @@ g = StarlightGraph(backend='rdf-1.2',
                    query_url='http://localhost:7878/query',
                    update_url='http://localhost:7878/update')
 ```
+
+## Examples
+
+- [`examples/ttl12_roundtrip_demo.py`](examples/ttl12_roundtrip_demo.py) — parses Turtle 1.2, then prints three views of the same graph side by side: the input, the internal RDF 1.1 encoding (normally hidden), and the Turtle 1.2 output.
+- [`examples/sqlalchemy_store_demo.py`](examples/sqlalchemy_store_demo.py) — writes to a SQLite-backed `StarlightGraph`, reloads it in a fresh process, and runs a SPARQL 1.2 query against the reloaded data. Requires the `sqlalchemy` extra: `pip install -e ".[sqlalchemy]"`.
 
 ## License
 

@@ -57,6 +57,63 @@ def _split_on_delimiter(text, delim):
     return parts
 
 
+def _scan_directive_end(data, i):
+    """From position i (the start of a directive keyword), find where this
+    directive statement ends.
+
+    A directive is terminated by a depth-0 '.' if it has one (e.g.
+    "@prefix : <http://example.org/> ."), the same as any other statement -
+    finding it here (bracket/string-depth-aware, so a '.' inside the
+    directive's own <IRI>, e.g. "example.com", doesn't false-terminate it)
+    is what lets content following the directive on the *same* physical
+    line be correctly split into its own, separate statement. If there's
+    no '.' before the line ends, the directive is dot-less (both the
+    dotted @prefix/@base/@version and the bare SPARQL-style prefix/base/
+    version spellings are accepted without a trailing '.' - existing,
+    intentional leniency), so it ends at end-of-line instead.
+
+    Returns the exclusive end offset (just past the '.' if found, otherwise
+    at the line-terminating '\\n'/'\\r' or end of data).
+    """
+    depth = {'[': 0, '(': 0, '{': 0, '<': 0}
+    in_string = False
+    string_char = ''
+    j = i
+    while j < len(data):
+        c = data[j]
+        if in_string:
+            if c == string_char:
+                if data[j:j+3] == string_char * 3:
+                    j += 3
+                    in_string = False
+                    continue
+                elif data[j-1] != '\\':
+                    in_string = False
+            j += 1
+            continue
+        if c in ('"', "'"):
+            in_string = True
+            string_char = c
+            if data[j:j+3] == c * 3:
+                j += 3
+            else:
+                j += 1
+            continue
+        if c in '[({<':
+            depth[c] += 1
+        elif c in '])}>':
+            if c == ']':   depth['['] = max(0, depth['['] - 1)
+            elif c == ')': depth['('] = max(0, depth['('] - 1)
+            elif c == '}': depth['{'] = max(0, depth['{'] - 1)
+            elif c == '>': depth['<'] = max(0, depth['<'] - 1)
+        if c in ('\n', '\r') and all(v == 0 for v in depth.values()):
+            return j
+        if c == '.' and all(v == 0 for v in depth.values()):
+            return j + 1
+        j += 1
+    return len(data)
+
+
 def _split_statements_impl(data):
     """Split Turtle text into (statement, start_offset) pairs, start_offset
     being the 0-based character offset in *data* where that statement's
@@ -79,19 +136,27 @@ def _split_statements_impl(data):
     while i < len(data):
         at_line_start = (i == 0 or data[i-1] in ('\n', '\r'))
         if at_line_start:
+            # Directives (dotted @prefix/@base/@version, or bare SPARQL-style
+            # prefix/base/version) end at their own '.' if they have one, or
+            # at end-of-line if they don't (both spellings are accepted
+            # without a trailing '.' - existing, intentional leniency).
+            # Previously this always read to end-of-line regardless, which
+            # silently swallowed any further content on the *same* physical
+            # line as a dotted directive into the directive's own statement
+            # text and dropped it (extract_fields()'s prefix regex only
+            # matches its own leading portion and ignores the rest) - see
+            # _scan_directive_end().
             found_directive = False
             for kw in ('@version', '@prefix', 'prefix', '@base', 'base', 'version'):
                 if data[i:i+len(kw)].lower() == kw:
-                    line_end = data.find('\n', i)
-                    if line_end == -1:
-                        line_end = len(data)
-                    stmt = data[i:line_end].strip()
+                    end = _scan_directive_end(data, i)
+                    stmt = data[i:end].strip()
                     if stmt:
                         if buf.strip():
                             stmts.append((buf.strip(), stmt_start))
                             buf = ''
                         stmts.append((stmt, i))
-                    i = line_end + 1
+                    i = end
                     while i < len(data) and data[i] in ('\n', '\r'):
                         i += 1
                     stmt_start = i
@@ -132,7 +197,20 @@ def _split_statements_impl(data):
             i += 1
             continue
         if c == '.' and all(v == 0 for v in depth.values()):
-            if i + 1 < len(data) and data[i+1] in ('\n', '\r'):
+            # A '.' at depth 0 terminates the statement unless it's the
+            # decimal point of a DECIMAL/DOUBLE literal (Turtle grammar:
+            # both always have a digit immediately after the '.', e.g.
+            # "3.14" or ".5e10" - a statement-terminating '.' never does,
+            # since it's followed by whitespace/the next statement/EOF).
+            # Previously required the '.' to be immediately followed by a
+            # newline instead, which - as a side effect - silently merged
+            # any two statements written on the same physical line into
+            # one, dropping everything the resulting bad split fed to a
+            # regex-based field extractor that just ignores its own
+            # unmatched trailing text (worst for a directive: found and
+            # fixed together with this same bug).
+            next_char = data[i+1] if i + 1 < len(data) else ''
+            if not next_char.isdigit():
                 buf += c
                 stmts.append((buf.strip(), stmt_start))
                 buf = ''
@@ -201,14 +279,28 @@ def classify_statement(stmt):
 
 def extract_fields(stmt, typ, blank_counter=None):
     """Parse a single statement string into a fields dict."""
+    from starlight.parsers.errors import TurtleSyntaxError
+
     s = stmt.strip()
     if typ == 'version':
         # Two spellings (RDF 1.2 Turtle): "@version "1.2" ." (dotted) and
         # "VERSION "1.2"" (bare, SPARQL-style) - both a single quoted label,
-        # optionally followed by a '.'.
+        # optionally followed by a '.'. Grammar: VersionSpecifier ::=
+        # STRING_LITERAL_QUOTE | STRING_LITERAL_SINGLE_QUOTE only - the
+        # long/triple-quoted forms (""".."""/'''...''') are a different
+        # production and not valid here, and neither is a bare unquoted
+        # number. A statement classified as 'version' (starts with the
+        # keyword) that doesn't match this is malformed, not absent -
+        # raise rather than silently discarding it as a no-op.
         m = re.match(r'@?version\s*([\'"])((?:(?!\1).)*)\1\s*\.?\s*$', s, re.IGNORECASE)
         if m:
             return {'version': m.group(2)}
+        raise TurtleSyntaxError(
+            'malformed VERSION directive - expected a single-quoted string label, '
+            'e.g. VERSION "1.2" or @version "1.2" . (not a triple-quoted string or '
+            'an unquoted value)',
+            s, pos=0,
+        )
     elif typ == 'prefix':
         m = re.match(r'@?prefix\s+([\w-]*)\s*:\s*<([^>]+)>', s, re.IGNORECASE)
         if m:

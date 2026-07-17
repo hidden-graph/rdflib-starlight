@@ -19,10 +19,9 @@ Entry points:
 from __future__ import annotations
 
 import re as _re
-from rdflib import Graph, URIRef
+from rdflib import URIRef
 
 from starlight.parsers.turtle_parser import StarlightTurtleParser, _skolemize_encoding
-from starlight.model.triple import TripleTerm
 
 
 # ---------------------------------------------------------------------------

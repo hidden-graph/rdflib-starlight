@@ -35,6 +35,37 @@ _RDF_TRIPLE_TERM = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#TripleTerm'
 # Unbound reference to Graph.triples — used to bypass our override safely
 _raw_triples = Graph.triples
 
+
+def _unfold_tt_encoding(g) -> Graph:
+    """Return a plain rdflib.Graph with every tt:HASH URIRef (and its
+    rdf:subject/predicate/object encoding triples) replaced by a freshly
+    minted BNode, recursively for nested triple terms.
+
+    Used only by StarlightGraph.isomorphic() so rdflib's BNode-aware
+    comparison can see a BNode embedded in a triple term as relabelable, the
+    same as any other BNode, instead of it being baked into an opaque
+    tt:HASH URI that looks like a fixed ground term to the algorithm.
+    Repeated references to the same tt:HASH URI within one graph map to the
+    same fresh BNode, preserving shared-identity shape. Works on the raw
+    store directly (not the decoded public view), so it needs no
+    StarlightGraph-specific registry state and works on any graph — a no-op
+    if there's no tt: content at all.
+    """
+    fresh = {}
+
+    def unfold_node(n):
+        if isinstance(n, URIRef) and str(n).startswith(TT_NS):
+            if n not in fresh:
+                fresh[n] = BNode()
+            return fresh[n]
+        return n
+
+    out = Graph()
+    for s, p, o in _raw_triples(g, (None, None, None)):
+        out.add((unfold_node(s), p, unfold_node(o)))
+    return out
+
+
 # Sentinel returned by _coerce_tt_read when a TripleTerm is not in the registry.
 # Distinct from None (which means wildcard) so callers can detect "no match".
 _TT_NOT_FOUND = object()
@@ -88,6 +119,31 @@ def _check_native_version_conformance(text: str) -> None:
         uses_dirlangstring='--' in text,
         context='SPARQL query',
     )
+
+
+def _read_source_text(source=None, file=None, location=None, data=None) -> str:
+    """Resolve rdflib's four parse() source arguments to a single text string.
+
+    Precedence matches rdflib's own parse() convention: data, then file,
+    then location, then source. Shared by StarlightGraph.parse() and
+    StarlightDataset._read_source() (which previously each implemented this
+    exact resolution independently).
+    """
+    from pathlib import Path
+    if data is not None:
+        return data
+    if file is not None:
+        return file.read() if hasattr(file, 'read') else Path(file).read_text()
+    if location is not None:
+        return Path(location).read_text()
+    if source is not None:
+        p = Path(source) if isinstance(source, (str, Path)) else None
+        if p and p.exists():
+            return p.read_text()
+        if isinstance(source, str):
+            return source
+        raise ValueError(f'Cannot read source: {source!r}')
+    raise ValueError('No source data to parse')
 
 
 class StarlightGraph(Graph):
@@ -808,23 +864,7 @@ class StarlightGraph(Graph):
         if format in ('n3', 'n3-12', 'text/n3'):
             format = 'turtle12'
         if format in ('turtle12', 'longturtle12', 'nt12', 'nq12', 'trig12', 'trix12', 'rdfxml12', 'jsonld12'):
-            from pathlib import Path
-            if data is not None:
-                text = data
-            elif file is not None:
-                text = file.read() if hasattr(file, 'read') else Path(file).read_text()
-            elif location is not None:
-                text = Path(location).read_text()
-            elif source is not None:
-                p = Path(source) if isinstance(source, (str, Path)) else None
-                if p and p.exists():
-                    text = p.read_text()
-                elif isinstance(source, str):
-                    text = source
-                else:
-                    raise ValueError(f'Cannot read source: {source!r}')
-            else:
-                raise ValueError('No source data to parse')
+            text = _read_source_text(source=source, file=file, location=location, data=data)
 
             if format in ('turtle12', 'longturtle12'):
                 from starlight.parsers.turtle_parser import StarlightTurtleParser, _skolemize_encoding
@@ -836,17 +876,10 @@ class StarlightGraph(Graph):
                     super().add(triple)
                 self._build_registry_from_store()
 
-                declared_version = getattr(raw, '_declared_version', None)
-                if declared_version is not None:
-                    from starlight.model.conformance import check_version_conformance
-                    check_version_conformance(
-                        declared_version,
-                        uses_triple_term=bool(self._tt_nodes),
-                        uses_dirlangstring=any(
-                            isinstance(o, DirLangString) for _, _, o in self.triples((None, None, None))
-                        ),
-                        context='Turtle document',
-                    )
+                from starlight.model.conformance import check_version_conformance_for_graphs
+                check_version_conformance_for_graphs(
+                    getattr(raw, '_declared_version', None), [self], context='Turtle document',
+                )
 
             elif format in ('nt12', 'nq12'):
                 from starlight.parsers.ntriples12 import extract_version_directive
@@ -860,17 +893,10 @@ class StarlightGraph(Graph):
                 for triple in triples:
                     self.add(triple)
 
-                declared_version = extract_version_directive(text)
-                if declared_version is not None:
-                    from starlight.model.conformance import check_version_conformance
-                    check_version_conformance(
-                        declared_version,
-                        uses_triple_term=bool(self._tt_nodes),
-                        uses_dirlangstring=any(
-                            isinstance(o, DirLangString) for _, _, o in self.triples((None, None, None))
-                        ),
-                        context='N-Triples/N-Quads document',
-                    )
+                from starlight.model.conformance import check_version_conformance_for_graphs
+                check_version_conformance_for_graphs(
+                    extract_version_directive(text), [self], context='N-Triples/N-Quads document',
+                )
 
             elif format == 'trig12':
                 from starlight.parsers.trig12 import parse_trig12, extract_version_directive as _trig_version
@@ -878,17 +904,8 @@ class StarlightGraph(Graph):
                     super().add(triple)
                 self._build_registry_from_store()
 
-                declared_version = _trig_version(text)
-                if declared_version is not None:
-                    from starlight.model.conformance import check_version_conformance
-                    check_version_conformance(
-                        declared_version,
-                        uses_triple_term=bool(self._tt_nodes),
-                        uses_dirlangstring=any(
-                            isinstance(o, DirLangString) for _, _, o in self.triples((None, None, None))
-                        ),
-                        context='TriG document',
-                    )
+                from starlight.model.conformance import check_version_conformance_for_graphs
+                check_version_conformance_for_graphs(_trig_version(text), [self], context='TriG document')
 
             elif format == 'trix12':
                 from starlight.parsers.trix12 import parse_trix12
@@ -900,17 +917,8 @@ class StarlightGraph(Graph):
                 for triple in parse_rdfxml12(text):
                     self.add(triple)
 
-                declared_version = _rx_version(text)
-                if declared_version is not None:
-                    from starlight.model.conformance import check_version_conformance
-                    check_version_conformance(
-                        declared_version,
-                        uses_triple_term=bool(self._tt_nodes),
-                        uses_dirlangstring=any(
-                            isinstance(o, DirLangString) for _, _, o in self.triples((None, None, None))
-                        ),
-                        context='RDF/XML document',
-                    )
+                from starlight.model.conformance import check_version_conformance_for_graphs
+                check_version_conformance_for_graphs(_rx_version(text), [self], context='RDF/XML document')
 
             elif format == 'jsonld12':
                 # Delegate to rdflib's JSON-LD parser (handles @context expansion);
@@ -1333,7 +1341,6 @@ class StarlightGraph(Graph):
         Raises TypeError if target_graph is a plain rdflib.Graph — it cannot store
         TripleTerms that may appear in the CBD results.
         """
-        from rdflib import Graph as _RDFLibGraph
         if target_graph is None:
             target_graph = StarlightGraph()
         elif not isinstance(target_graph, StarlightGraph):
@@ -1342,6 +1349,31 @@ class StarlightGraph(Graph):
                 "A plain rdflib.Graph cannot store TripleTerms."
             )
         return super().cbd(resource, target_graph=target_graph, include_reifications=include_reifications)
+
+    def isomorphic(self, other) -> bool:
+        """Graph isomorphism, aware of TripleTerms.
+
+        Overridden because the inherited rdflib.Graph.isomorphic() is (a) a
+        crude approximation — see that method's own docstring: "only an
+        approximation ... very well could be a false positive" — and (b)
+        blind to BNodes embedded inside a TripleTerm's content-address,
+        which would otherwise compare as different, unrelated ground terms
+        across separately parsed graphs that are actually the same shape
+        (e.g. <<( _:x :p :o )>> vs <<( _:other :p :o )>>, both otherwise
+        identical). Delegates to rdflib.compare's real canonical-labeling
+        algorithm after unfolding each graph's TripleTerms back to native
+        BNode-based reification (_unfold_tt_encoding), which mirrors the
+        parser's own intermediate form before content-address skolemization
+        (see turtle_parser._skolemize_encoding) — so a BNode nested inside a
+        triple term is treated as relabelable, the same as any other BNode,
+        rather than baked into an opaque tt:HASH URIRef.
+
+        other need not be a StarlightGraph — the unfold works directly off
+        raw triples, degrading to a no-op (plain rdflib isomorphism) for a
+        graph with no tt: content at all.
+        """
+        from rdflib.compare import isomorphic as _rdflib_isomorphic
+        return _rdflib_isomorphic(_unfold_tt_encoding(self), _unfold_tt_encoding(other))
 
     @classmethod
     def from_rdflib(cls, source_graph):

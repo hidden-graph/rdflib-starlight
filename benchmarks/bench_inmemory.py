@@ -18,8 +18,7 @@ import sys
 import time
 import tracemalloc
 
-from rdflib import URIRef, Literal
-from rdflib.namespace import XSD
+from rdflib import URIRef
 
 sys.path.insert(0, '.')
 from starlight.graph import StarlightGraph
@@ -161,11 +160,11 @@ def bench_sparql_select_plain(g):
 
 def bench_sparql_tt_pattern(g):
     """SELECT with rdf:reifies <<( )>> TT pattern."""
-    q = f"""
+    q = """
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-    SELECT ?stmt ?s ?p ?o WHERE {{
+    SELECT ?stmt ?s ?p ?o WHERE {
         ?stmt rdf:reifies <<( ?s ?p ?o )>> .
-    }}
+    }
     """
 
     def run():

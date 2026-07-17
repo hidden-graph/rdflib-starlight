@@ -10,6 +10,7 @@ from rdflib import Graph, URIRef, Literal, BNode
 from rdflib.namespace import RDF, XSD
 
 from starlight.parsers.turtle_parser import StarlightTurtleParser, SL_NS
+from starlight.parsers.errors import TurtleSyntaxError
 
 EX = 'http://example.org/'
 SL_TRIPLE_TERM  = URIRef(SL_NS + 'TripleTerm')
@@ -139,6 +140,111 @@ class TestTripleTerms:
         assert len(tt_nodes) == 2
 
 
+class TestBnodeListInTripleTerm:
+    """RDF 1.2 grammar: ttSubject/rtSubject/ttObject/rtObject all admit
+    `BlankNode`, which is BLANK_NODE_LABEL or ANON (a bare `_:label` or an
+    *empty* `[]`) - never a blankNodePropertyList carrying its own
+    properties. Confirmed directly against the W3C RDF 1.2 Turtle syntax
+    test suite (turtle12-bad-7, "compound blank node expression", a
+    TestTurtleNegativeSyntax case - see tests/w3c/).
+
+    An earlier version of this parser instead silently *expanded* a
+    non-empty `[ ... ]` here (a bug fix for a different problem: it used to
+    produce a garbage URIRef from the raw bracket text) - that was more
+    lenient than the grammar actually allows. Both the acceptance below
+    (empty `[]`) and the rejection (non-empty) are asserted here."""
+
+    def test_empty_bnode_in_object_position_accepted(self, parser):
+        g = parser.parse(
+            'PREFIX ex: <http://example.org/>\n'
+            'ex:a ex:says <<( ex:bob ex:knows [] )>> .\n'
+        )
+        tt = list(g.subjects(RDF.type, SL_TRIPLE_TERM))[0]
+        obj = list(g.objects(tt, RDF.object))[0]
+        assert isinstance(obj, BNode)
+
+    def test_empty_bnode_in_subject_position_accepted(self, parser):
+        g = parser.parse(
+            'PREFIX ex: <http://example.org/>\n'
+            'ex:a ex:says <<( [] ex:knows ex:carol )>> .\n'
+        )
+        tt = list(g.subjects(RDF.type, SL_TRIPLE_TERM))[0]
+        subj = list(g.objects(tt, RDF.subject))[0]
+        assert isinstance(subj, BNode)
+
+    def test_bnode_with_properties_in_object_position_rejected(self, parser):
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                'ex:a ex:says <<( ex:bob ex:knows [ ex:name "Bob" ] )>> .\n'
+            )
+
+    def test_bnode_with_properties_in_subject_position_rejected(self, parser):
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                'ex:a ex:says <<( [ ex:name "Bob" ] ex:knows ex:carol )>> .\n'
+            )
+
+    def test_bnode_with_properties_in_reification_shorthand_rejected(self, parser):
+        """Same restriction applies to << >> (rtObject), not just <<( )>>."""
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                '<< ex:s ex:p [ ex:a 1 ] >> ex:q 123 .\n'
+            )
+
+
+class TestTripleTermPositionValidation:
+    """RDF 1.2 grammar restricts what can appear in each slot of
+    <<( s p o )>>/<< s p o >>: the verb is always an IRI, ttSubject/
+    rtSubject is iri|BlankNode (no literal), and a tripleTerm/reifiedTriple
+    itself can never appear as an outer triple's predicate. Confirmed
+    against the W3C RDF 1.2 Turtle syntax test suite (tests/w3c/)."""
+
+    def test_reified_triple_as_predicate_rejected(self, parser):
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                'ex:x << ex:s ex:p ex:o >> 123 .\n'
+            )
+
+    def test_triple_term_as_predicate_rejected(self, parser):
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                'ex:a <<( ex:s ex:p ex:o )>> ex:z .\n'
+            )
+
+    def test_literal_as_triple_term_subject_rejected(self, parser):
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                'ex:q ex:r <<( "XYZ" ex:p ex:o )>> .\n'
+            )
+
+    def test_literal_as_verb_rejected(self, parser):
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                'ex:q ex:r <<( ex:s "XYZ" ex:o )>> .\n'
+            )
+
+    def test_bnode_as_verb_rejected(self, parser):
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                'ex:q ex:r << ex:s _:label ex:o >> .\n'
+            )
+
+    def test_over_long_reified_triple_rejected(self, parser):
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.org/>\n'
+                'ex:s ex:p << ex:g ex:s ex:p ex:o >> .\n'
+            )
+
+
 class TestReification:
     def test_reification_shorthand_as_subject(self, parser):
         g = parser.parse(
@@ -203,6 +309,76 @@ class TestAnnotations:
         ann_b = list(g.objects(reif, URIRef(EX+'b')))
         assert ann_a == [Literal('1')]
         assert ann_b == [Literal('2')]
+
+    def test_bare_tilde_with_annotation_block(self, parser):
+        """'~ {| |}' - a bare, anonymous reifier immediately followed by an
+        annotation block (reifier ::= '~' (iri|BlankNode)? - the name is
+        optional) must parse, with the block's properties attached to a
+        fresh anonymous reifier (W3C turtle12-ann-8, "empty reifier with
+        annotation block" - see tests/w3c/)."""
+        g = parser.parse(
+            'PREFIX ex: <http://example.org/>\n'
+            'ex:s ex:p ex:o ~ {| ex:q ex:r |} .\n'
+        )
+        assert (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')) in g
+        reif = list(g.subjects(RDF.type, SL_REIFICATION))[0]
+        assert list(g.objects(reif, URIRef(EX+'q'))) == [URIRef(EX+'r')]
+
+    def test_triple_as_annotation_body_rejected(self, parser):
+        """{| :s :p :o |} (3 terms - a full triple, not a predicateObjectList)
+        must be rejected, not silently truncated to just the first pred/obj
+        pair with the rest dropped (W3C turtle12-bad-ann-2, "triple as
+        annotation" - see tests/w3c/)."""
+        with pytest.raises(TurtleSyntaxError):
+            parser.parse(
+                'PREFIX ex: <http://example.com/ns#>\n'
+                'ex:a ex:b ex:c {| ex:s ex:p ex:o |} .\n'
+            )
+
+
+class TestDirLangStringCaseSensitivity:
+    """RDF 1.2 Concepts sec 3.4: base direction MUST be exactly "ltr" or
+    "rtl" (lowercase only - not case-folded the way the language tag
+    itself is, per sec 3.4.1). Confirmed against the W3C RDF 1.2 Turtle
+    syntax test suite (nt-ttl12-langdir-bad-2 - see tests/w3c/)."""
+
+    def test_lowercase_direction_accepted(self, parser):
+        g = parser.parse('PREFIX ex: <http://example.org/>\nex:a ex:b "hi"@en--rtl .\n')
+        assert len(g) == 1
+
+    def test_uppercase_direction_rejected(self, parser):
+        with pytest.raises(Exception):
+            parser.parse('PREFIX ex: <http://example.org/>\nex:a ex:b "hi"@en--LTR .\n')
+
+
+class TestSurrogateEscapes:
+    """Turtle's UCHAR (\\uXXXX/\\UXXXXXXXX) grammar directly encodes a
+    Unicode codepoint - the UTF-16 surrogate range (U+D800-U+DFFF) is
+    excluded, since surrogates are a UTF-16 encoding artifact, not a valid
+    standalone codepoint (a supplementary-plane character is written with
+    a single \\U escape of its real codepoint, not a \\u\\u surrogate pair
+    the way JSON/JavaScript encode it). Confirmed against the W3C RDF 1.2
+    Turtle syntax test suite (turtle12-surrogate*/turtle12-surrogates-bad-*
+    - see tests/w3c/)."""
+
+    def test_non_surrogate_uchar_accepted(self, parser):
+        g = parser.parse('PREFIX ex: <http://example.org/>\nex:a ex:b "\\u0041" .\n')
+        assert len(g) == 1
+
+    def test_lone_high_surrogate_rejected(self, parser):
+        with pytest.raises(Exception):
+            parser.parse('PREFIX ex: <http://example.org/>\nex:a ex:b "\\uD83C" .\n')
+
+    def test_lone_low_surrogate_rejected(self, parser):
+        with pytest.raises(Exception):
+            parser.parse('PREFIX ex: <http://example.org/>\nex:a ex:b "\\uDCA1" .\n')
+
+    def test_surrogate_pair_rejected(self, parser):
+        """Even a well-formed high+low pair (which JSON/JS would combine
+        into a supplementary-plane character) is invalid - Turtle has no
+        such combining rule for \\u escapes."""
+        with pytest.raises(Exception):
+            parser.parse('PREFIX ex: <http://example.org/>\nex:a ex:b "\\uD83C\\uDCA1" .\n')
 
 
 # ---------------------------------------------------------------------------

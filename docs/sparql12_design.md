@@ -1,5 +1,7 @@
 # SPARQL 1.2 Query Design — Examples and Expected Behaviour
 
+*Last reviewed: 2026-07-17*
+
 This document defines how `StarlightGraph.query()` should behave with SPARQL 1.2
 triple-term syntax. It is a design agreement, not an implementation spec.
 
@@ -33,7 +35,7 @@ triple-term syntax. It is a design agreement, not an implementation spec.
 
 ## Formal RDF 1.2 Representation
 
-The above dataset expressed in formal RDF 1.2 (no annotation syntax) — using `rdf:reifies` and `<<( )>>` triple terms. This is the canonical form that all annotation syntaxes desugar to.
+The above dataset expressed in formal RDF 1.2 (no annotation syntax) — using `rdf:reifies` and `<<( )>>` triple terms. This is the canonical form that all annotation syntaxes desugar to. Anonymous reifiers are written here as `_:rr0`/`_:rr1`/`_:rr2` for readability (an unnamed reifier is conceptually a blank node); internally, and in raw query results (e.g. `?stmt` in QF4/QF5 below), starlight actually returns a stable skolemized `rr:N` URIRef rather than a true rdflib `BNode` — this has no bearing on any of the query results below, since none of them assume BNode identity.
 
 ```turtle
 @prefix :    <http://example.org/> .
@@ -298,12 +300,13 @@ accepted as an exact alias; the two spellings rewrite identically.
 PREFIX :   <http://example.org/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT DISTINCT ?t ?s ?p ?o (EXISTS { ?s ?p ?o } AS ?asserted) WHERE {
+SELECT DISTINCT ?t ?s ?p ?o ?asserted WHERE {
   ?sub ?pred ?t .
   FILTER(isTripleTerm(?t))
   BIND(SUBJECT(?t)   AS ?s)
   BIND(PREDICATE(?t) AS ?p)
   BIND(OBJECT(?t)    AS ?o)
+  BIND(EXISTS { ?s ?p ?o } AS ?asserted)
 }
 ```
 
@@ -317,6 +320,11 @@ SELECT DISTINCT ?t ?s ?p ?o (EXISTS { ?s ?p ?o } AS ?asserted) WHERE {
 `BIND` extracts the components before `EXISTS` tests them as a plain triple pattern.
 `?asserted` is `true` for `:bob :knows :carol` (explicitly asserted); `false` for
 `:carol :knows :dave` (only reified, never asserted).
+
+Note the `EXISTS` is bound in its own `BIND(... AS ?asserted)` line rather than
+inline as a `(EXISTS {...} AS ?asserted)` SELECT-projection expression — the
+latter hits a real rdflib limitation (`EXISTS` fails in a SELECT-projection
+`(expr AS ?var)` position; a separate `BIND` in the WHERE clause works fine).
 
 ---
 
@@ -575,18 +583,22 @@ Phase 1 and do not pass through here.
 ?t rdf:object    ?o .
 ```
 
-**`isTripleTerm(?x)`** — rewritten to an indexed existence check plus URI prefix guard
+**`isTripleTerm(?x)`** — rewritten to a URI prefix check
 ```sparql
 # Input
 FILTER(isTripleTerm(?x))
 
 # Rewritten
-FILTER(EXISTS { ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> [] }
-    && STRSTARTS(STR(?x), "https://github.com/hidden-graph/rdflib-starlight/ns/tt#"))
+FILTER(STRSTARTS(STR(?x), "https://github.com/hidden-graph/rdflib-starlight/ns/tt#"))
 ```
 
-The `STRSTARTS` guard rejects any user triple that coincidentally
-carries `rdf:subject` but whose subject URI is not in the `tt:` namespace.
+`STRSTARTS` alone is sufficient: every `tt:`-prefixed URIRef is created exclusively
+by the triple-term interning path, which always writes its `rdf:subject`/`predicate`/`object`
+encoding triples in the same call — there's no state where the prefix matches without
+them. An earlier version also wrapped this in `EXISTS { ?x rdf:subject [] } &&`, which
+was both unnecessary and actively wrong to keep: it hit a real rdflib limitation where
+`EXISTS {...} && ...` fails inside a `(expr AS ?var)` position (SELECT projection or
+`BIND`) even though the identical expression works fine inside a plain `FILTER(...)`.
 
 ---
 

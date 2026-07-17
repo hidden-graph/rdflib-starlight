@@ -31,7 +31,8 @@ class RDF12ConformanceWarning(UserWarning):
 
 
 def check_version_conformance(declared_version, *, uses_triple_term: bool,
-                               uses_dirlangstring: bool, context: str) -> None:
+                               uses_dirlangstring: bool, context: str,
+                               stacklevel: int = 3) -> None:
     """Warn if declared_version is unrecognized, or is "1.2-basic"/"1.1" while
     a triple term and/or dirLangString is actually present.
 
@@ -46,6 +47,14 @@ def check_version_conformance(declared_version, *, uses_triple_term: bool,
     context           -- short label identifying what was checked, for the
                           warning message, e.g. "Turtle document" or
                           "SPARQL query"
+    stacklevel        -- passed straight to warnings.warn(); the default (3)
+                          is correct for a direct caller (warn's own frame,
+                          then this function's, then the caller's - pointing
+                          the warning at the caller's line). A wrapper that
+                          itself calls this function - e.g.
+                          check_version_conformance_for_graphs() below -
+                          should pass stacklevel=4 so the warning still
+                          points at *its* caller, not at the wrapper itself.
     """
     if declared_version is None:
         return
@@ -54,7 +63,7 @@ def check_version_conformance(declared_version, *, uses_triple_term: bool,
         warnings.warn(
             f'{context} declares unrecognized VERSION {declared_version!r} '
             f'(expected one of {sorted(VALID_VERSION_LABELS)})',
-            RDF12ConformanceWarning, stacklevel=3,
+            RDF12ConformanceWarning, stacklevel=stacklevel,
         )
         return
 
@@ -67,5 +76,34 @@ def check_version_conformance(declared_version, *, uses_triple_term: bool,
             warnings.warn(
                 f'{context} declares VERSION {declared_version!r} but uses {" and ".join(used)}, '
                 f'which {declared_version!r} conformance excludes (RDF 1.2 Concepts sec 2.1)',
-                RDF12ConformanceWarning, stacklevel=3,
+                RDF12ConformanceWarning, stacklevel=stacklevel,
             )
+
+
+def check_version_conformance_for_graphs(declared_version, graphs, *, context: str) -> None:
+    """Convenience wrapper: computes uses_triple_term/uses_dirlangstring by
+    scanning the given StarlightGraph(s) (their _tt_nodes registry and
+    triples() for a DirLangString object), then calls
+    check_version_conformance().
+
+    Shared by StarlightGraph.parse()'s per-format branches (Turtle,
+    N-Triples/N-Quads, TriG, RDF/XML each pass graphs=[self]) and
+    StarlightDataset (passes graphs=self.contexts(), since a document-level
+    VERSION directive covers every named graph, not just one) - previously
+    each of those call sites duplicated this exact scan inline.
+    """
+    if declared_version is None:
+        return
+    from starlight.model.dirlangstring import DirLangString
+    graphs = list(graphs)
+    check_version_conformance(
+        declared_version,
+        uses_triple_term=any(bool(g._tt_nodes) for g in graphs),
+        uses_dirlangstring=any(
+            isinstance(o, DirLangString)
+            for g in graphs
+            for _, _, o in g.triples((None, None, None))
+        ),
+        context=context,
+        stacklevel=4,
+    )

@@ -1,12 +1,21 @@
 """
 W3C Turtle 1.2 conformance tests.
 
-Parametrized over w3c_turtle_tests/manifest.csv. For each test case:
-  1. Parse the .ttl input with StarlightTurtleParser.
-  2. Build the expected graph from the .nt file using parse_nt12(), which
-     expands the RDF 1.2 <<( )>> triple-term notation into the same
-     starlight internal blank-node encoding the parser produces.
-  3. Assert graph isomorphism (handles blank-node renaming automatically).
+Parametrized over tests/w3c/data/manifest.csv, which covers three test
+types from the two W3C-published manifests for RDF 1.2 Turtle:
+
+  rdft:TestTurtleEval           - parse the .ttl, compare against the
+                                   expected .nt (test_w3c_turtle_eval)
+  rdft:TestTurtlePositiveSyntax - must parse without raising, result
+                                   content not checked (test_w3c_turtle_
+                                   positive_syntax)
+  rdft:TestTurtleNegativeSyntax - must fail to parse (test_w3c_turtle_
+                                   negative_syntax)
+
+For Eval: build the expected graph from the .nt file using parse_nt12(),
+which expands the RDF 1.2 <<( )>> triple-term notation into the same
+starlight internal blank-node encoding the parser produces, then assert
+graph isomorphism (handles blank-node renaming automatically).
 """
 
 import csv
@@ -21,7 +30,7 @@ RDF_REIFIES = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 from starlight.parsers.turtle_parser import StarlightTurtleParser, SL_NS
 from starlight.parsers.lexer import next_token
 
-W3C_DIR  = pathlib.Path(__file__).parent.parent.parent / 'w3c_turtle_tests'
+W3C_DIR  = pathlib.Path(__file__).parent / 'data'
 MANIFEST = W3C_DIR / 'manifest.csv'
 
 SL_TRIPLE_TERM = URIRef(SL_NS + 'TripleTerm')
@@ -132,19 +141,33 @@ def parse_nt12(text):
 # ---------------------------------------------------------------------------
 
 def _load_manifest():
-    cases = []
+    """Split manifest.csv into three buckets by test_type - Eval needs a
+    matching .nt to compare against; Positive/NegativeSyntax only need the
+    .ttl to exist, since they test parse success/failure, not content."""
+    eval_cases, positive_cases, negative_cases = [], [], []
     with open(MANIFEST, newline='') as f:
         for row in csv.DictReader(f):
-            name     = row['test_name']
-            ttl_file = W3C_DIR / row['ttl_file']
-            nt_file  = W3C_DIR / row['nt_file']
-            if ttl_file.exists() and nt_file.exists():
-                cases.append(pytest.param(name, ttl_file, nt_file, id=name))
-    return cases
+            name      = row['test_name']
+            test_type = row['test_type']
+            ttl_file  = W3C_DIR / row['ttl_file']
+            if not ttl_file.exists():
+                continue
+            if test_type == 'rdft:TestTurtleEval':
+                nt_file = W3C_DIR / row['nt_file']
+                if nt_file.exists():
+                    eval_cases.append(pytest.param(name, ttl_file, nt_file, id=name))
+            elif test_type == 'rdft:TestTurtlePositiveSyntax':
+                positive_cases.append(pytest.param(name, ttl_file, id=name))
+            elif test_type == 'rdft:TestTurtleNegativeSyntax':
+                negative_cases.append(pytest.param(name, ttl_file, id=name))
+    return eval_cases, positive_cases, negative_cases
 
 
-@pytest.mark.parametrize('name,ttl_file,nt_file', _load_manifest())
-def test_w3c_turtle(name, ttl_file, nt_file, parser):
+_EVAL_CASES, _POSITIVE_CASES, _NEGATIVE_CASES = _load_manifest()
+
+
+@pytest.mark.parametrize('name,ttl_file,nt_file', _EVAL_CASES)
+def test_w3c_turtle_eval(name, ttl_file, nt_file, parser):
     result   = parser.parse(ttl_file.read_text())
     expected = parse_nt12(nt_file.read_text())
     assert isomorphic(result, expected), (
@@ -154,3 +177,21 @@ def test_w3c_turtle(name, ttl_file, nt_file, parser):
         + f"\n\nEXPECTED ({len(expected)} triples):\n"
         + '\n'.join(f'  {s!r} {p!r} {o!r}' for s, p, o in sorted(expected, key=str))
     )
+
+
+@pytest.mark.parametrize('name,ttl_file', _POSITIVE_CASES)
+def test_w3c_turtle_positive_syntax(name, ttl_file, parser):
+    """Must parse without raising - W3C TestTurtlePositiveSyntax only
+    requires successful parsing, not any specific result content."""
+    parser.parse(ttl_file.read_text())
+
+
+@pytest.mark.parametrize('name,ttl_file', _NEGATIVE_CASES)
+def test_w3c_turtle_negative_syntax(name, ttl_file, parser):
+    """Must fail to parse - W3C TestTurtleNegativeSyntax only requires
+    that parsing fails, not any specific exception type (most malformed
+    input raises TurtleSyntaxError, but a few constructs currently raise a
+    bare SyntaxError - see expand_qt_in_triple's subject-position check in
+    turtle_parser.py)."""
+    with pytest.raises(Exception):
+        parser.parse(ttl_file.read_text())

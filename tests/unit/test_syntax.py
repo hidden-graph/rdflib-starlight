@@ -84,6 +84,62 @@ class TestSplitStatements:
         assert len(stmts) == 1
 
 
+class TestSameLineStatements:
+    """Two or more statements crammed onto one physical line must still
+    split correctly - previously a '.' only counted as a statement
+    terminator when immediately followed by a newline, so anything after
+    it on the same line got silently merged into the preceding statement
+    and dropped (worst for a directive, whose regex-based field extractor
+    only matches its own leading portion and ignores the rest)."""
+
+    def test_two_triples_one_line(self):
+        stmts = split_statements(':a :b :c . :d :e :f .')
+        assert len(stmts) == 2
+        assert classify_statement(stmts[0]) == 'triple'
+        assert classify_statement(stmts[1]) == 'triple'
+
+    def test_dotted_prefix_then_triple_one_line(self):
+        stmts = split_statements('@prefix : <http://example.org/> . :a :knows :bob .')
+        assert len(stmts) == 2
+        assert classify_statement(stmts[0]) == 'prefix'
+        assert classify_statement(stmts[1]) == 'triple'
+
+    def test_multiple_dotted_prefixes_and_triples_one_line(self):
+        data = ('@prefix : <http://example.org/> . '
+                '@prefix ex: <http://example.com/> . '
+                ':a :knows ex:bob . :a :likes ex:carol .')
+        stmts = split_statements(data)
+        assert len(stmts) == 4
+        assert [classify_statement(s) for s in stmts] == ['prefix', 'prefix', 'triple', 'triple']
+
+    def test_decimal_literal_not_split(self):
+        """Guards the fix itself: a '.' terminates a statement unless
+        immediately followed by a digit (the decimal point of a DECIMAL/
+        DOUBLE literal like "3.14"), not "unless followed by a newline"."""
+        stmts = split_statements(':a :b 3.14 .\n')
+        assert len(stmts) == 1
+
+    def test_decimal_literal_then_another_statement_same_line(self):
+        stmts = split_statements(':a :b 3.14 . :c :d 5 .')
+        assert len(stmts) == 2
+
+    def test_dotless_prefix_still_works(self):
+        """Regression guard: @prefix/@base/@version may omit the trailing
+        '.' (existing, intentional leniency) - must still split correctly
+        against the following statement on the next line."""
+        data = '@prefix ex: <http://example.org/>\nex:s ex:p ex:o .\n'
+        stmts = split_statements(data)
+        assert len(stmts) == 2
+        assert classify_statement(stmts[0]) == 'prefix'
+        assert classify_statement(stmts[1]) == 'triple'
+
+    def test_dot_inside_iri_with_dots_not_split(self):
+        data = '@prefix ex: <http://example.com/path.with.dots#> . ex:a ex:b ex:c .'
+        stmts = split_statements(data)
+        assert len(stmts) == 2
+        assert stmts[0] == '@prefix ex: <http://example.com/path.with.dots#> .'
+
+
 class TestSplitStatementsWithLines:
     """split_statements_with_lines() - same split as split_statements(), plus
     each statement's approximate 1-based starting line number. Added for the
@@ -162,6 +218,24 @@ class TestExtractFields:
     def test_version_basic_label(self):
         fields = extract_fields('VERSION "1.2-basic"', 'version')
         assert fields['version'] == '1.2-basic'
+
+    def test_version_unquoted_rejected(self):
+        """VersionSpecifier ::= STRING_LITERAL_QUOTE | STRING_LITERAL_SINGLE_QUOTE
+        - a bare, unquoted value is not valid (W3C turtle12-version-bad-01/04)."""
+        with pytest.raises(TurtleSyntaxError):
+            extract_fields('VERSION 1.2', 'version')
+        with pytest.raises(TurtleSyntaxError):
+            extract_fields('@version 1.2 .', 'version')
+
+    def test_version_triple_quoted_rejected(self):
+        """The long/triple-quoted string forms are a different grammar
+        production, not valid here (W3C turtle12-version-bad-02/03/05/06)."""
+        with pytest.raises(TurtleSyntaxError):
+            extract_fields('VERSION """1.2"""', 'version')
+        with pytest.raises(TurtleSyntaxError):
+            extract_fields("VERSION '''1.2'''", 'version')
+        with pytest.raises(TurtleSyntaxError):
+            extract_fields('@version """1.2""" .', 'version')
 
     def test_simple_triple(self):
         fields = extract_fields(':s :p :o .', 'triple', [0])

@@ -1,5 +1,7 @@
 # StarlightGraph vs rdflib.Graph — Method Coverage Tracker
 
+*Last reviewed: 2026-07-17*
+
 Summary of all public `rdflib.Graph` methods and status in `StarlightGraph`.
 
 **Status key**
@@ -91,7 +93,7 @@ All rdflib formats are supported. Eight additional RDF 1.2 formats add TripleTer
 
 ✅ `g.print(...)` — Overridden to default to `turtle12`. Calling `g.print()` with no arguments produces clean RDF 1.2 output.
 
-> **Not all eight are spec-backed.** `turtle12`, `nt12`, `nq12`, `trig12`, `longturtle12`, and `rdfxml12` target real W3C companion documents to RDF 1.2 (Turtle, N-Triples, N-Quads, TriG, XML Syntax — longturtle is a pretty-printed Turtle variant). **`jsonld12` and `trix12` are not** — there is no W3C JSON-LD 1.2 spec, and TriX was never a W3C spec at all (RDF 1.1 or otherwise), just a long-standing HP Labs/Jena convention. Both extend their non-RDF-1.2 base format with starlight-invented conventions (an `rdf:TripleTerm` node shape, and a `dirlang:` datatype URI for `dirLangString`) that round-trip only through starlight's own parser/serializer for that format — not through any external JSON-LD or TriX tool. See `docs/rdf12_sparql12_gap_analysis.md` §6 and `docs/future_enhancements.md`'s "Keeping in step with RDF 1.2/SPARQL 1.2 as the spec finalizes" for what would need to change if either format ever does get a real spec target.
+> **Not all eight are spec-backed.** `turtle12`, `nt12`, `nq12`, `trig12`, `longturtle12`, and `rdfxml12` target real W3C companion documents to RDF 1.2 (Turtle, N-Triples, N-Quads, TriG, XML Syntax — longturtle is a pretty-printed Turtle variant). **`jsonld12` and `trix12` are not** — there is no W3C JSON-LD 1.2 spec, and TriX was never a W3C spec at all (RDF 1.1 or otherwise), just a long-standing HP Labs/Jena convention. `jsonld12` extends non-RDF-1.2 JSON-LD with a starlight-invented `rdf:TripleTerm` node shape and a `dirlang:` datatype URI for `dirLangString`, which round-trips only through starlight's own JSON-LD parser/serializer, not through any external tool. `trix12`, by contrast, was updated 2026-07-16 to match Apache Jena's real (undocumented-but-empirically-confirmed) TriX convention — lowercase `<trix>` root, a nested `<triple>` element for a triple term — so it now round-trips triple terms through live Fuseki's own TriX support too; the old `<TriX>`/`<tripleTerm>` spelling is still accepted on read for backward compatibility. See `docs/rdf12_sparql12_gap_analysis.md` §6 and `docs/future_enhancements.md`'s "Keeping in step with RDF 1.2/SPARQL 1.2 as the spec finalizes" for what would need to change if either format ever does get a real spec target.
 
 ---
 
@@ -111,7 +113,7 @@ All graph algorithms operate on the visible RDF 1.2 graph; encoding triples are 
 
 🔗 `g.connected()` — Uses `subjects()`.
 
-⚠️ `g.isomorphic(other)` — Uses `graph_diff` which iterates both graphs via `triples()`; TT URIRefs are content-addressed (same content = same URI) so identical TripleTerms match correctly. BNodes *inside* a TripleTerm are included in the hash and will not isomorphize across separately parsed graphs.  
+✅ `g.isomorphic(other)` — Overridden (previously just inherited `rdflib.Graph.isomorphic()`'s crude approximation, not `graph_diff` — that was a documentation error). Unfolds each graph's TripleTerms back to native BNode-based `rdf:subject`/`rdf:predicate`/`rdf:object` reification (mirroring the parser's own pre-skolemization intermediate form) before delegating to `rdflib.compare.isomorphic()`, the real canonical-labeling algorithm. A BNode embedded inside a TripleTerm is now treated as relabelable, the same as any other BNode, so two separately-parsed graphs that are the same shape but use different arbitrary BNode labels inside a triple term correctly isomorphize (previously didn't — see `CHANGELOG.md`).
 
 ✅ `g.cbd(resource, ...)` — Returns a `StarlightGraph` containing all triples for the given resource. Raises `TypeError` if a plain `rdflib.Graph` is passed as `target_graph`.
 
@@ -271,12 +273,8 @@ Module-level functions that are part of the internal encoding but not public API
 
 ## Summary
 
-✅ Done — 36 (13 rdflib.Graph methods overridden; 10 RDF 1.2 additions; 13 Starlight classes/functions)
+✅ Done — 37 (14 rdflib.Graph methods overridden; 10 RDF 1.2 additions; 13 Starlight classes/functions)
 🔗 Inherited (works) — 13
-⚠️ Partial / caveats — 1 (see below)
 ➖ Not relevant — 20
 
-
-### Known caveat
-
-- **`isomorphic`** — TripleTerms with BNodes inside them are content-addressed and will not isomorphize across separately parsed graphs (expected RDF 1.2 semantics, but worth noting).
+No known caveats — the `isomorphic()` BNode-in-TripleTerm gap noted here previously is resolved (see the `isomorphic()` row above and `CHANGELOG.md`).

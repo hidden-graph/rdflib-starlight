@@ -14,7 +14,6 @@ triples to `[ ]`, losing their ID).
 
 from collections import defaultdict
 from rdflib import BNode, URIRef, Literal
-from rdflib.namespace import RDF
 
 from starlight.model.triple import TripleTerm
 from starlight.model.dirlangstring import DirLangString

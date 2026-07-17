@@ -62,6 +62,14 @@ def _is_qt(val):
     return _is_qt_term(val) or _is_qt_reif(val)
 
 
+def _is_bnode_list(val):
+    """True if val is `[ ... ]` anonymous blank-node property-list syntax."""
+    if not isinstance(val, str):
+        return False
+    s = val.strip()
+    return s.startswith('[') and s.endswith(']')
+
+
 def _has_reifier(val):
     """True if val is << s p o ~ r >> (inline reifier)."""
     if not isinstance(val, str):
@@ -105,6 +113,15 @@ def _norm_qt(val):
         suffix, r3 = _lexer.next_token(r3)
         to += suffix
         r3 = r3.strip()
+    if r3.strip():
+        # RDF 1.2 grammar: reifiedTriple/tripleTerm hold exactly subject,
+        # predicate, object - nothing more (e.g. "<< :g :s :p :o >>" is an
+        # over-long reified triple, not a 4-term form of anything).
+        raise TurtleSyntaxError(
+            f'too many terms inside <<...>>/<<(...)>> - expected exactly subject, '
+            f'predicate, object, found extra {r3.strip()!r}',
+            val, pos=0,
+        )
     return f'<<( {ts} {tp} {to} )>>'
 
 
@@ -122,9 +139,33 @@ def _unescape(s):
             elif c == "'":  result.append("'");  i += 2
             elif c == '\\': result.append('\\'); i += 2
             elif c == 'u' and i + 5 <= len(s):
-                result.append(chr(int(s[i+2:i+6], 16))); i += 6
+                hex4 = s[i+2:i+6]
+                cp = int(hex4, 16)
+                if 0xD800 <= cp <= 0xDFFF:
+                    # Turtle's UCHAR directly encodes a Unicode codepoint;
+                    # the UTF-16 surrogate range is excluded (surrogates
+                    # are a UTF-16 encoding artifact, not a standalone
+                    # codepoint) - not even a well-formed high+low
+                    # surrogate *pair* combines into one, unlike JSON/JS
+                    # \u escapes. Confirmed via the W3C RDF 1.2 Turtle
+                    # syntax test suite (turtle12-surrogate*,
+                    # turtle12-surrogates-bad-* - see tests/w3c/).
+                    raise TurtleSyntaxError(
+                        f'\\u{hex4} is a UTF-16 surrogate codepoint (U+D800-U+DFFF), '
+                        f'not valid as a standalone Unicode codepoint in a \\u escape (RDF 1.2)',
+                        s, pos=i,
+                    )
+                result.append(chr(cp)); i += 6
             elif c == 'U' and i + 9 <= len(s):
-                result.append(chr(int(s[i+2:i+10], 16))); i += 10
+                hex8 = s[i+2:i+10]
+                cp = int(hex8, 16)
+                if 0xD800 <= cp <= 0xDFFF:
+                    raise TurtleSyntaxError(
+                        f'\\U{hex8} is a UTF-16 surrogate codepoint (U+D800-U+DFFF), '
+                        f'not valid as a standalone Unicode codepoint in a \\U escape (RDF 1.2)',
+                        s, pos=i,
+                    )
+                result.append(chr(cp)); i += 10
             else:
                 result.append('\\'); result.append(c); i += 2
         else:
@@ -197,7 +238,13 @@ def _to_node(val, prefix_map, base_uri):
                 # instead - decoded back to DirLangString at the StarlightGraph
                 # boundary (see starlight.model.dirlangstring).
                 language, _, direction = suffix.rpartition('--')
-                direction = direction.lower()
+                # RDF 1.2 Concepts sec 3.4: base direction MUST be exactly
+                # "ltr" or "rtl" - lowercase only, no case-insensitive
+                # matching (unlike the language tag itself, which RDF 1.2
+                # Concepts sec 3.4.1 does case-fold). Confirmed via the W3C
+                # RDF 1.2 Turtle syntax test suite (nt-ttl12-langdir-bad-2,
+                # "Hello"@en--LTR - see tests/w3c/): must be rejected, not
+                # silently lowercased and accepted.
                 if direction not in ('ltr', 'rtl'):
                     raise ValueError(
                         f'RDF 1.2: base direction must be "ltr" or "rtl", got {direction!r} in @{suffix}'
@@ -254,6 +301,24 @@ class _Expander:
         self.blank_counter[0] += 1
         return n
 
+    def _require_plain_blank_node(self, val, role):
+        """A `[ ... ]` triple-term/reified-triple component must be an
+        *empty* anonymous blank node (RDF 1.2 grammar: ttSubject/rtSubject/
+        ttObject/rtObject all admit `BlankNode`, which is BLANK_NODE_LABEL
+        or ANON - i.e. a bare `_:label` or empty `[]` - never a
+        blankNodePropertyList carrying its own properties, e.g.
+        `[ :p :o ]`). Raises if non-empty; otherwise mints and returns a
+        fresh, plain blank node label for the empty-`[]` case.
+        """
+        inner = val.strip()[1:-1].strip()
+        if inner:
+            raise TurtleSyntaxError(
+                f'a blank node with properties is not valid as a triple-term/reified-triple '
+                f'{role} (RDF 1.2) - only a plain blank node (_:label or []) is allowed here',
+                val, pos=0,
+            )
+        return self._alloc()
+
     def qt_to_json(self, qt_str):
         """Return (term_bnode_str, [extra_triples]) for a <<( s p o )>> term.
         Identical triple terms reuse the same bnode via qt_cache."""
@@ -273,13 +338,33 @@ class _Expander:
         if pred_str == 'a':
             pred_str = 'rdf:type'
 
+        # RDF 1.2 grammar: the middle "verb" slot of a tripleTerm/
+        # reifiedTriple is always an iri (via PrefixedName/IRIREF/'a') -
+        # never a literal, blank node, or nested <<...>>/<<(...)>>.
+        if _is_qt(pred_str) or pred_str.strip().startswith(('"', "'", '_:', '[')):
+            raise TurtleSyntaxError(
+                'only an IRI is valid as a triple-term/reified-triple predicate (RDF 1.2)',
+                pred_str, pos=0,
+            )
+
         extras = []
         if _is_qt(subj_str):
             subj_str, e = self.qt_to_json(_norm_qt(subj_str))
             extras.extend(e)
+        elif _is_bnode_list(subj_str):
+            subj_str = self._require_plain_blank_node(subj_str, 'subject')
+        elif subj_str.strip().startswith(('"', "'")):
+            raise TurtleSyntaxError(
+                'a literal is not valid as a triple-term/reified-triple subject (RDF 1.2) '
+                '- must be an IRI or blank node',
+                subj_str, pos=0,
+            )
+
         if _is_qt(obj_str):
             obj_str, e = self.qt_to_json(_norm_qt(obj_str))
             extras.extend(e)
+        elif _is_bnode_list(obj_str):
+            obj_str = self._require_plain_blank_node(obj_str, 'object')
         else:
             obj_str = _syntax.coerce_object(obj_str) if obj_str else ''
 
@@ -305,6 +390,13 @@ class _Expander:
         """Expand quoted-triple syntax in subject and object positions.
         Returns (s, p, o, extra_triples)."""
         extras = []
+
+        if _is_qt(p):
+            raise TurtleSyntaxError(
+                'a triple term <<(...)>> or reified-triple shorthand <<...>> is not '
+                'valid in predicate position (RDF 1.2 - verb is always an IRI)',
+                p, pos=0,
+            )
 
         if _is_qt_term(s):
             raise SyntaxError(

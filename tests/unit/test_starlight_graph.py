@@ -521,3 +521,92 @@ class TestNativeConstruct:
         assert mock_post.called
         call_url = mock_post.call_args[0][0]
         assert 'update' in call_url
+
+
+# ---------------------------------------------------------------------------
+# isomorphic() — BNodes embedded inside a TripleTerm must be relabelable
+# ---------------------------------------------------------------------------
+
+class TestIsomorphic:
+    def test_same_shape_different_bnode_labels(self):
+        """Two separately-parsed graphs, same shape, different arbitrary
+        BNode labels inside a triple term - must compare as isomorphic
+        (this was the documented caveat / bug this override fixes)."""
+        g1 = StarlightGraph()
+        g1.parse(data='''
+            @prefix : <http://example.org/> .
+            :a :says <<( _:x :knows :carol )>> .
+            _:x :name "Bob" .
+        ''', format='turtle12')
+        g2 = StarlightGraph()
+        g2.parse(data='''
+            @prefix : <http://example.org/> .
+            :a :says <<( _:differentlabel :knows :carol )>> .
+            _:differentlabel :name "Bob" .
+        ''', format='turtle12')
+        assert g1.isomorphic(g2)
+
+    def test_genuinely_different_graphs_not_isomorphic(self):
+        """Guard against over-permissiveness: a real structural difference
+        must still compare as not isomorphic."""
+        g1 = StarlightGraph()
+        g1.parse(data='''
+            @prefix : <http://example.org/> .
+            :a :says <<( _:x :knows :carol )>> .
+            _:x :name "Bob" .
+        ''', format='turtle12')
+        g2 = StarlightGraph()
+        g2.parse(data='''
+            @prefix : <http://example.org/> .
+            :a :says <<( _:x :knows :dave )>> .
+            _:x :name "Bob" .
+        ''', format='turtle12')
+        assert not g1.isomorphic(g2)
+
+    def test_nested_triple_term_with_bnode(self):
+        """A BNode inside a nested (triple-term-in-triple-term) component
+        must also be treated as relabelable."""
+        g1 = StarlightGraph()
+        g1.parse(data='''
+            @prefix : <http://example.org/> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+            :r rdf:reifies <<( :a :believes <<( _:x :knows :carol )>> )>> .
+            _:x :name "Bob" .
+        ''', format='turtle12')
+        g2 = StarlightGraph()
+        g2.parse(data='''
+            @prefix : <http://example.org/> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+            :r rdf:reifies <<( :a :believes <<( _:other :knows :carol )>> )>> .
+            _:other :name "Bob" .
+        ''', format='turtle12')
+        assert g1.isomorphic(g2)
+
+    def test_no_triple_terms_still_works(self):
+        """Plain graphs with no tt: content at all - the unfold is a no-op,
+        ordinary rdflib isomorphism still applies."""
+        g1 = StarlightGraph()
+        g1.parse(data='@prefix : <http://example.org/> .\n:a :knows :bob .\n', format='turtle12')
+        g2 = StarlightGraph()
+        g2.parse(data='@prefix : <http://example.org/> .\n:a :knows :bob .\n', format='turtle12')
+        assert g1.isomorphic(g2)
+        g3 = StarlightGraph()
+        g3.parse(data='@prefix : <http://example.org/> .\n:a :knows :carol .\n', format='turtle12')
+        assert not g1.isomorphic(g3)
+
+
+# ---------------------------------------------------------------------------
+# Statements crammed onto one physical line must not be silently dropped
+# ---------------------------------------------------------------------------
+
+class TestSameLineParsing:
+    def test_prefix_and_triple_same_line(self):
+        sg = StarlightGraph()
+        sg.parse(data='@prefix : <http://example.org/> . :a :knows :bob .', format='turtle12')
+        assert len(sg) == 1
+        assert (URIRef(EX + 'a'), URIRef(EX + 'knows'), URIRef(EX + 'bob')) in sg
+
+    def test_two_triples_same_line(self):
+        sg = StarlightGraph()
+        sg.parse(data='@prefix : <http://example.org/> .\n:a :b :c . :d :e :f .', format='turtle12')
+        assert len(sg) == 2
