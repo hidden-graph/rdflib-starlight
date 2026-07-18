@@ -28,11 +28,15 @@ Typical usage::
 
 from __future__ import annotations
 
+import re
 import weakref
 from rdflib import Dataset, Graph, URIRef, BNode
 from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 
-from starlight.graph.starlight_graph import StarlightGraph, VALID_BACKENDS, _raw_triples, _read_source_text
+from starlight.graph.starlight_graph import (
+    StarlightGraph, VALID_BACKENDS, _raw_triples, _read_source_text, _resolve_store_http,
+    _check_native_version_conformance,
+)
 from starlight.model.encoding import TT_NS, ENCODING_PREDS as _ENCODING_PREDS, restore_select_bindings
 
 _raw_graph_add = Graph.add
@@ -240,9 +244,23 @@ class StarlightDataset(Dataset):
             for graph_id, triples, namespaces in parse_trig12_named(text):
                 identifier = DATASET_DEFAULT_GRAPH_ID if graph_id is None else graph_id
                 sg = self._load_context(identifier, namespaces)
-                for triple in triples:
-                    _raw_graph_add(sg, triple)
-                sg._build_registry_from_store()
+                if sg._is_native:
+                    # parse_trig12_named() returns the rdf-1.1 backend's own
+                    # tt:HASH encoding (same as parse_trig12(), see
+                    # StarlightGraph.parse()'s trig12 branch) - decode back
+                    # into real TripleTerm objects before sg.add() so a
+                    # native-backend context gets its real <<( )>> encoding
+                    # via _native_add(), not the flat encoding fragments.
+                    from starlight.parsers.turtle_parser import decode_tt_encoded_triples
+                    skolemized = Graph()
+                    for triple in triples:
+                        skolemized.add(triple)
+                    for triple in decode_tt_encoded_triples(skolemized):
+                        sg.add(triple)
+                else:
+                    for triple in triples:
+                        _raw_graph_add(sg, triple)
+                    sg._build_registry_from_store()
                 self._register_sg(sg)
             self._check_document_version_conformance(_trig_version(text), context='TriG document')
 
@@ -324,6 +342,46 @@ class StarlightDataset(Dataset):
         self._raw_execution_graph = raw
         return raw
 
+    def _native_query(self, query_object, processor='sparql', result='sparql',
+                      initNs=None, initBindings=None, use_store_provided=True, **kwargs):
+        """Native (rdf-1.2) backend query dispatch — the dataset-level
+        equivalent of StarlightGraph._native_query().
+
+        A native-backed dataset's per-context StarlightGraphs all share one
+        underlying store (get_context() passes store=self.store), so the
+        whole dataset already lives in a single remote endpoint, organized
+        into named graphs there exactly as SPARQL dataset semantics expect.
+        StarlightGraph._native_query() sends its query text straight through
+        with no per-graph scoping of its own (graph scoping comes from
+        whatever GRAPH clauses the query text itself contains) - so reusing
+        the same HTTP helpers here (rather than routing through any specific
+        context) is correct for cross-graph queries, not a shortcut.
+        """
+        from starlight.backends.native import http_select, http_ask, http_construct, build_result
+        q_url, _, hdrs = _resolve_store_http(self.store, self._backend)
+
+        sparql = query_object
+        _qt = re.search(r'\b(ASK|CONSTRUCT|DESCRIBE)\b', sparql, re.IGNORECASE)
+        query_type = _qt.group(1).upper() if _qt else 'SELECT'
+
+        if query_type == 'ASK':
+            from rdflib.query import Result as RDFResult
+            r = RDFResult('ASK')
+            r.askAnswer = http_ask(q_url, sparql, hdrs)
+            return r
+
+        if query_type in ('CONSTRUCT', 'DESCRIBE'):
+            from rdflib.query import Result as RDFResult
+            body, _ = http_construct(q_url, sparql, hdrs)
+            g = StarlightGraph()
+            g.parse(data=body.decode('utf-8'), format='turtle12')
+            r = RDFResult('CONSTRUCT')
+            r.graph = g
+            return r
+
+        vars_, bindings = http_select(q_url, sparql, hdrs)
+        return build_result(vars_, bindings)
+
     def query(self, query_object, processor='sparql', result='sparql',
               initNs=None, initBindings=None, use_store_provided=True, **kwargs):
         """Execute a SPARQL query across all named graphs with SPARQL-star support.
@@ -337,7 +395,22 @@ class StarlightDataset(Dataset):
         (query text, effective namespaces, base) - not cleared on
         parse()/update() unlike ``_raw_execution_graph``, since a query's
         parse tree depends only on its own text, not on graph content.
+
+        For the native rdf-1.2 backend the query is routed through
+        _native_query, same as StarlightGraph.query() - _build_raw_execution_graph()'s
+        plain-Graph-copy approach can't represent real triple-term-valued
+        bindings (rdflib's SPARQL JSON result parsing doesn't understand
+        "type":"triple"; see starlight.backends.native's module docstring).
         """
+        if self._backend == 'rdf-1.2':
+            if isinstance(query_object, str):
+                _check_native_version_conformance(query_object)
+            return self._native_query(
+                query_object, processor=processor, result=result,
+                initNs=initNs, initBindings=initBindings,
+                use_store_provided=use_store_provided, **kwargs,
+            )
+
         if isinstance(query_object, str):
             from starlight.query.query_cache import prepare_query_cached
             effective_ns = initNs if initNs else dict(self.namespaces())
@@ -358,22 +431,58 @@ class StarlightDataset(Dataset):
                initNs=None, initBindings=None, use_store_provided=True, **kwargs):
         """Execute a SPARQL UPDATE across named graphs with SPARQL-star support.
 
-        Triple-term patterns in WHERE clauses are rewritten to SPARQL 1.1.
-        All cached per-graph registries are rebuilt after execution so that
-        newly added triple terms are immediately visible.
+        Triple-term patterns in WHERE clauses are rewritten to SPARQL 1.1
+        (rdf-1.1 backend only — see below). All cached per-graph registries
+        are rebuilt after execution so that newly added triple terms are
+        immediately visible.
 
         Limitation: ground ``<<( )>>`` inside ``INSERT DATA { GRAPH <uri> { } }``
         blocks is not supported — use ``ds.get_context(uri).add(triple)`` instead.
+
+        Remote-store (Fuseki/Oxigraph) updates bypass rdflib's own
+        ``Dataset(store=...).update()`` and are sent over HTTP directly (see
+        ``starlight.backends.native.http_update``) — same as
+        ``StarlightGraph.update()``'s native-backend path, but needed here for
+        *both* backends: rdflib's ``SPARQLStore._is_contextual()`` treats any
+        string graph identifier other than the literal ``"__UNION__"`` as
+        needing a wrapping ``GRAPH { }`` block, and doesn't special-case
+        ``Dataset``'s own ``DATASET_DEFAULT_GRAPH_ID`` sentinel (a ``URIRef``,
+        which subclasses ``str``) - so ``Dataset.update()`` always wrapped the
+        *entire* update text in an extra ``GRAPH <urn:x-rdflib:default> { }``
+        block, which nests illegally around any update that already has its
+        own ``GRAPH <uri> { }`` clause (the normal way to target a named graph
+        from dataset-level SPARQL). Confirmed via real Oxigraph and Fuseki
+        testing: a plain ``INSERT DATA { GRAPH <uri> {...} }`` with no triple
+        terms at all got a 400 from both. For the rdf-1.2 backend the update
+        text is sent unmodified (the endpoint understands ``<<( )>>``
+        natively); for rdf-1.1 it is still rewritten to the tt:HASH encoding
+        first, same as before.
         """
-        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
-        if isinstance(update_object, str):
-            update_object = rewrite_sparql12_to_11(update_object)
-        raw = Dataset(store=self.store)
-        for prefix, ns in self.namespaces():
-            raw.bind(prefix, ns)
-        raw.update(update_object, processor=processor,
-                   initNs=initNs, initBindings=initBindings,
-                   use_store_provided=use_store_provided, **kwargs)
+        is_remote_http_store = bool(
+            getattr(self.store, 'query_endpoint', None) and getattr(self.store, 'update_endpoint', None)
+        )
+        if not is_remote_http_store:
+            from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+            if isinstance(update_object, str):
+                update_object = rewrite_sparql12_to_11(update_object)
+            raw = Dataset(store=self.store)
+            for prefix, ns in self.namespaces():
+                raw.bind(prefix, ns)
+            raw.update(update_object, processor=processor,
+                       initNs=initNs, initBindings=initBindings,
+                       use_store_provided=use_store_provided, **kwargs)
+        else:
+            from starlight.backends.native import http_update
+            text = update_object
+            if self._backend == 'rdf-1.2':
+                if isinstance(text, str):
+                    _check_native_version_conformance(text)
+            else:
+                from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+                if isinstance(text, str):
+                    text = rewrite_sparql12_to_11(text)
+            _, u_url, hdrs = _resolve_store_http(self.store, self._backend)
+            http_update(u_url, text, hdrs)
         for sg in self._sg_cache.values():
             sg._build_registry_from_store()
         self._raw_execution_graph = None

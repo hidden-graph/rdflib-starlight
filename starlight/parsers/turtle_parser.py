@@ -540,6 +540,56 @@ def _skolemize_encoding(g: Graph) -> Graph:
     return new_g
 
 
+def decode_tt_encoded_triples(g: Graph):
+    """Reverse ``_skolemize_encoding``'s tt:HASH encoding, yielding real
+    ``(s, p, o)`` triples with any tt:HASH-encoded triple-term value
+    restored to a proper ``TripleTerm`` object (nested triple terms
+    restored recursively).
+
+    ``_skolemize_encoding``'s output is written directly into the store
+    for the rdf-1.1 backend (its content-addressed tt:HASH URIs *are* that
+    backend's own on-disk encoding, so no further translation is needed -
+    ``super().add()`` is correct there and untouched by this function).
+    But that same flat, pre-encoded shape is wrong for the native rdf-1.2
+    backend, which needs real ``TripleTerm`` objects handed to
+    ``StarlightGraph.add()`` so its own ``_native_add()`` can write them
+    using the backend's real ``<<( )>>`` syntax - this function is the
+    bridge that makes that possible, used only on the native-backend path
+    (see ``StarlightGraph.parse()``).
+
+    Reifier skolemization (``rr:N`` URIs standing in for anonymous ``~``
+    reifiers) is left untouched - those are ordinary stable node
+    identifiers, not triple-term encodings, and need no decoding.
+    """
+    from starlight.model.triple import TripleTerm
+
+    tt_nodes: dict = {}
+
+    def reconstruct(uri):
+        if uri in tt_nodes:
+            return tt_nodes[uri]
+        s_n = next((o for _, _, o in g.triples((uri, RDF.subject, None))), None)
+        p_n = next((o for _, _, o in g.triples((uri, RDF.predicate, None))), None)
+        o_n = next((o for _, _, o in g.triples((uri, RDF.object, None))), None)
+        s = reconstruct(s_n) if isinstance(s_n, URIRef) and str(s_n).startswith(TT_NS) else s_n
+        o = reconstruct(o_n) if isinstance(o_n, URIRef) and str(o_n).startswith(TT_NS) else o_n
+        tt = TripleTerm(s, p_n, o)
+        tt_nodes[uri] = tt
+        return tt
+
+    tt_uris = frozenset(
+        s for s, _, _ in g.triples((None, RDF.subject, None))
+        if isinstance(s, URIRef) and str(s).startswith(TT_NS)
+    )
+
+    for s, p, o in g:
+        if s in tt_uris and p in (RDF.subject, RDF.predicate, RDF.object):
+            continue  # the encoding fragment itself, not a real triple
+        s_out = reconstruct(s) if s in tt_uris else s
+        o_out = reconstruct(o) if o in tt_uris else o
+        yield (s_out, p, o_out)
+
+
 class StarlightTurtleParser:
 
     def parse(self, data: str, debug: bool = False) -> Graph:

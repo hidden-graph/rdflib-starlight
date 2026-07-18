@@ -170,3 +170,73 @@ def test_dataset_query_correct_across_repeated_calls_with_bindings():
     for focus, expected in [(EX.alice, EX.bob), (EX.bob, EX.carol)]:
         rows = list(ds.query(q, initNs={"ex": EX}, initBindings={"this": focus, "g": EX.g1}))
         assert rows == [(expected,)]
+
+
+# ---------------------------------------------------------------------------
+# store_accepts_prepared_query / SPARQLUpdateStore fallback
+#
+# Confirmed via real Fuseki testing (not just code reading) that
+# rdflib.plugins.stores.sparqlstore.SPARQLStore/SPARQLUpdateStore - used for
+# *any* remote HTTP SPARQL endpoint, not just Fuseki - hard-require a plain
+# query string in their own query() method (assert isinstance(query, str)),
+# raising AssertionError when handed the prepared Query object
+# prepare_query_cached produces. StarlightGraph.query() must detect this and
+# fall back to a plain string for these stores; the default in-memory Memory
+# store (and StarlightDataset.query(), which always executes against its own
+# always-in-memory _build_raw_execution_graph() regardless of self.store) are
+# unaffected and should keep using the prepared-object optimization.
+# ---------------------------------------------------------------------------
+
+
+def test_store_accepts_prepared_query_false_for_sparql_update_store():
+    from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
+
+    from starlight.query.query_cache import store_accepts_prepared_query
+
+    store = SPARQLUpdateStore(query_endpoint="http://fake.local/query", update_endpoint="http://fake.local/update")
+    assert store_accepts_prepared_query(store) is False
+
+
+def test_store_accepts_prepared_query_true_for_default_memory_store():
+    from rdflib.plugins.stores.memory import Memory
+
+    from starlight.query.query_cache import store_accepts_prepared_query
+
+    assert store_accepts_prepared_query(Memory()) is True
+
+
+def test_starlight_graph_over_sparql_update_store_falls_back_to_string(monkeypatch, counting_prepare_query):
+    """A StarlightGraph backed directly by a SPARQLUpdateStore (the rdf-1.1
+    encoding path, not the native rdf-1.2 backend, which bypasses this code
+    entirely) must not call prepare_query_cached at all - only the plain
+    rewrite - since the prepared Query object it would produce can't safely
+    reach this store's own query() method.
+    """
+    from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
+
+    from starlight.graph.starlight_graph import StarlightGraph
+
+    store = SPARQLUpdateStore(query_endpoint="http://fake.local/query", update_endpoint="http://fake.local/update")
+    sg = StarlightGraph(store=store)
+    sg.bind("ex", EX)
+
+    # A real network call would hang/fail against fake.local - patch
+    # Graph.query (rdflib's own base class) to capture what gets passed
+    # through, without actually executing a request.
+    import rdflib
+
+    captured = {}
+
+    def fake_graph_query(self, query_object, **kwargs):
+        captured["query_object"] = query_object
+        raise RuntimeError("stop before any real network call")
+
+    monkeypatch.setattr(rdflib.Graph, "query", fake_graph_query)
+
+    try:
+        sg.query("SELECT ?o WHERE { ex:a ex:p ?o }", initNs={"ex": EX})
+    except RuntimeError:
+        pass
+
+    assert isinstance(captured.get("query_object"), str)
+    assert counting_prepare_query["n"] == 0

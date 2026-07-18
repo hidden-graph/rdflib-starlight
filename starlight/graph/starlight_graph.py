@@ -121,6 +121,30 @@ def _check_native_version_conformance(text: str) -> None:
     )
 
 
+def _resolve_store_http(store, backend: str) -> tuple:
+    """Return (query_url, update_url, extra_headers) from a native-backend store.
+
+    SPARQLUpdateStore pre-encodes credentials as an Authorization header in
+    store.kwargs['headers'] rather than exposing a raw auth tuple. Raises
+    RuntimeError if the store does not expose HTTP endpoints (e.g. in-memory
+    stores). Shared by StarlightGraph._store_http() and StarlightDataset's
+    own native-backend query dispatch - a dataset's per-context
+    StarlightGraphs all share the same underlying store (see
+    StarlightDataset.get_context()), so there is exactly one store to resolve
+    per dataset, same as for a single graph.
+    """
+    q = getattr(store, 'query_endpoint', None)
+    u = getattr(store, 'update_endpoint', None)
+    if not q or not u:
+        raise RuntimeError(
+            f"backend={backend!r} requires a store with query_endpoint "
+            f"and update_endpoint (e.g. SPARQLUpdateStore); "
+            f"got {type(store).__name__}"
+        )
+    extra_headers = getattr(store, 'kwargs', {}).get('headers', {})
+    return q, u, extra_headers
+
+
 def _read_source_text(source=None, file=None, location=None, data=None) -> str:
     """Resolve rdflib's four parse() source arguments to a single text string.
 
@@ -179,22 +203,12 @@ class StarlightGraph(Graph):
     def _store_http(self) -> tuple:
         """Return (query_url, update_url, extra_headers) from the backing store.
 
-        SPARQLUpdateStore pre-encodes credentials as an Authorization header
-        in store.kwargs['headers'] rather than exposing a raw auth tuple.
         Raises RuntimeError if the store does not expose HTTP endpoints
-        (e.g. in-memory stores).
+        (e.g. in-memory stores). See _resolve_store_http() - shared with
+        StarlightDataset's own native-backend dispatch, since a dataset's
+        contexts all share the same underlying store.
         """
-        store = self.store
-        q = getattr(store, 'query_endpoint', None)
-        u = getattr(store, 'update_endpoint', None)
-        if not q or not u:
-            raise RuntimeError(
-                f"backend={self._backend!r} requires a store with query_endpoint "
-                f"and update_endpoint (e.g. SPARQLUpdateStore); "
-                f"got {type(store).__name__}"
-            )
-        extra_headers = getattr(store, 'kwargs', {}).get('headers', {})
-        return q, u, extra_headers
+        return _resolve_store_http(self.store, self._backend)
 
     def _native_add(self, s, p, obj) -> None:
         from starlight.backends.native import sparql_term, http_update
@@ -873,9 +887,21 @@ class StarlightGraph(Graph):
                 processed = _skolemize_encoding(raw)
                 for prefix, ns in processed.namespaces():
                     self.bind(prefix, ns)
-                for triple in processed:
-                    super().add(triple)
-                self._build_registry_from_store()
+                if self._is_native:
+                    # _skolemize_encoding's output is the rdf-1.1 backend's
+                    # own tt:HASH on-disk encoding - correct to write
+                    # verbatim via super().add() below, but wrong for the
+                    # native backend, which needs real TripleTerm objects
+                    # routed through self.add() (-> _native_add()) so they
+                    # get written using the backend's real <<( )>> syntax,
+                    # not the flat encoding-triple fragments.
+                    from starlight.parsers.turtle_parser import decode_tt_encoded_triples
+                    for triple in decode_tt_encoded_triples(processed):
+                        self.add(triple)
+                else:
+                    for triple in processed:
+                        super().add(triple)
+                    self._build_registry_from_store()
 
                 from starlight.model.conformance import check_version_conformance_for_graphs
                 check_version_conformance_for_graphs(
@@ -901,9 +927,22 @@ class StarlightGraph(Graph):
 
             elif format == 'trig12':
                 from starlight.parsers.trig12 import parse_trig12, extract_version_directive as _trig_version
-                for triple in parse_trig12(text):
-                    super().add(triple)
-                self._build_registry_from_store()
+                if self._is_native:
+                    # Same rationale as the turtle12/longturtle12 branch
+                    # above - parse_trig12() returns the rdf-1.1 backend's
+                    # own tt:HASH encoding, which needs decoding back into
+                    # real TripleTerm objects before self.add() can write
+                    # them using the native backend's real <<( )>> syntax.
+                    from starlight.parsers.turtle_parser import decode_tt_encoded_triples
+                    skolemized = Graph()
+                    for triple in parse_trig12(text):
+                        skolemized.add(triple)
+                    for triple in decode_tt_encoded_triples(skolemized):
+                        self.add(triple)
+                else:
+                    for triple in parse_trig12(text):
+                        super().add(triple)
+                    self._build_registry_from_store()
 
                 from starlight.model.conformance import check_version_conformance_for_graphs
                 check_version_conformance_for_graphs(_trig_version(text), [self], context='TriG document')
@@ -971,11 +1010,25 @@ class StarlightGraph(Graph):
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
         if isinstance(query_object, str):
-            from starlight.query.query_cache import prepare_query_cached
-            effective_ns = initNs if initNs else dict(self.namespaces())
-            query_object = prepare_query_cached(
-                self._prepared_query_cache, query_object, effective_ns, kwargs.get('base')
-            )
+            from starlight.query.query_cache import store_accepts_prepared_query
+            if store_accepts_prepared_query(self.store):
+                from starlight.query.query_cache import prepare_query_cached
+                effective_ns = initNs if initNs else dict(self.namespaces())
+                query_object = prepare_query_cached(
+                    self._prepared_query_cache, query_object, effective_ns, kwargs.get('base')
+                )
+            else:
+                # Some store implementations (rdflib's own SPARQLStore/
+                # SPARQLUpdateStore, used for remote endpoints like Fuseki)
+                # only accept a plain query string, not a pre-parsed Query
+                # object - confirmed via real Fuseki testing (AssertionError
+                # in sparqlstore.py). The prepared-object caching win doesn't
+                # apply here anyway: these stores forward the query text to
+                # a remote server, so local rdflib-side re-parsing was never
+                # the bottleneck. Falls back to exactly the pre-caching
+                # behavior for these stores.
+                from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+                query_object = rewrite_sparql12_to_11(query_object)
         init_bindings = self._encode_init_bindings(initBindings)
         r = raw.query(query_object, processor=processor, result=result,
                       initNs=initNs, initBindings=init_bindings,

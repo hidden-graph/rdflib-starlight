@@ -23,7 +23,7 @@ from rdflib import URIRef, Literal
 from rdflib.namespace import XSD
 from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
 
-from starlight.graph import StarlightGraph
+from starlight.graph import StarlightGraph, StarlightDataset
 from starlight.model.triple import TripleTerm
 
 # Applies the "integration" marker (declared in pyproject.toml) to every test
@@ -312,6 +312,41 @@ class TestFusekiNativeRdf12:
         sg_rdf12.add((URIRef(EX+'stmt1'), RDF_REIF, tt))
         r = sg_rdf12.query(f'CONSTRUCT {{ ?s ?p ?o }} WHERE {{ GRAPH <{GRAPH_URI}> {{ ?s ?p ?o }} }}')
         assert (URIRef(EX+'stmt1'), RDF_REIF, tt) in r.graph
+
+
+@fuseki
+class TestFusekiDatasetUpdate:
+    """StarlightDataset.update() against a remote store 400'd on any update
+    text containing its own GRAPH <uri> {} clause, for *both* backends -
+    rdflib's Dataset(store=...).update() always wraps the whole update in an
+    extra GRAPH <urn:x-rdflib:default> {} block regardless, nesting illegally
+    around one already present. Confirmed here (not just against Oxigraph)
+    with a plain INSERT DATA containing no triple terms at all, on both
+    rdf-1.1 and rdf-1.2. See TestOxigraphDatasetUpdate for the fuller
+    rationale.
+    """
+
+    def _dataset(self, backend):
+        _clear_graph()
+        return StarlightDataset(store=_make_store(), backend=backend)
+
+    @pytest.mark.parametrize('backend', ['rdf-1.1', 'rdf-1.2'])
+    def test_insert_data_with_graph_clause(self, backend):
+        ds = self._dataset(backend)
+        ds.update(f'INSERT DATA {{ GRAPH <{GRAPH_URI}> {{ <{EX}a> <{EX}b> <{EX}c> . }} }}')
+        g1 = ds.get_context(GRAPH_URI)
+        assert (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) in g1
+
+    @pytest.mark.parametrize('backend', ['rdf-1.1', 'rdf-1.2'])
+    def test_insert_where_with_graph_clause(self, backend):
+        ds = self._dataset(backend)
+        g1 = ds.get_context(GRAPH_URI)
+        g1.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        ds.update(f"""
+            INSERT {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}marked> ?o }} }}
+            WHERE {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}b> ?o }} }}
+        """)
+        assert (URIRef(EX+'a'), URIRef(EX+'marked'), URIRef(EX+'c')) in g1
 
 
 # ---------------------------------------------------------------------------
