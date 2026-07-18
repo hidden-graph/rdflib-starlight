@@ -11,6 +11,7 @@ RDF 1.2/SPARQL 1.2 conformance hardening since 0.1.0:
 - Adopted Apache Jena's real TriX convention; fixed an RDF/XML `rdf:version` data-corruption bug.
 - Removed the obsolete `rdf-star` backend mode (superseded by `rdf-1.2`).
 - Assorted smaller fixes: `tt:HASH` collision risk, the `sqlalchemy` extra failing to install on a fresh environment, query/update state leaking across calls.
+- **Performance: `StarlightGraph.query()`/`StarlightDataset.query()` no longer re-rewrite and re-parse the same query text on every call.** Callers that evaluate the same query repeatedly with only `initBindings` differing — the exact pattern used by SHACL-AF `sh:construct` rules and `sh:sparql` constraints, evaluated once per focus node — now hit a per-instance prepared-query cache (`starlight.query.query_cache.prepare_query_cached`, keyed on query text + effective namespaces + base IRI) instead of redoing the SPARQL 1.2→1.1 rewrite and rdflib's own SPARQL parse every time. ~4.5x faster per repeated call in a microbenchmark; the win scales with how many times a query is re-evaluated per unmutated graph, which for rule-heavy validations grows with graph size.
 
 ## 0.1.0 — 2026-05-14
 

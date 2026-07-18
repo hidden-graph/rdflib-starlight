@@ -165,6 +165,7 @@ class StarlightGraph(Graph):
         self._tt_registry: dict = {}   # canonical (s_key, p, o_key) -> URIRef (rdf-1.1 only)
         self._tt_nodes: dict = {}      # URIRef -> TripleTerm (rdf-1.1 only)
         self._invalidate_callback = None  # set by StarlightDataset to clear raw query cache
+        self._prepared_query_cache: dict = {}  # see starlight.query.query_cache.prepare_query_cached
 
     @property
     def _is_native(self) -> bool:
@@ -956,17 +957,25 @@ class StarlightGraph(Graph):
                 initNs=initNs, initBindings=initBindings,
                 use_store_provided=use_store_provided, **kwargs,
             )
-        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
 
-        # Rewrite SPARQL 1.2 TT patterns to SPARQL 1.1 encoding triple patterns,
-        # then let the SPARQL engine handle all matching and joining.
-        # The only post-processing step is _restore(), which converts any tt:HASH
-        # URIRef that appears in a result row back into a TripleTerm object.
-        if isinstance(query_object, str):
-            query_object = rewrite_sparql12_to_11(query_object)
+        # Rewrite SPARQL 1.2 TT patterns to SPARQL 1.1 encoding triple patterns
+        # and parse the result, then let the SPARQL engine handle all matching
+        # and joining. Cached (prepare_query_cached) on (query text, effective
+        # namespaces, base) so repeated calls with the same query text and only
+        # initBindings differing - exactly how pySHACL evaluates a SHACL-AF
+        # rule/constraint once per focus node - don't redo the rewrite+parse
+        # every time. The only post-processing step is _restore(), which
+        # converts any tt:HASH URIRef that appears in a result row back into a
+        # TripleTerm object.
         raw = Graph(store=self.store, identifier=self.identifier)
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
+        if isinstance(query_object, str):
+            from starlight.query.query_cache import prepare_query_cached
+            effective_ns = initNs if initNs else dict(self.namespaces())
+            query_object = prepare_query_cached(
+                self._prepared_query_cache, query_object, effective_ns, kwargs.get('base')
+            )
         init_bindings = self._encode_init_bindings(initBindings)
         r = raw.query(query_object, processor=processor, result=result,
                       initNs=initNs, initBindings=init_bindings,

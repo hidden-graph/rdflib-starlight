@@ -68,6 +68,7 @@ class StarlightDataset(Dataset):
         self._backend = backend
         self._sg_cache: dict[str, StarlightGraph] = {}
         self._raw_execution_graph: Dataset | None = None
+        self._prepared_query_cache: dict = {}  # see starlight.query.query_cache.prepare_query_cached
 
     # ------------------------------------------------------------------
     # Persistent store lifecycle
@@ -331,10 +332,18 @@ class StarlightDataset(Dataset):
         OBJECT functions, isTripleTerm) are rewritten to SPARQL 1.1 before
         execution.  SELECT result rows are post-processed to restore tt:HASH
         URIRefs back to TripleTerm objects.
+
+        Rewriting and parsing are cached (``prepare_query_cached``) on
+        (query text, effective namespaces, base) - not cleared on
+        parse()/update() unlike ``_raw_execution_graph``, since a query's
+        parse tree depends only on its own text, not on graph content.
         """
-        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
         if isinstance(query_object, str):
-            query_object = rewrite_sparql12_to_11(query_object)
+            from starlight.query.query_cache import prepare_query_cached
+            effective_ns = initNs if initNs else dict(self.namespaces())
+            query_object = prepare_query_cached(
+                self._prepared_query_cache, query_object, effective_ns, kwargs.get('base')
+            )
         raw = self._build_raw_execution_graph()
         r = raw.query(query_object, processor=processor, result=result,
                       initNs=initNs, initBindings=initBindings,
