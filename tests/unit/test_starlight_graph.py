@@ -190,6 +190,42 @@ class TestFromRdflib:
         assert len(sg) == 1
 
 
+class TestFromRdflibDataset:
+    """from_rdflib() used to crash on a Dataset/ConjunctiveGraph input:
+    _skolemize_encoding did bare ``for s, p, o in g:`` iteration, but
+    Dataset.__iter__ yields 4-tuples (s, p, o, context), not 3 - ValueError:
+    too many values to unpack. Fixed by reading via
+    g.triples((None, None, None)) instead (what Graph.__iter__ itself does
+    under the hood), which for a Dataset correctly respects its own
+    default_union setting rather than crashing or silently unioning
+    regardless of it.
+    """
+
+    def test_default_union_false_sees_only_default_graph(self):
+        from rdflib import Dataset
+        ds = Dataset()  # default_union=False, the rdflib default
+        ds.add((URIRef(EX+'default_s'), URIRef(EX+'p'), URIRef(EX+'default_o')))
+        named = ds.graph(URIRef(EX+'g1'))
+        named.add((URIRef(EX+'named_s'), URIRef(EX+'p'), URIRef(EX+'named_o')))
+
+        sg = StarlightGraph.from_rdflib(ds)
+        assert len(sg) == 1
+        assert (URIRef(EX+'default_s'), URIRef(EX+'p'), URIRef(EX+'default_o')) in sg
+        assert (URIRef(EX+'named_s'), URIRef(EX+'p'), URIRef(EX+'named_o')) not in sg
+
+    def test_default_union_true_sees_all_graphs(self):
+        from rdflib import Dataset
+        ds = Dataset(default_union=True)
+        ds.add((URIRef(EX+'default_s'), URIRef(EX+'p'), URIRef(EX+'default_o')))
+        named = ds.graph(URIRef(EX+'g1'))
+        named.add((URIRef(EX+'named_s'), URIRef(EX+'p'), URIRef(EX+'named_o')))
+
+        sg = StarlightGraph.from_rdflib(ds)
+        assert len(sg) == 2
+        assert (URIRef(EX+'default_s'), URIRef(EX+'p'), URIRef(EX+'default_o')) in sg
+        assert (URIRef(EX+'named_s'), URIRef(EX+'p'), URIRef(EX+'named_o')) in sg
+
+
 # ---------------------------------------------------------------------------
 # Statement operations
 # ---------------------------------------------------------------------------

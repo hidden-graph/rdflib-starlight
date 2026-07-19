@@ -1353,6 +1353,14 @@ class StarlightGraph(Graph):
         copied from the source graph.  If the source uses the intermediate
         BNode TT encoding (with sl:TripleTerm type markers), it is converted
         to content-addressed tt: URIRefs before copying.
+
+        source_graph may also be a Dataset/ConjunctiveGraph: triples are read
+        via its own ``.triples((None, None, None))``, which - like iterating
+        the dataset directly - honors whatever ``default_union`` it was
+        constructed with (rdflib default: False), so only its default graph
+        is copied unless the caller explicitly opted into a unioned view.
+        Named graphs are never selected implicitly; use
+        ``dataset.get_context(identifier)`` first for a specific one.
         """
         from starlight.parsers.turtle_parser import _skolemize_encoding
         processed = _skolemize_encoding(source_graph)

@@ -530,7 +530,16 @@ def _skolemize_encoding(g: Graph) -> Graph:
     if reif_bnodes:
         new_g.bind('rr', RR_NS)
 
-    for s, p, o in g:
+    # g.triples((None, None, None)) rather than bare iteration: Graph.__iter__
+    # is just this same call under the hood, but a Dataset/ConjunctiveGraph
+    # overrides triples() to respect its own default_union setting, while
+    # bare iteration yields 4-tuples (s, p, o, context) that don't unpack
+    # into 3 - so this also makes _skolemize_encoding accept a Dataset input
+    # (e.g. via StarlightGraph.from_rdflib()) without crashing, correctly
+    # scoped to the default graph only unless the caller set
+    # default_union=True, matching Dataset's own declared semantics rather
+    # than forcing a union regardless of that setting.
+    for s, p, o in g.triples((None, None, None)):
         if p == RDF.type and o in (SL_TRIPLE_TERM, SL_REIFICATION):
             continue
         s2 = bn_to_uri.get(s, s) if isinstance(s, BNode) else s
