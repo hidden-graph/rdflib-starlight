@@ -222,12 +222,75 @@ class TestQuads:
             assert str(p) not in enc_preds
 
     def test_triples_union_view(self):
-        ds = StarlightDataset()
+        ds = StarlightDataset(default_union=True)
         ds.parse(data=TRIG_BASIC, format='trig12')
         all_triples = list(ds.triples((None, None, None)))
         subjects = {str(s) for s, _, _ in all_triples}
         assert EX + 's' in subjects
         assert EX + 'stmt2' in subjects
+
+    def test_triples_default_union_false_excludes_named_graphs(self):
+        ds = StarlightDataset()  # default_union=False, the default
+        ds.parse(data=TRIG_BASIC, format='trig12')
+        all_triples = list(ds.triples((None, None, None)))
+        assert all_triples == []
+
+
+class TestDefaultUnionPropagation:
+    """default_union=True must be honored consistently across every entry
+    point, the same way self.triples() honors it (see TestQuads above) -
+    not just the one that happened to get tested first. .query() and
+    .update() each build their own internal Dataset/Graph wrapper for
+    execution (_build_raw_execution_graph() and .update()'s in-memory
+    branch, respectively) and previously constructed it with the rdflib
+    default (default_union=False) regardless of self.default_union, so a
+    GRAPH-less query/update pattern silently saw nothing from any named
+    graph even when the dataset was explicitly configured to union them.
+    """
+
+    def test_query_graphless_pattern_sees_named_graphs(self):
+        ds = StarlightDataset(default_union=True)
+        g1 = ds.get_context(ex('g1'))
+        g1.add((ex('s'), ex('p'), ex('o')))
+
+        rows = list(ds.query('SELECT ?s ?p ?o WHERE { ?s ?p ?o }'))
+        assert (ex('s'), ex('p'), ex('o')) in rows
+
+    def test_query_graphless_pattern_empty_when_default_union_false(self):
+        ds = StarlightDataset()  # default_union=False, the default
+        g1 = ds.get_context(ex('g1'))
+        g1.add((ex('s'), ex('p'), ex('o')))
+
+        rows = list(ds.query('SELECT ?s ?p ?o WHERE { ?s ?p ?o }'))
+        assert rows == []
+
+    def test_update_graphless_where_matches_named_graphs(self):
+        ds = StarlightDataset(default_union=True)
+        g1 = ds.get_context(ex('g1'))
+        g1.add((ex('s'), ex('p'), ex('o')))
+
+        ds.update(f"""
+            INSERT {{ ?s <{EX}marked> ?o }}
+            WHERE {{ ?s ?p ?o }}
+        """)
+        # A GRAPH-less INSERT template targets the dataset's own default
+        # graph (standard SPARQL Update semantics, confirmed against plain
+        # rdflib.Dataset too) - default_union only widens what the
+        # GRAPH-less WHERE clause can match, not where the INSERT lands.
+        default_ctx = ds.get_context(ds.default_graph.identifier)
+        assert (ex('s'), ex('marked'), ex('o')) in default_ctx
+
+    def test_update_graphless_where_empty_when_default_union_false(self):
+        ds = StarlightDataset()  # default_union=False, the default
+        g1 = ds.get_context(ex('g1'))
+        g1.add((ex('s'), ex('p'), ex('o')))
+
+        ds.update(f"""
+            INSERT {{ ?s <{EX}marked> ?o }}
+            WHERE {{ ?s ?p ?o }}
+        """)
+        default_ctx = ds.get_context(ds.default_graph.identifier)
+        assert len(default_ctx) == 0
 
 
 # ---------------------------------------------------------------------------

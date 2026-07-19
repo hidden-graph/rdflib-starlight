@@ -165,13 +165,21 @@ class StarlightDataset(Dataset):
             yield sg._restore(s_r), p_r, sg._restore(o_r), sg
 
     def triples(self, triple=(None, None, None)):
-        """Yield (s, p, o) from the union of all named graphs.
+        """Yield (s, p, o), scoped by ``self.default_union`` like rdflib's own Dataset.
 
-        Encoding triples are filtered; TripleTerms are restored.
+        default_union=False (the default): only the default graph's own triples,
+        matching this dataset's declared default-graph-isolation semantics.
+        default_union=True: the union of every graph, default and named alike.
         The same triple may appear more than once if it exists in multiple graphs.
+
+        Encoding triples are filtered; TripleTerms are restored either way.
         """
-        for s, p, o, _g in self.quads(triple):
-            yield s, p, o
+        if self.default_union:
+            for s, p, o, _g in self.quads(triple):
+                yield s, p, o
+        else:
+            default_graph = self.get_context(self.default_graph.identifier)
+            yield from default_graph.triples(triple)
 
     # ------------------------------------------------------------------
     # Internal parse helpers
@@ -324,11 +332,17 @@ class StarlightDataset(Dataset):
         the rewritten SPARQL 1.1 triple-term patterns.  A separate Dataset with
         plain Graph contexts sidesteps this.
 
+        default_union is forwarded from self so a GRAPH-less query pattern
+        against this copy sees the same default-graph-is-the-union-of-everything
+        semantics self.triples() already honors - omitting it silently dropped
+        every named graph from any query with no explicit GRAPH clause,
+        regardless of how this dataset was constructed.
+
         The result is cached and reused until the next parse() or update() call.
         """
         if self._raw_execution_graph is not None:
             return self._raw_execution_graph
-        raw = Dataset()
+        raw = Dataset(default_union=self.default_union)
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
         for sg in self._sg_cache.values():
@@ -422,7 +436,11 @@ class StarlightDataset(Dataset):
             from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
             if isinstance(update_object, str):
                 update_object = rewrite_sparql12_to_11(update_object)
-            raw = Dataset(store=self.store)
+            # default_union forwarded from self - same rationale as
+            # _build_raw_execution_graph(): a GRAPH-less WHERE clause should
+            # see the same default-graph-is-the-union semantics self.triples()
+            # honors, not silently match against an empty default graph.
+            raw = Dataset(store=self.store, default_union=self.default_union)
             for prefix, ns in self.namespaces():
                 raw.bind(prefix, ns)
             raw.update(update_object, processor=processor,
