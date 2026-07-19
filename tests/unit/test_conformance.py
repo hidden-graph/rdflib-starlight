@@ -19,8 +19,9 @@ query to rdflib's SPARQL 1.1 parser.
 import pytest
 from rdflib import URIRef
 
-from starlight.graph.starlight_graph import StarlightGraph, _check_native_version_conformance
+from starlight.graph.starlight_graph import StarlightGraph
 from starlight.graph.starlight_dataset import StarlightDataset
+from starlight.backends.native import check_native_version_conformance
 from starlight.model.conformance import RDF12ConformanceWarning
 
 EX = 'http://example.org/'
@@ -109,8 +110,8 @@ class TestNativeBackendVersionConformance:
     backend does warn on, an inconsistency this project otherwise takes
     care to avoid (see tests/integration/test_cross_backend_parity.py).
 
-    _check_native_version_conformance() is pure Python logic with no network
-    dependency (the network call happens after it, in _native_query()/
+    check_native_version_conformance() is pure Python logic with no network
+    dependency (the network call happens after it, in native_query()/
     http_update()), so it's tested directly here rather than requiring a
     live backend.
     """
@@ -122,20 +123,20 @@ class TestNativeBackendVersionConformance:
             SELECT ?s WHERE {{ ?s rdf:reifies <<( :a :b :c )>> . }}
         """
         with pytest.warns(RDF12ConformanceWarning, match='1.2-basic'):
-            _check_native_version_conformance(q)
+            check_native_version_conformance(q)
 
     def test_1_2_basic_without_triple_term_does_not_warn(self, recwarn):
         q = f'VERSION "1.2-basic"\nPREFIX : <{EX}>\nSELECT * WHERE {{ ?s ?p ?o }}'
-        _check_native_version_conformance(q)
+        check_native_version_conformance(q)
         assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)
 
     def test_no_version_directive_does_not_warn(self, recwarn):
-        _check_native_version_conformance('SELECT * WHERE { ?s ?p ?o }')
+        check_native_version_conformance('SELECT * WHERE { ?s ?p ?o }')
         assert not any(issubclass(w.category, RDF12ConformanceWarning) for w in recwarn.list)
 
     def test_unrecognized_version_label_warns(self):
         with pytest.warns(RDF12ConformanceWarning, match='unrecognized'):
-            _check_native_version_conformance('VERSION "9.9"\nSELECT * WHERE { ?s ?p ?o }')
+            check_native_version_conformance('VERSION "9.9"\nSELECT * WHERE { ?s ?p ?o }')
 
 
 class TestTurtleVersionDirective:

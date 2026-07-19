@@ -289,17 +289,17 @@ class TestOxigraphDatasetTrig12Parse:
 @oxigraph
 class TestOxigraphDatasetQuery:
     """StarlightDataset.query() had no native-backend dispatch at all: unlike
-    StarlightGraph.query() (which routes to _native_query() for
-    self._is_native), it always queried a plain in-memory copy built by
+    StarlightGraph.query() (which routed to its own native-only query logic
+    for self._is_native), it always queried a plain in-memory copy built by
     _build_raw_execution_graph(). That copy is built via rdflib's base
     Graph.triples(), which for a native-backend context runs a plain SPARQL
     1.1 SELECT ?s ?p ?o against the remote store and cannot represent a
     "type":"triple" binding - so any dataset query whose result contained a
     triple-term-valued binding crashed with
-    TypeError: unknown binding type. Fixed by giving StarlightDataset its own
-    _native_query(), reusing the same starlight.backends.native HTTP helpers
-    StarlightGraph._native_query() uses (a native-backed dataset's contexts
-    all share one store, so this is exactly the same underlying operation).
+    TypeError: unknown binding type. Fixed by giving StarlightDataset and
+    StarlightGraph a shared starlight.backends.native.native_query() (a
+    native-backed dataset's contexts all share one store, so this is exactly
+    the same underlying HTTP operation for both).
     """
 
     def _dataset(self):

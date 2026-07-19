@@ -85,66 +85,6 @@ def _needs_encoding(node):
     return _is_tt_like(node) or isinstance(node, DirLangString)
 
 
-def _check_native_version_conformance(text: str) -> None:
-    """Run the same RDF12ConformanceWarning check the in-memory backend's
-    rewrite pipeline runs, for a native (rdf-1.2) backend's raw SPARQL text.
-
-    The native backend sends text straight through to a real endpoint via
-    HTTP with zero rewriting (see starlight.backends.native's module
-    docstring) - correct, since Fuseki/Oxigraph understand VERSION natively
-    (confirmed live 2026-07-17: both execute a VERSION-declared query
-    normally regardless of a conformance mismatch, HTTP 200). But neither
-    surfaces any warning back to the caller for a mismatch - confirmed the
-    same day, sending VERSION "1.2-basic" plus a <<( )>> pattern to both
-    got a normal 200 response with no signal anywhere in it. Without this
-    check, a StarlightGraph(backend='rdf-1.2') would silently never emit
-    RDF12ConformanceWarning at all, while the default in-memory backend
-    does for the identical query - an inconsistency between backends this
-    project otherwise takes care to avoid (see
-    tests/integration/test_cross_backend_parity.py). Only the *warning* is
-    replicated here, never the VERSION-stripping - the native endpoint
-    needs to see the directive itself, unlike rdflib's SPARQL 1.1 parser.
-    """
-    from starlight.query.sparql12_to_11 import _strip_version_directive
-    from starlight.model.conformance import check_version_conformance
-
-    _, declared_version = _strip_version_directive(text)
-    if declared_version is None:
-        return
-    check_version_conformance(
-        declared_version,
-        uses_triple_term=bool(
-            "<<(" in text or re.search(r'<<[^(]|\{\|', text) or '~' in text
-        ),
-        uses_dirlangstring='--' in text,
-        context='SPARQL query',
-    )
-
-
-def _resolve_store_http(store, backend: str) -> tuple:
-    """Return (query_url, update_url, extra_headers) from a native-backend store.
-
-    SPARQLUpdateStore pre-encodes credentials as an Authorization header in
-    store.kwargs['headers'] rather than exposing a raw auth tuple. Raises
-    RuntimeError if the store does not expose HTTP endpoints (e.g. in-memory
-    stores). Shared by StarlightGraph._store_http() and StarlightDataset's
-    own native-backend query dispatch - a dataset's per-context
-    StarlightGraphs all share the same underlying store (see
-    StarlightDataset.get_context()), so there is exactly one store to resolve
-    per dataset, same as for a single graph.
-    """
-    q = getattr(store, 'query_endpoint', None)
-    u = getattr(store, 'update_endpoint', None)
-    if not q or not u:
-        raise RuntimeError(
-            f"backend={backend!r} requires a store with query_endpoint "
-            f"and update_endpoint (e.g. SPARQLUpdateStore); "
-            f"got {type(store).__name__}"
-        )
-    extra_headers = getattr(store, 'kwargs', {}).get('headers', {})
-    return q, u, extra_headers
-
-
 def _read_source_text(source=None, file=None, location=None, data=None) -> str:
     """Resolve rdflib's four parse() source arguments to a single text string.
 
@@ -204,11 +144,12 @@ class StarlightGraph(Graph):
         """Return (query_url, update_url, extra_headers) from the backing store.
 
         Raises RuntimeError if the store does not expose HTTP endpoints
-        (e.g. in-memory stores). See _resolve_store_http() - shared with
-        StarlightDataset's own native-backend dispatch, since a dataset's
-        contexts all share the same underlying store.
+        (e.g. in-memory stores). See starlight.backends.native.resolve_store_http()
+        - shared with StarlightDataset's own native-backend dispatch, since a
+        dataset's contexts all share the same underlying store.
         """
-        return _resolve_store_http(self.store, self._backend)
+        from starlight.backends.native import resolve_store_http
+        return resolve_store_http(self.store, self._backend)
 
     def _native_add(self, s, p, obj) -> None:
         from starlight.backends.native import sparql_term, http_update
@@ -267,36 +208,6 @@ class StarlightGraph(Graph):
                 row.get(Variable('p'), p) if 'p' in free else p,
                 row.get(Variable('o'), o) if 'o' in free else o,
             )
-
-    def _native_query(self, query_object, processor='sparql', result='sparql',
-                      initNs=None, initBindings=None, use_store_provided=True, **kwargs):
-        from starlight.backends.native import http_select, http_ask, http_construct, build_result
-        q_url, _, hdrs = self._store_http()
-
-        sparql = query_object
-
-        # Detect query type by searching for the keyword — startswith() fails when
-        # PREFIX declarations appear before ASK / CONSTRUCT / DESCRIBE.
-        _qt = re.search(r'\b(ASK|CONSTRUCT|DESCRIBE)\b', sparql, re.IGNORECASE)
-        query_type = _qt.group(1).upper() if _qt else 'SELECT'
-
-        if query_type == 'ASK':
-            from rdflib.query import Result as RDFResult
-            r = RDFResult('ASK')
-            r.askAnswer = http_ask(q_url, sparql, hdrs)
-            return r
-
-        if query_type in ('CONSTRUCT', 'DESCRIBE'):
-            from rdflib.query import Result as RDFResult
-            body, _ = http_construct(q_url, sparql, hdrs)
-            g = StarlightGraph()
-            g.parse(data=body.decode('utf-8'), format='turtle12')
-            r = RDFResult('CONSTRUCT')
-            r.graph = g
-            return r
-
-        vars_, bindings = http_select(q_url, sparql, hdrs)
-        return build_result(vars_, bindings)
 
     # ------------------------------------------------------------------
     # Internal helpers (rdf-1.1 encoding layer)
@@ -986,13 +897,13 @@ class StarlightGraph(Graph):
         URIRefs back to TripleTerm objects.
 
         For the native rdf-1.2 backend the query is routed through
-        _native_query which uses the endpoint's own triple-term syntax.
+        starlight.backends.native.native_query, which uses the endpoint's
+        own triple-term syntax.
         """
         if self._is_native:
-            if isinstance(query_object, str):
-                _check_native_version_conformance(query_object)
-            return self._native_query(
-                query_object, processor=processor, result=result,
+            from starlight.backends.native import native_query
+            return native_query(
+                self.store, self._backend, query_object, processor=processor, result=result,
                 initNs=initNs, initBindings=initBindings,
                 use_store_provided=use_store_provided, **kwargs,
             )
@@ -1044,7 +955,7 @@ class StarlightGraph(Graph):
         """Execute a SPARQL UPDATE. Triple-term patterns are rewritten to SPARQL 1.1.
 
         For the native rdf-1.2 backend the update is forwarded to the endpoint
-        via HTTP unchanged (see starlight.backends.native.http_update).
+        via HTTP unchanged (see starlight.backends.native.native_update).
 
         Supported (rdf-1.1 path):
         - ``<<( )>>`` in WHERE clauses (DELETE/INSERT WHERE forms)
@@ -1053,11 +964,8 @@ class StarlightGraph(Graph):
           via a post-processing SELECT pass against the same WHERE clause
         """
         if self._is_native:
-            from starlight.backends.native import http_update
-            if isinstance(update_object, str):
-                _check_native_version_conformance(update_object)
-            _, u_url, hdrs = self._store_http()
-            http_update(u_url, update_object, hdrs)
+            from starlight.backends.native import native_update
+            native_update(self.store, self._backend, update_object)
             return None
         from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
         if isinstance(update_object, str):
