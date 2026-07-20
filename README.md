@@ -90,6 +90,8 @@ print(g.serialize(format='turtle12'))
 ## Backends
 
 ```python
+from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
+
 # In-memory (default) — fastest, no setup required
 g = StarlightGraph()
 
@@ -98,20 +100,22 @@ g = StarlightGraph(store='SQLAlchemy')
 g.open('sqlite:///graph.db', create=True)
 
 # Apache Fuseki — SPARQL endpoint with RDF 1.1 encoding
-g = StarlightGraph(backend='rdf-1.1',
-                   query_url='http://localhost:3030/ds/sparql',
-                   update_url='http://localhost:3030/ds/update')
+store = SPARQLUpdateStore(query_endpoint='http://localhost:3030/ds/sparql',
+                          update_endpoint='http://localhost:3030/ds/update')
+g = StarlightGraph(store=store, backend='rdf-1.1')
 
 # Apache Fuseki 5.5+ — speaks the final RDF 1.2 <<( s p o )>> syntax natively
-g = StarlightGraph(backend='rdf-1.2',
-                   query_url='http://localhost:3030/ds/sparql',
-                   update_url='http://localhost:3030/ds/update')
+store = SPARQLUpdateStore(query_endpoint='http://localhost:3030/ds/sparql',
+                          update_endpoint='http://localhost:3030/ds/update')
+g = StarlightGraph(store=store, backend='rdf-1.2')
 
 # Oxigraph — native RDF 1.2 store
-g = StarlightGraph(backend='rdf-1.2',
-                   query_url='http://localhost:7878/query',
-                   update_url='http://localhost:7878/update')
+store = SPARQLUpdateStore(query_endpoint='http://localhost:7878/query',
+                          update_endpoint='http://localhost:7878/update')
+g = StarlightGraph(store=store, backend='rdf-1.2')
 ```
+
+`StarlightDataset` (multi-graph, every named graph a `StarlightGraph`) takes the same `store=`/`backend=` arguments and supports rdflib's own `default_union` flag (default `False`, matching rdflib's `Dataset`): `StarlightDataset(default_union=True)` makes the default graph the union of every named graph for `.triples()`/`.query()`/`.update()`'s GRAPH-less patterns, same as plain `rdflib.Dataset`.
 
 ## Examples
 
