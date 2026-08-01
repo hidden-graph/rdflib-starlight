@@ -918,7 +918,8 @@ def _rewrite_triple_functions(query: str, state: _RewriteState) -> str:
 
 
 def _rewrite_group_content(text: str, state: _RewriteState,
-                           handle_funcs: bool = False) -> str:
+                           handle_funcs: bool = False,
+                           in_expression: bool = False) -> str:
     """Rewrite <<( )>> triple-term patterns and, when handle_funcs is True,
     SUBJECT/PREDICATE/OBJECT function calls inline within the current block.
 
@@ -928,11 +929,29 @@ def _rewrite_group_content(text: str, state: _RewriteState,
     It is set to True for all recursive calls (inside { } blocks) so that
     functions inside GRAPH, OPTIONAL, UNION etc. inject their binding triple
     within the same named-graph scope rather than at the outer WHERE level.
+
+    in_expression (together with the local paren_depth counter below) tracks
+    whether the text currently being scanned sits inside an *expression*
+    context - BIND(...), a SELECT projection's (expr AS ?var), FILTER(...),
+    or a nested function-call argument - as opposed to a bare graph-pattern
+    term slot (a subject/predicate/object position in an ordinary `s p o .`
+    statement). A non-ground <<( )>>/TRIPLE(...) occurrence needs *different*
+    semantics in each: a pattern-term slot means "find an existing triple
+    term whose components match", but an expression position means "compute
+    the triple-term value from whatever these sub-expressions evaluate to
+    right now" - there is nothing to match against, since the value may never
+    have been written to the graph at all (see _rewrite_triple_term's
+    "elif is_expression" branch). SPARQL has no bare-parenthesized grouping
+    for graph patterns themselves (only for expressions and for `{ }` group
+    graph patterns, which don't affect this counter), so "currently inside an
+    unclosed '('" reliably identifies an expression context with purely
+    string-level scanning - no full grammar parse needed.
     """
     result: list[str] = []
     pending_patterns: list[str] = []
     buffer: list[str] = []
     i = 0
+    paren_depth = 0
 
     while i < len(text):
         if text.startswith("#", i):
@@ -961,7 +980,10 @@ def _rewrite_group_content(text: str, state: _RewriteState,
             continue
 
         if text.startswith("<<(", i):
-            replacement, patterns, i, _is_ground = _rewrite_triple_term(text, i, state)
+            is_expr_here = in_expression or paren_depth > 0
+            replacement, patterns, i, _is_ground = _rewrite_triple_term(
+                text, i, state, is_expression=is_expr_here,
+            )
             buffer.append(replacement)
             pending_patterns.extend(patterns)
             continue
@@ -996,7 +1018,10 @@ def _rewrite_group_content(text: str, state: _RewriteState,
                 # would land it after the query's closing brace - invalid syntax.
                 inner_content = _emit_pending_patterns(pending_patterns) + inner_content
                 pending_patterns.clear()
-            rewritten = _rewrite_group_content(inner_content, state, handle_funcs=True)
+            rewritten = _rewrite_group_content(
+                inner_content, state, handle_funcs=True,
+                in_expression=(in_expression or paren_depth > 0),
+            )
             buffer.append('{')
             buffer.append(rewritten)
             buffer.append('}')
@@ -1017,6 +1042,11 @@ def _rewrite_group_content(text: str, state: _RewriteState,
             i += 1
             continue
 
+        if text[i] == '(':
+            paren_depth += 1
+        elif text[i] == ')':
+            paren_depth = max(paren_depth - 1, 0)
+
         buffer.append(text[i])
         i += 1
 
@@ -1029,12 +1059,17 @@ def _rewrite_group_content(text: str, state: _RewriteState,
 
 
 def _rewrite_triple_term(
-    text: str, start: int, state: _RewriteState
+    text: str, start: int, state: _RewriteState, is_expression: bool = False
 ) -> tuple[str, list[str], int, bool]:
     """Rewrite one <<( s p o )>> occurrence. Returns (tt_var, patterns, end,
     is_ground) where is_ground is True iff s, p, and o are all variable-free
     (recursively, for a nested triple term) - see the "elif all_ground"
     branch below for what that unlocks.
+
+    is_expression (see _rewrite_group_content's docstring for how it's
+    computed) marks that this occurrence sits inside an expression context
+    (BIND/FILTER/SELECT-projection/nested function argument) rather than a
+    graph-pattern term slot - see the "elif is_expression" branch below.
     """
     token, end = _consume_triple_term(text, start)
     inner = token[3:-3].strip()
@@ -1042,9 +1077,9 @@ def _rewrite_triple_term(
     if len(parts) != 3:
         raise ValueError(f"Triple term must contain exactly 3 terms: {token}")
 
-    subject_token, subject_patterns, subject_ground = _rewrite_term(parts[0], state)
-    predicate_token, predicate_patterns, predicate_ground = _rewrite_term(parts[1], state)
-    object_token, object_patterns, object_ground = _rewrite_term(parts[2], state)
+    subject_token, subject_patterns, subject_ground = _rewrite_term(parts[0], state, is_expression)
+    predicate_token, predicate_patterns, predicate_ground = _rewrite_term(parts[1], state, is_expression)
+    object_token, object_patterns, object_ground = _rewrite_term(parts[2], state, is_expression)
     all_ground = subject_ground and predicate_ground and object_ground
 
     content_key = f"{subject_token} {predicate_token} {object_token}"
@@ -1092,6 +1127,26 @@ def _rewrite_triple_term(
             state.pending_ground_binds.append(
                 f"BIND({TT_HASH_FN}({subject_token}, {predicate_token}, {object_token}) AS {tt_var}) ."
             )
+    elif is_expression:
+        # Non-ground (contains a variable), but used as a plain expression -
+        # not a graph-pattern term slot. There is no WHERE-clause pattern to
+        # match here (the else branch's rdf:subject/predicate/object lookup
+        # would require this exact triple term to already be registered in
+        # the store, which it may never have been - e.g. TRIPLE(?a0, ?a1,
+        # ?a2) with ?a0/?a1/?a2 bound only via initBindings, no matching
+        # WHERE pattern at all). An expression position already accepts an
+        # arbitrary SPARQL expression syntactically (unlike a bare
+        # subject/object slot, which requires an actual term), so substitute
+        # the hash-function call directly in place instead of minting a
+        # fresh variable + hoisted BIND: its arguments resolve against
+        # whatever bindings are already in scope at evaluation time, exactly
+        # like any other function call embedded in that same expression.
+        return (
+            f"{TT_HASH_FN}({subject_token}, {predicate_token}, {object_token})",
+            patterns,
+            end,
+            all_ground,
+        )
     else:
         patterns.append(f"{tt_var} {RDF_SUBJECT} {subject_token} .")
         patterns.append(f"{tt_var} {RDF_PREDICATE} {predicate_token} .")
@@ -1100,10 +1155,10 @@ def _rewrite_triple_term(
     return tt_var, patterns, end, all_ground
 
 
-def _rewrite_term(term: str, state: _RewriteState) -> tuple[str, list[str], bool]:
+def _rewrite_term(term: str, state: _RewriteState, is_expression: bool = False) -> tuple[str, list[str], bool]:
     stripped = term.strip()
     if stripped.startswith("<<("):
-        replacement, patterns, _, is_ground = _rewrite_triple_term(stripped, 0, state)
+        replacement, patterns, _, is_ground = _rewrite_triple_term(stripped, 0, state, is_expression)
         return replacement, patterns, is_ground
     is_ground = not (stripped.startswith('?') or stripped.startswith('$'))
     return stripped, [], is_ground

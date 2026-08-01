@@ -369,6 +369,77 @@ def test_is_triple_of_nested_triple_constructor():
     assert 'STRSTARTS(STR(?__tt0), "https://github.com/hidden-graph/rdflib-starlight/ns/tt#")' in rewritten
 
 
+def test_triple_constructor_with_all_initbindings_args_constructs_a_value():
+    # Found 2026-07-31 via pyshacl-starlight: TRIPLE(?a0, ?a1, ?a2) with all
+    # three arguments bound only via initBindings (no WHERE-clause graph
+    # pattern to match them against - exactly how a SPARQL-node-expression
+    # caller evaluates a `sparql:triple(...)` call) used to return zero rows.
+    # Root cause: this SELECT-projection expression sits inside an unclosed
+    # '(' (the projection's own parens) when the rewriter's group-content
+    # scan reaches TRIPLE(...) - an *expression* position - but the old code
+    # only ever branched on groundedness, so a non-ground occurrence (?a0/
+    # ?a1/?a2 are variables) always fell through to the "graph-pattern
+    # match" branch: `?__tt0 rdf:subject ?a0 . ...`, requiring a triple term
+    # with exactly these components to already be registered in the store,
+    # which initBindings-only values never are. Fixed by tracking expression
+    # vs. graph-pattern-term position (an unclosed paren means expression)
+    # and, for non-ground expression-position triple terms, substituting the
+    # hash-function call directly in place instead of a matching pattern.
+    query = "SELECT (TRIPLE(?a0, ?a1, ?a2) AS ?r) WHERE {}"
+    rewritten = rewrite_sparql12_to_11(query)
+
+    assert "TRIPLE(" not in rewritten
+    assert (
+        "SELECT (<https://github.com/hidden-graph/rdflib-starlight/ns/tt#fn/hash>"
+        "(?a0, ?a1, ?a2) AS ?r) WHERE {}" == rewritten
+    )
+
+    from rdflib import URIRef
+    from starlight.graph.starlight_graph import StarlightGraph
+
+    g = StarlightGraph()
+    rows = list(g.query(
+        "SELECT (TRIPLE(?a0, ?a1, ?a2) AS ?r) WHERE {}",
+        initBindings={
+            "a0": URIRef("http://example.org/s"),
+            "a1": URIRef("http://example.org/p"),
+            "a2": URIRef("http://example.org/o"),
+        },
+    ))
+    assert len(rows) == 1
+    from starlight.model.triple import TripleTerm
+    assert rows[0][0] == TripleTerm(
+        URIRef("http://example.org/s"), URIRef("http://example.org/p"), URIRef("http://example.org/o"),
+    )
+
+
+def test_triple_constructor_in_bind_with_where_bound_vars_still_matches_literal_form():
+    # test_rewrite_triple_constructor_in_bind (above) already asserts
+    # TRIPLE(?s, ?p, ?o) and the literal <<( ?s ?p ?o )>> spelling rewrite
+    # identically when used in a BIND. Confirms *why* that equivalence is
+    # still correct after the expression/pattern-position fix: BIND(...) is
+    # itself an expression context (an unclosed '(' at the point the triple
+    # term is scanned), so both spellings now take the "elif is_expression"
+    # inline-substitution path - a real behavior change from the pre-fix
+    # "always try to match a WHERE-clause pattern" branch, not just a
+    # coincidental re-confirmation of old output.
+    query = """
+PREFIX : <http://example.org/>
+SELECT ?s ?date WHERE {
+  ?s ?p ?o .
+  BIND( TRIPLE(?s, ?p, ?o) AS ?tt )
+  :myreifier rdf:reifies ?tt .
+}
+""".strip()
+    rewritten = rewrite_sparql12_to_11(query)
+
+    assert "TRIPLE(" not in rewritten
+    assert "BIND( <https://github.com/hidden-graph/rdflib-starlight/ns/tt#fn/hash>(?s, ?p, ?o) AS ?tt )" in rewritten
+    # No rdf:subject/predicate/object matching pattern should have been
+    # injected - there is nothing to match, ?tt is computed, not looked up.
+    assert "rdf-syntax-ns#subject" not in rewritten
+
+
 def test_is_triple_term_alias_also_avoids_exists():
     # sanity: bare-variable form still rewrites correctly and without EXISTS
     query = "SELECT (isTripleTerm(?x) AS ?v) WHERE { ?s ?p ?x }"

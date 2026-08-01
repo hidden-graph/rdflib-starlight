@@ -99,6 +99,13 @@ def _scan_directive_end(data, i):
             else:
                 j += 1
             continue
+        if c == '#' and depth['<'] == 0:
+            # A '#' outside a string and outside an <IRI> (which may
+            # legitimately contain one, e.g. a fragment) starts a comment
+            # running to end-of-line - not real statement content.
+            while j < len(data) and data[j] not in ('\n', '\r'):
+                j += 1
+            continue
         if c in '[({<':
             depth[c] += 1
         elif c in '])}>':
@@ -175,6 +182,18 @@ def _split_statements_impl(data):
                 elif data[i-1] != '\\':
                     in_string = False
             i += 1
+            continue
+        if c == '#' and depth['<'] == 0:
+            # Comment to end-of-line - not real statement content. Previously
+            # only a *whole* comment-only line was recognized (stripped
+            # before this function ever runs, in StarlightTurtleParser.parse's
+            # pre-filter) - a trailing comment after real content on the same
+            # line (e.g. "sh:targetNode ex:Invalid ;  # note") was fed into
+            # the grammar as literal text instead, confirmed via the W3C
+            # SHACL 1.2 test suite (e.g. core/node/class-003.ttl,
+            # core/complex/shacl-shacl-data-shapes.ttl).
+            while i < len(data) and data[i] not in ('\n', '\r'):
+                i += 1
             continue
         if c in ('"', "'"):
             if data[i:i+3] == c * 3:
@@ -380,7 +399,18 @@ def expand_triple_set(triple_set, blank_counter):
             result.append(head)
             current = list_head
             for idx, el in enumerate(elements):
-                result.append({'subject': current, 'predicate': 'rdf:first', 'object': el.strip()})
+                # coerce_object() (not just .strip()) - a bare numeric/boolean
+                # collection member (e.g. "( 42 )", "( true false )") needs
+                # the same string->Python-value coercion an ordinary
+                # (non-list) object already gets in extract_fields(), or
+                # _to_node() later rejects it as an "unrecognized term" -
+                # confirmed via the W3C SHACL 1.2 test suite's
+                # node-expr/shnex/constant.ttl ("mf:result ( 42 )") and
+                # several core/ fixtures using "rdf:rest ( 2 )"-shaped lists.
+                # A bracket/quote-wrapped member (needing further recursive
+                # expansion, e.g. "[ ... ]") never matches coerce_object's
+                # true/false/numeric patterns, so this is safe unconditionally.
+                result.append({'subject': current, 'predicate': 'rdf:first', 'object': coerce_object(el.strip())})
                 if idx < len(elements) - 1:
                     next_bnode = f'_:sl_{blank_counter[0]}'
                     blank_counter[0] += 1

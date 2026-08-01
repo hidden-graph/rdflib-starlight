@@ -281,3 +281,85 @@ def test_oxigraph_matches_internal(name, fn):
     assert oxigraph_result == internal_result, (
         f'{name}: oxigraph={oxigraph_result!r} != internal={internal_result!r}'
     )
+
+
+# ---------------------------------------------------------------------------
+# Numeric SPARQL-builtin lexical-form parity — found 2026-08-01 while
+# investigating a downstream consumer's confirmed rdflib bugs (see
+# starlight/query/operator_patches.py: CEIL/FLOOR/ROUND/division whole-number
+# decimal results lost the canonical XSD decimal lexical form, e.g.
+# CEIL(3.2) -> "4" instead of "4.0"; that module now patches rdflib's own
+# Python SPARQL evaluator to fix it). Deliberately NOT folded into the
+# shared SCENARIOS table above: parity does *not* hold uniformly across both
+# native backends for this family, so adding it there would either mask a
+# real divergence or force a misleading blanket xfail on a backend that's
+# actually fine.
+#
+# Ground truth checked against the actual downstream consumer's W3C SHACL
+# 1.2 test suite fixtures (they expect e.g. `84 / 2` -> "42.0"^^xsd:decimal
+# - XSD decimal's canonical form requires a decimal point with at least one
+# digit each side), confirmed empirically against three independent
+# engines:
+#   - Internal (patched rdflib):     "42.0" / "4.0" - matches the fixtures
+#   - Fuseki (Apache Jena ARQ 5.5+): "42.0" / "4.0" - matches fixtures AND internal
+#   - Oxigraph (native, 0.5.x):      "42"   / "4"   - matches neither
+# Two independent, mature engines (patched rdflib, Jena/ARQ) agree with each
+# other and with the actual downstream test suite; only Oxigraph diverges.
+# This is a real, currently-unreconciled gap: a native-backend
+# StarlightGraph query against Oxigraph gives a different (though
+# value-equal) lexical form than the in-memory backend or Fuseki for the
+# same query - not yet patched on the Oxigraph side. Tracked here as an
+# `xfail(strict=True)` rather than silently passing or hard-failing, so it
+# breaks loudly (XPASS) if Oxigraph's own behavior ever changes, and stays
+# visible to anyone reading the test suite in the meantime.
+
+def _scenario_ceil_whole_number_decimal(g):
+    r = g.query('SELECT (CEIL(3.2) AS ?r) WHERE {}')
+    row = r.bindings[0]
+    val = row[r.vars[0]]
+    return (str(val), str(val.datatype))
+
+
+def _scenario_division_whole_number_decimal(g):
+    r = g.query('SELECT (84 / 2 AS ?r) WHERE {}')
+    row = r.bindings[0]
+    val = row[r.vars[0]]
+    return (str(val), str(val.datatype))
+
+
+NUMERIC_LEXICAL_FORM_SCENARIOS = [
+    ('CEIL whole-number decimal lexical form', _scenario_ceil_whole_number_decimal),
+    ('division whole-number decimal lexical form', _scenario_division_whole_number_decimal),
+]
+
+
+@fuseki
+@pytest.mark.parametrize(
+    'name,fn', NUMERIC_LEXICAL_FORM_SCENARIOS, ids=[s[0] for s in NUMERIC_LEXICAL_FORM_SCENARIOS]
+)
+def test_fuseki_matches_internal_for_numeric_lexical_form(name, fn):
+    internal_result = fn(_internal_graph())
+    fuseki_result = fn(_fuseki_graph())
+    assert fuseki_result == internal_result, (
+        f'{name}: fuseki={fuseki_result!r} != internal={internal_result!r}'
+    )
+
+
+@oxigraph
+@pytest.mark.xfail(
+    strict=True,
+    reason="Known, unreconciled gap (see comment above): Oxigraph's native SPARQL engine "
+    "returns non-canonical decimal lexical forms ('4' not '4.0') for CEIL/FLOOR/ROUND/division "
+    "whole-number results, unlike the in-memory backend (patched to match the downstream "
+    "consumer's W3C SHACL 1.2 test suite) and Fuseki/Jena-ARQ, both of which agree on the "
+    "canonical form.",
+)
+@pytest.mark.parametrize(
+    'name,fn', NUMERIC_LEXICAL_FORM_SCENARIOS, ids=[s[0] for s in NUMERIC_LEXICAL_FORM_SCENARIOS]
+)
+def test_oxigraph_matches_internal_for_numeric_lexical_form(name, fn):
+    internal_result = fn(_internal_graph())
+    oxigraph_result = fn(_oxigraph_graph())
+    assert oxigraph_result == internal_result, (
+        f'{name}: oxigraph={oxigraph_result!r} != internal={internal_result!r}'
+    )

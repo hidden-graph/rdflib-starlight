@@ -122,6 +122,8 @@ def _unescape_nt(s: str) -> str:
         if   esc == 'n':  out.append('\n'); i += 2
         elif esc == 'r':  out.append('\r'); i += 2
         elif esc == 't':  out.append('\t'); i += 2
+        elif esc == 'b':  out.append('\b'); i += 2
+        elif esc == 'f':  out.append('\f'); i += 2
         elif esc == '\\': out.append('\\'); i += 2
         elif esc == '"':  out.append('"');  i += 2
         elif esc == 'u' and i + 5 < len(s):

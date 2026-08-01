@@ -23,6 +23,13 @@ from starlight.graph.starlight_graph import StarlightGraph
 from starlight.graph.starlight_dataset import StarlightDataset
 from starlight.parsers.errors import TurtleSyntaxError
 
+# Compatibility shims for confirmed bugs in plain rdflib's own SPARQL
+# arithmetic evaluation - applied eagerly so every consumer gets
+# spec-correct results. See starlight/query/operator_patches.py.
+from starlight.query.operator_patches import apply_all_operator_patches as _apply_all_operator_patches
+
+_apply_all_operator_patches()
+
 __all__ = [
     # rdflib primitives
     "BNode",

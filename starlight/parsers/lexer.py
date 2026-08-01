@@ -16,6 +16,12 @@ already-extracted, single-statement text with no document-level line info.
 
 from starlight.parsers.errors import TurtleSyntaxError
 
+# A bare token (PrefixedName, IRI-without-brackets, "a", boolean/numeric
+# literal shorthand, ...) never legally contains any of these - each
+# unambiguously starts (or is) a different token form, so none of them need a
+# preceding space to act as a boundary. See next_token()'s fallback branch.
+_BARE_TOKEN_STOP_CHARS = ('<', '(', ')', '[', ']', '{', '}', '"', "'", ',', ';')
+
 
 def next_token(s):
     """Return (token, remaining) for the next atomic token in s (pre-stripped)."""
@@ -123,8 +129,13 @@ def next_token(s):
             raise TurtleSyntaxError("unclosed '(' collection", s, pos=len(s))
         return s[:i], s[i:].lstrip()
 
+    # Previously only whitespace/'<' stopped this scan, so e.g.
+    # "sh:resultPath(...)" (a collection value with no space before '(')
+    # glued the '(' onto the predicate token instead of starting a new one -
+    # confirmed via the W3C SHACL 1.2 test suite's
+    # core/path/path-complex-002.ttl, which has exactly this (no-space) form.
     i = 0
-    while i < len(s) and not s[i].isspace() and s[i] != '<':
+    while i < len(s) and not s[i].isspace() and s[i] not in _BARE_TOKEN_STOP_CHARS:
         i += 1
     return s[:i], s[i:].lstrip()
 

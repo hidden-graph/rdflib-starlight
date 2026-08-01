@@ -794,7 +794,19 @@ class StarlightGraph(Graph):
 
             if format in ('turtle12', 'longturtle12'):
                 from starlight.parsers.turtle_parser import StarlightTurtleParser, _skolemize_encoding
-                raw = StarlightTurtleParser().parse(text)
+                # Seed relative-IRI resolution (including a bare "<>") from
+                # publicID, falling back to location's own resolved file://
+                # IRI when publicID isn't given - matching the convention
+                # rdflib's own parsers follow (publicID defaults to the
+                # source's own IRI). Previously nothing was passed here, so
+                # a document with no @base of its own (the common case) had
+                # no working relative-IRI resolution regardless of publicID -
+                # see StarlightTurtleParser.parse()'s base parameter.
+                effective_base = publicID
+                if effective_base is None and location is not None:
+                    from pathlib import Path
+                    effective_base = Path(location).resolve().as_uri()
+                raw = StarlightTurtleParser().parse(text, base=effective_base)
                 processed = _skolemize_encoding(raw)
                 for prefix, ns in processed.namespaces():
                     self.bind(prefix, ns)

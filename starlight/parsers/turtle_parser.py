@@ -135,6 +135,8 @@ def _unescape(s):
             if   c == 'n':  result.append('\n'); i += 2
             elif c == 't':  result.append('\t'); i += 2
             elif c == 'r':  result.append('\r'); i += 2
+            elif c == 'b':  result.append('\b'); i += 2
+            elif c == 'f':  result.append('\f'); i += 2
             elif c == '"':  result.append('"');  i += 2
             elif c == "'":  result.append("'");  i += 2
             elif c == '\\': result.append('\\'); i += 2
@@ -229,7 +231,20 @@ def _to_node(val, prefix_map, base_uri):
         content, suffix, kind = _split_literal(val)
         text = _unescape(content)
         if kind == '^^':
-            return Literal(text, datatype=_to_node(suffix, prefix_map, base_uri))
+            # normalize=False preserves the exact lexical form the source
+            # document wrote (e.g. "04"^^xsd:integer stays "04", not
+            # silently rewritten to the canonical "4") - rdflib's default
+            # normalizes numeric/boolean-typed literals to their value's
+            # canonical lexical form on construction, which silently
+            # violates RDF 1.2's own literal term-equality definition
+            # (https://www.w3.org/TR/rdf12-concepts/#dfn-literal-term-equality:
+            # two literals are term-equal only if their lexical forms match,
+            # not just their value) - a Turtle *parser* must preserve
+            # whatever the document actually wrote. Confirmed via the W3C
+            # SHACL 1.2 Node Expressions test suite (distinct-termEquality,
+            # remove-list-from-list), which construct exactly this
+            # value-equal/lexically-different case deliberately.
+            return Literal(text, datatype=_to_node(suffix, prefix_map, base_uri), normalize=False)
         if kind == '@':
             if '--' in suffix:
                 # RDF 1.2 "text"@lang--dir (rdf:dirLangString). rdflib's Literal
@@ -601,12 +616,23 @@ def decode_tt_encoded_triples(g: Graph):
 
 class StarlightTurtleParser:
 
-    def parse(self, data: str, debug: bool = False) -> Graph:
+    def parse(self, data: str, debug: bool = False, base: str = None) -> Graph:
         """Parse Turtle 1.2 text and return an rdflib.Graph.
 
         The graph uses the starlight internal blank-node encoding for RDF 1.2
         triple terms and reification. Pass debug=True to print intermediate
         representations to stdout.
+
+        base seeds relative-IRI resolution (including a bare "<>") before any
+        parsing happens, the same role rdflib's own parsers give their
+        publicID/base argument - an in-document @base/BASE directive, if
+        present, still overrides it from that point on (current_base is
+        reassigned, not merged). Previously there was no way to seed this at
+        all from the caller; a document with no @base of its own had no
+        working relative-IRI resolution regardless of what publicID the
+        caller (e.g. StarlightGraph.parse(location=..., publicID=...))
+        passed in - confirmed via the W3C SHACL 1.2 test suite, whose
+        manifest files rely pervasively on "<>" self-reference.
         """
         # line_map[k] is the 1-based line number *in the original data* of the
         # k-th surviving line in data_clean, so a line number computed against
@@ -628,7 +654,7 @@ class StarlightTurtleParser:
 
         blank_counter = [0]
         canonical = {'prefixes': [], 'bases': [], 'triples': []}
-        current_base = None
+        current_base = base
         declared_version = None
 
         for stmt, cleaned_line in _syntax.split_statements_with_lines(data_clean):
