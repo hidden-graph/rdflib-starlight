@@ -1,12 +1,12 @@
 # Starlight Future Enhancements
 
-*Last reviewed: 2026-07-17*
+*Last reviewed: 2026-08-01*
 
 ---
 
 ## Deferred / open follow-ups
 
-- **`starlight/query/sparql12_to_11.py` complexity.** Still the single most complex module in the codebase — a ~1,100-line hand-rolled, multi-pass text scanner implementing the SPARQL 1.2→1.1 rewrite pipeline. A 2026-07-17 duplication review deliberately left it untouched: restructuring a working, fuzz-tested, heavily-exercised piece of logic purely for complexity's sake carries real regression risk without a clearly corresponding benefit. Worth a dedicated look later — e.g. splitting `_rewrite_sparql12_to_11_tracked` into named per-concern passes with clearer sequencing/dependency documentation — without risking the correctness properties the fuzz suite and cross-backend parity tests currently protect.
+- **`starlight/query/sparql12_to_11.py` complexity — flagged 2026-08-01 as the target for a future algebraic-approach-to-SPARQL redesign.** Still the single most complex module in the codebase — now 1,315 lines, a hand-rolled, multi-pass text scanner implementing the SPARQL 1.2→1.1 rewrite pipeline via string scanning rather than parsing into (and rewriting from) a real query representation. A 2026-07-17 duplication review deliberately left it untouched (restructuring a working, fuzz-tested piece of logic purely for complexity's sake carries real regression risk without a clearly corresponding benefit), and it's still fuzz-tested (`tests/unit/test_sparql12_to_11_fuzz.py`) rather than provably correct - that file's own docstring documents several real bugs (SELECT-projection placement, nested `isTRIPLE()`, accessor-of-triple-term-literal) found via manual/live testing rather than the example-based suite, the recurring failure mode of scanning text for a problem that's structurally a grammar. **Planned direction (not yet started, not yet designed): rework the rewriter around SPARQL's own algebra** - parse into a real query representation (e.g. extending rdflib's existing pyparsing SPARQL 1.1 grammar with the additional SPARQL 1.2 productions, or operating on the algebra rdflib already builds internally) and rewrite/emit from that representation instead of scanning text, eliminating the "found by fuzzing, not designed away" bug class structurally. This is a substantial, separate piece of work - do it as an intentional project, not an incremental patch, and re-run the fuzz suite plus `test_cross_backend_parity.py` throughout as the correctness backstop.
 
 - **rdflib 8 compatibility.** Currently built on and tested against rdflib 7.6.0 (`pyproject.toml` requires `rdflib>=7.0`). rdflib 8.0.0a0 (pre-release) was tested too; revisit compatibility when a stable rdflib 8 release ships.
 
