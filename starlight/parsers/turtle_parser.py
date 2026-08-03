@@ -334,6 +334,68 @@ class _Expander:
             )
         return self._alloc()
 
+    def _resolve_qt_slot(self, val, *, allow_ground_term, role):
+        """Resolve a subject/object slot that might itself be quoted-triple
+        syntax, used by both an ordinary triple's own subject/object
+        (``expand_qt_in_triple``) and a triple term's/reified-triple's own
+        ``s``/``o`` slots (``qt_to_json``) - the same three shapes are legal
+        (or not) in both places, so both now share this one implementation
+        instead of the two near-duplicate, subtly-inconsistent copies this
+        replaced.
+
+        Three shapes, each resolving differently - **the key distinction**:
+        a reifier-shorthand term (``<<s p o>>``/``<<s p o ~ r>>``) is legal
+        in *any* term slot regardless of ``allow_ground_term``, because it
+        does not denote a nested triple term at all - it denotes the
+        (fresh or given) *reifier* of the triple ``s p o``, an ordinary
+        node exactly like any other IRI or blank node. "A triple term is
+        only permitted in object position" (the real RDF 1.2 restriction,
+        enforced below for the *ground* ``<<( )>>``/``TRIPLE()`` form) is
+        not the right rule for this - previously conflated, which incorrectly
+        rejected e.g. ``<< <<:s :p :o>> :p2 :o2 >>`` (a reifier-shorthand
+        term whose own subject is *another* reifier-shorthand term - legal)
+        the same way as ``<<( <<( :s :p :o )>> :p2 :o2 )>>`` (a ground
+        triple term nested in a ground triple term's subject slot -
+        actually illegal):
+
+          - ``<<s p o ~ r>>`` (explicit reifier) or ``<<s p o>>`` (bare,
+            reifier minted fresh) - always legal. Resolves to the reifier
+            node plus the triple term's own encoding triples and the
+            ``rdf:reifies`` link.
+          - ``<<( s p o )>>``/``TRIPLE(s, p, o)`` (ground triple term) -
+            legal only when ``allow_ground_term`` (i.e. in object position);
+            raised here with a message pointing at the reifier-shorthand
+            alternative when it isn't, since confusing the two is an easy
+            mistake to make and the fix is usually "did you mean the
+            shorthand form".
+          - anything else - returned unchanged; not this function's concern
+            (blank-node-property-list / literal rejection stay in the two
+            callers, which have slightly different rules for those).
+
+        Returns ``(resolved_val, extra_triples)``.
+        """
+        if _has_reifier(val):
+            tt_str, reif = _get_reifier_parts(val)
+            tb, e = self.qt_to_json(tt_str)
+            node = reif if reif else self._alloc()
+            e = e + [{'subject': node, 'predicate': 'rdf:reifies', 'object': tb}]
+            return node, e
+        if _is_qt_reif(val):
+            return self.qt_reif_to_json(val)
+        if _is_qt_term(val):
+            if not allow_ground_term:
+                raise TurtleSyntaxError(
+                    f'RDF 1.2: a ground triple term <<(...)>>/TRIPLE(...) is not '
+                    f'valid as a triple-term/reified-triple {role} - nesting a '
+                    f'triple term is only legal in object position. A '
+                    f'reifier-shorthand <<s p o>>/<<s p o ~ r>> is different and '
+                    f'IS legal here: it resolves to an ordinary reifier node, not '
+                    f'a nested triple term - use that if this is what you meant.',
+                    val, pos=0,
+                )
+            return self.qt_to_json(_norm_qt(val))
+        return val, []
+
     def qt_to_json(self, qt_str):
         """Return (term_bnode_str, [extra_triples]) for a <<( s p o )>> term.
         Identical triple terms reuse the same bnode via qt_cache."""
@@ -364,7 +426,7 @@ class _Expander:
 
         extras = []
         if _is_qt(subj_str):
-            subj_str, e = self.qt_to_json(_norm_qt(subj_str))
+            subj_str, e = self._resolve_qt_slot(subj_str, allow_ground_term=False, role='subject')
             extras.extend(e)
         elif _is_bnode_list(subj_str):
             subj_str = self._require_plain_blank_node(subj_str, 'subject')
@@ -376,7 +438,7 @@ class _Expander:
             )
 
         if _is_qt(obj_str):
-            obj_str, e = self.qt_to_json(_norm_qt(obj_str))
+            obj_str, e = self._resolve_qt_slot(obj_str, allow_ground_term=True, role='object')
             extras.extend(e)
         elif _is_bnode_list(obj_str):
             obj_str = self._require_plain_blank_node(obj_str, 'object')
@@ -413,41 +475,24 @@ class _Expander:
                 p, pos=0,
             )
 
-        if _is_qt_term(s):
-            raise SyntaxError(
-                "Triple term <<( )>> is not valid in subject position (RDF 1.2). "
-                "Use << s p o >> (no parentheses) for a reification shorthand."
-            )
-        elif _has_reifier(s):
-            tt_str, reif = _get_reifier_parts(s)
-            tb, e = self.qt_to_json(tt_str)
-            extras.extend(e)
-            s = reif if reif else self._alloc()
-            extras.append({'subject': s, 'predicate': 'rdf:reifies', 'object': tb})
-        elif _is_qt_reif(s):
-            s, e = self.qt_reif_to_json(s)
+        if _is_qt(s):
+            s, e = self._resolve_qt_slot(s, allow_ground_term=False, role='subject')
             extras.extend(e)
 
         if p == 'rdf:reifies' and _is_qt(o):
+            # `X rdf:reifies <<(...)>>` (whether user-written or generated
+            # internally by expand_annotation/the ~reifier forms below) -
+            # the object here is always meant as a reference to the
+            # underlying ground triple term itself, not to "the reifier of
+            # o" (that would be circular: reifying a reifier). Deliberately
+            # NOT routed through _resolve_qt_slot, which would instead
+            # resolve a reifier-shorthand `o` to *its own* reifier node.
             bnode, e = self.qt_to_json(_norm_qt(o))
             extras.extend(e)
             o = bnode
-        else:
-            if _is_qt_term(o):
-                o, e = self.qt_to_json(_norm_qt(o))
-                extras.extend(e)
-            elif _has_reifier(o):
-                tt_str, reif = _get_reifier_parts(o)
-                tb, e = self.qt_to_json(tt_str)
-                extras.extend(e)
-                o = reif if reif else self._alloc()
-                extras.append({'subject': o, 'predicate': 'rdf:reifies', 'object': tb})
-            elif _is_qt_reif(o):
-                tb, e = self.qt_to_json(_norm_qt(o))
-                extras.extend(e)
-                rb = self._alloc()
-                extras.append({'subject': rb, 'predicate': 'rdf:reifies', 'object': tb})
-                o = rb
+        elif _is_qt(o):
+            o, e = self._resolve_qt_slot(o, allow_ground_term=True, role='object')
+            extras.extend(e)
 
         return s, p, o, extras
 
