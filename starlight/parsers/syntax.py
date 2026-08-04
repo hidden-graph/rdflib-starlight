@@ -7,21 +7,59 @@ shorthand and RDF collections into flat triple dicts.
 """
 
 import re
+
+from rdflib import Literal
+from rdflib.namespace import XSD
+
 from starlight.parsers.lexer import next_token, split_obj_and_annotations
+
+# Turtle grammar distinguishes INTEGER/DECIMAL/DOUBLE purely by lexical
+# shape: an exponent suffix means DOUBLE even with no decimal point (e.g.
+# "123e0"), a decimal point with no exponent means DECIMAL. Order matters
+# below - DOUBLE must be checked before DECIMAL, since e.g. "1.5e2" would
+# otherwise never reach the DOUBLE branch (nothing here requires it to,
+# since DECIMAL's pattern doesn't match a trailing exponent anyway, but
+# checking DOUBLE first keeps the two independent instead of relying on
+# that).
+_INTEGER_RE = re.compile(r'^[+-]?[0-9]+$')
+_DOUBLE_RE  = re.compile(r'^[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)[eE][+-]?[0-9]+$')
+_DECIMAL_RE = re.compile(r'^[+-]?[0-9]*\.[0-9]+$')
 
 
 def coerce_object(s):
-    """Coerce a plain token to a Python value when the type is unambiguous."""
+    """Coerce a plain (unquoted) object-position token to a Python value
+    when the type is unambiguous - true/false to a Python bool, a bare
+    numeric literal to a correctly-typed Literal.
+
+    Only ever called for a token already known to be in *object* position
+    (a triple's object field, or an rdf:first collection element) - a bare
+    numeric literal or boolean is only legal there, never as a subject or
+    predicate, so this function doesn't need to (and must not) run for
+    those; turtle_parser._to_node() has no other path that accepts one,
+    which is what correctly rejects a fixture like the W3C Turtle 1.2
+    negative-syntax test using a bare integer as a subject.
+
+    Built directly as a Literal (not int/float) so INTEGER/DECIMAL/DOUBLE
+    stay distinguishable - a Python int/float can't tell "123e0" (DOUBLE)
+    from "123.0" (DECIMAL) from "123" (INTEGER) - and normalize=False
+    preserves the source document's exact lexical form (e.g. "04" stays
+    "04", not silently "4"), matching turtle_parser._to_node()'s
+    ^^-typed-literal branch, which takes the same care for the same reason.
+    Confirmed via the W3C SPARQL 1.2 eval-triple-terms/op-2 fixture, whose
+    "123e0" was coming out "123.0"^^xsd:decimal instead of xsd:double under
+    the old int/float-coercing version of this function.
+    """
     s = s.strip()
     if s == 'true':
         return True
     if s == 'false':
         return False
-    if re.match(r'^[+-]?[0-9]+$', s):
-        return int(s)
-    if re.match(r'^[+-]?[0-9]*\.[0-9]+(?:[eE][+-]?[0-9]+)?$', s) or \
-       re.match(r'^[+-]?[0-9]+[eE][+-]?[0-9]+$', s):
-        return float(s)
+    if _DOUBLE_RE.match(s):
+        return Literal(s, datatype=XSD.double, normalize=False)
+    if _DECIMAL_RE.match(s):
+        return Literal(s, datatype=XSD.decimal, normalize=False)
+    if _INTEGER_RE.match(s):
+        return Literal(s, datatype=XSD.integer, normalize=False)
     return s
 
 

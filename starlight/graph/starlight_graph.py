@@ -15,9 +15,10 @@ triples that define the encoding are hidden from callers.
 import re
 
 from rdflib import Graph, URIRef, BNode, Literal
+from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 from rdflib.namespace import RDF
 from starlight.model.triple import TripleTerm
-from starlight.model.encoding import TT_NS, tt_hash, lookup_tt_hash, ENCODING_PREDS as _ENCODING_PREDS, restore_select_bindings
+from starlight.model.encoding import TT_NS, tt_hash, term_key, lookup_tt_hash, ENCODING_PREDS as _ENCODING_PREDS, restore_select_bindings
 from starlight.model.dirlangstring import DirLangString, encode_dirlangstring, decode_dirlangstring
 
 SL_NS           = 'https://github.com/hidden-graph/rdflib-starlight/ns#'
@@ -37,20 +38,34 @@ _raw_triples = Graph.triples
 
 
 def _unfold_tt_encoding(g) -> Graph:
-    """Return a plain rdflib.Graph with every tt:HASH URIRef (and its
-    rdf:subject/predicate/object encoding triples) replaced by a freshly
-    minted BNode, recursively for nested triple terms.
+    """Return a plain rdflib.Graph with every triple term replaced by a
+    freshly minted BNode (with rdf:subject/predicate/object triples
+    describing it), recursively for nested triple terms.
 
     Used only by StarlightGraph.isomorphic() so rdflib's BNode-aware
     comparison can see a BNode embedded in a triple term as relabelable, the
-    same as any other BNode, instead of it being baked into an opaque
-    tt:HASH URI that looks like a fixed ground term to the algorithm.
-    Repeated references to the same tt:HASH URI within one graph map to the
-    same fresh BNode, preserving shared-identity shape. Works on the raw
-    store directly (not the decoded public view), so it needs no
-    StarlightGraph-specific registry state and works on any graph — a no-op
-    if there's no tt: content at all.
+    same as any other BNode, instead of it being baked into a fixed ground
+    term the algorithm can't relabel. Repeated references to "the same"
+    triple term within one graph map to the same fresh BNode, preserving
+    shared-identity shape.
+
+    Dispatches on getattr(g, '_is_native', False) rather than
+    isinstance(g, StarlightGraph) (this function is defined before that
+    class exists, and per this method's own docstring "other need not be a
+    StarlightGraph" - a plain rdflib.Graph correctly falls to the rdf-1.1
+    path below, a no-op since it has no tt: content at all):
+    - rdf-1.1 (or non-StarlightGraph): works on the *raw* store directly -
+      every tt:HASH URIRef (StarlightGraph's own on-disk encoding) and its
+      encoding triples become one fresh BNode each. Needs no
+      StarlightGraph-specific registry state.
+    - native (backend='rdf-1.2'): there is no tt:HASH encoding to unfold -
+      the store already holds real TripleTerm values. Walks g.triples()
+      (the *decoded* public view, which for a native backend already
+      returns real TripleTerm objects) and unfolds those instead.
     """
+    if getattr(g, '_is_native', False):
+        return _unfold_native_triple_terms(g)
+
     fresh = {}
 
     def unfold_node(n):
@@ -63,6 +78,32 @@ def _unfold_tt_encoding(g) -> Graph:
     out = Graph()
     for s, p, o in _raw_triples(g, (None, None, None)):
         out.add((unfold_node(s), p, unfold_node(o)))
+    return out
+
+
+def _unfold_native_triple_terms(g) -> Graph:
+    """_unfold_tt_encoding()'s native-backend counterpart: g.triples()
+    already returns real TripleTerm objects (no tt:HASH encoding involved
+    at all for a native backend), so this unfolds *those* directly into a
+    fresh-BNode-based reification shape instead of decoding store-level
+    encoding triples.
+    """
+    fresh: dict = {}
+
+    def unfold(node):
+        if isinstance(node, TripleTerm):
+            if node not in fresh:
+                bn = BNode()
+                fresh[node] = bn
+                out.add((bn, RDF.subject,   unfold(node.subject)))
+                out.add((bn, RDF.predicate, node.predicate))
+                out.add((bn, RDF.object,    unfold(node.object)))
+            return fresh[node]
+        return node
+
+    out = Graph()
+    for s, p, o in g.triples((None, None, None)):
+        out.add((unfold(s), p, unfold(o)))
     return out
 
 
@@ -151,6 +192,29 @@ class StarlightGraph(Graph):
         from starlight.backends.native import resolve_store_http
         return resolve_store_http(self.store, self._backend)
 
+    def _native_scoped(self, body: str) -> str:
+        """Wrap ``body`` in ``GRAPH <self.identifier> { ... }``, unless this
+        graph stands for a dataset's own default graph, in which case
+        ``body`` is returned bare.
+
+        ``self.identifier`` is ``rdflib.graph.DATASET_DEFAULT_GRAPH_ID``
+        (``urn:x-rdflib:default``) exactly when a ``StarlightDataset``
+        created this context via ``_load_context(DATASET_DEFAULT_GRAPH_ID)``
+        for content the source document put in its own default graph (see
+        ``StarlightDataset.parse()``) - never a real graph name a document
+        or caller chose. Wrapping that case in ``GRAPH <urn:x-rdflib:...>``
+        anyway would silently turn "no GRAPH clause" content into a genuine
+        named graph on the wire: a raw, unmodified SPARQL query with no
+        GRAPH clause of its own (the normal way to address a dataset's
+        default graph) would then see nothing, and a variable-graph pattern
+        (``GRAPH ?g { ... }``) would wrongly enumerate it as if it were a
+        real named graph. Every other identifier is a real graph name and
+        keeps the explicit GRAPH wrapper as before.
+        """
+        if self.identifier == DATASET_DEFAULT_GRAPH_ID:
+            return body
+        return f'GRAPH <{self.identifier}> {{ {body} }}'
+
     def _native_add(self, s, p, obj) -> None:
         from starlight.backends.native import sparql_term, http_update
         from starlight.model.triple import TripleTerm as _TT
@@ -158,21 +222,70 @@ class StarlightGraph(Graph):
         s_str = sparql_term(s)
         p_str = sparql_term(p)
         o_str = sparql_term(obj)
+        triple_str = f'{s_str} {p_str} {o_str} .'
         # INSERT DATA disallows triple terms in subject position and nested
         # triple terms in some stores (SPARQL 1.2 restriction); INSERT...WHERE
         # with an empty WHERE is equivalent but unrestricted.
         has_tt = isinstance(s, _TT) or isinstance(obj, _TT)
         if has_tt:
-            sparql = (
-                f'INSERT {{ GRAPH <{self.identifier}> '
-                f'{{ {s_str} {p_str} {o_str} . }} }} WHERE {{}}'
-            )
+            sparql = f'INSERT {{ {self._native_scoped(triple_str)} }} WHERE {{}}'
         else:
-            sparql = (
-                f'INSERT DATA {{ GRAPH <{self.identifier}> '
-                f'{{ {s_str} {p_str} {o_str} . }} }}'
-            )
+            sparql = f'INSERT DATA {{ {self._native_scoped(triple_str)} }}'
         http_update(u_url, sparql, hdrs)
+
+    def _native_add_many(self, triples) -> None:
+        """Write every ``(s, p, obj)`` in ``triples`` to this graph in a
+        single SPARQL Update request, rather than one ``_native_add()`` HTTP
+        call per triple.
+
+        Real, unskolemized blank-node syntax is used here (unlike the
+        single-triple ``add()`` -> ``_native_add()`` path) - safe
+        specifically *because* every triple goes out together in one
+        request, so SPARQL 1.1 Update's per-request blank-node scoping (the
+        whole reason ``skolemize_bnode()`` exists - see its docstring) never
+        comes into play: a blank node repeated across these triples keeps
+        its real identity for free, and Oxigraph's own engine still
+        recognizes it as a genuine blank node (correct ``ORDER BY`` term-kind
+        position, ``isBLANK()``) rather than the URI ``skolemize_bnode()``
+        would otherwise turn it into. Confirmed via the W3C SPARQL 1.2
+        eval-triple-terms/order-1 and order-2 fixtures, whose ``ORDER BY``
+        over a blank node alongside an IRI/literal/triple-term only sorts
+        correctly this way.
+
+        Used by ``parse()``/``addN()`` for a single ``StarlightGraph``,
+        where every triple is known up front and destined for this one
+        graph. Not used by ``StarlightDataset.parse()``'s own per-context
+        loop: a blank node there may be shared *across* different named-graph
+        contexts (data-4.trig's ``_:b``, referenced from both ``:g1`` and
+        ``:g2``), each its own separate ``StarlightGraph``/HTTP request -
+        only ``skolemize_bnode()`` keeps that case safe, so that path still
+        goes through ``add()`` one triple at a time.
+        """
+        if not triples:
+            return
+        from starlight.backends.native import sparql_term, http_update
+        from starlight.model.triple import TripleTerm as _TT
+
+        parts = []
+        for s, p, obj in triples:
+            if isinstance(s, (_TT, tuple)):
+                raise ValueError(
+                    "RDF 1.2: triple terms are not permitted in subject position of a triple."
+                )
+            if isinstance(s, DirLangString):
+                raise ValueError(
+                    "RDF 1.2: a literal (dirLangString) is not permitted in subject position of a triple."
+                )
+            s_str = sparql_term(s, skolemize_bnodes=False)
+            p_str = sparql_term(p, skolemize_bnodes=False)
+            o_str = sparql_term(obj, skolemize_bnodes=False)
+            parts.append(f'{s_str} {p_str} {o_str} .')
+
+        _, u_url, hdrs = self._store_http()
+        sparql = f'INSERT {{ {self._native_scoped(" ".join(parts))} }} WHERE {{}}'
+        http_update(u_url, sparql, hdrs)
+        if self._invalidate_callback:
+            self._invalidate_callback()
 
     def _native_triples(self, triple):
         from starlight.backends.native import sparql_term, http_select, http_ask
@@ -189,17 +302,16 @@ class StarlightGraph(Graph):
         s_str = _slot(s, 's')
         p_str = _slot(p, 'p')
         o_str = _slot(o, 'o')
-        pattern = f'{s_str} {p_str} {o_str}'
-        graph_clause = f'GRAPH <{self.identifier}>'
+        pattern = f'{s_str} {p_str} {o_str} .'
 
         if not free:
-            sparql = f'ASK {{ {graph_clause} {{ {pattern} . }} }}'
+            sparql = f'ASK {{ {self._native_scoped(pattern)} }}'
             if http_ask(q_url, sparql, hdrs):
                 yield (s, p, o)
             return
 
         sel = ' '.join(f'?{v}' for v in free)
-        sparql = f'SELECT {sel} WHERE {{ {graph_clause} {{ {pattern} . }} }}'
+        sparql = f'SELECT {sel} WHERE {{ {self._native_scoped(pattern)} }}'
         vars_, bindings = http_select(q_url, sparql, hdrs)
         from rdflib.term import Variable
         for row in bindings:
@@ -328,7 +440,7 @@ class StarlightGraph(Graph):
         # Coerce nested triple terms to their URIRef form first
         s_n = self._coerce_tt(tt.subject) if _needs_encoding(tt.subject) else tt.subject
         o_n = self._coerce_tt(tt.object)  if _needs_encoding(tt.object)  else tt.object
-        uri = URIRef(TT_NS + tt_hash(str(s_n), str(tt.predicate), str(o_n)))
+        uri = URIRef(TT_NS + tt_hash(term_key(s_n), term_key(tt.predicate), term_key(o_n)))
         self._tt_registry[key] = uri
         # Cache the normalized form (s_n/o_n, matching what's actually stored below),
         # not the original tt - a nested triple-term component may still be a raw
@@ -480,15 +592,11 @@ class StarlightGraph(Graph):
         three per triple term, which is significantly faster for bulk loads.
         """
         if self._is_native:
-            for s, p, o, c in quads:
-                if isinstance(c, Graph) and c.identifier is self.identifier:
-                    if isinstance(s, (TripleTerm, DirLangString)):
-                        raise ValueError(
-                            "RDF 1.2: a triple term or literal is not permitted in subject position of a triple."
-                        )
-                    self._native_add(s, p, o)
-            if self._invalidate_callback:
-                self._invalidate_callback()
+            own_triples = [
+                (s, p, o) for s, p, o, c in quads
+                if isinstance(c, Graph) and c.identifier is self.identifier
+            ]
+            self._native_add_many(own_triples)
             return self
 
         all_quads: list = []
@@ -504,11 +612,11 @@ class StarlightGraph(Graph):
                   (_collect(TripleTerm(*tt.object))
                    if isinstance(tt.object, tuple) and len(tt.object) == 3 else
                    (encode_dirlangstring(tt.object) if isinstance(tt.object, DirLangString) else tt.object))
-            s_key = str(self._tt_registry.get(tt.subject._key(), s_n)
+            s_key = term_key(self._tt_registry.get(tt.subject._key(), s_n)
                         if isinstance(tt.subject, TripleTerm) else s_n)
-            o_key = str(self._tt_registry.get(tt.object._key(),  o_n)
+            o_key = term_key(self._tt_registry.get(tt.object._key(),  o_n)
                         if isinstance(tt.object,  TripleTerm) else o_n)
-            uri = URIRef(TT_NS + tt_hash(s_key, str(tt.predicate), o_key))
+            uri = URIRef(TT_NS + tt_hash(s_key, term_key(tt.predicate), o_key))
             self._tt_registry[key] = uri
             self._tt_nodes[uri] = tt
             all_quads.append((uri, RDF.subject,   s_n,          self))
@@ -543,11 +651,51 @@ class StarlightGraph(Graph):
             self._invalidate_callback()
         return self
 
+    def _native_remove(self, s, p, obj) -> None:
+        """Remove triples matching (s, p, obj) via raw SPARQL Update -
+        mirrors _native_add()/_native_triples()'s own dispatch rather than
+        rdflib's own ``Graph.remove()`` -> ``store.remove()``, which
+        previously reached rdflib's ``SPARQLUpdateStore`` directly and
+        crashed outright on any BNode (``_node_to_sparql()`` raises
+        "SPARQLStore does not support BNodes!", confirmed live against
+        Oxigraph - it has no ``skolemize_bnode()`` of its own to fall
+        back on, unlike this class's own read/write paths).
+
+        None in any position is a wildcard (matching rdflib's own
+        ``Graph.remove()`` contract), handled with a ``DELETE {p} WHERE
+        {p}`` pattern-delete rather than ``DELETE DATA`` - the latter only
+        accepts fully ground triples.
+        """
+        from starlight.backends.native import sparql_term, http_update
+        from starlight.model.triple import TripleTerm as _TT
+        _, u_url, hdrs = self._store_http()
+
+        free = []
+        def _slot(node, var: str) -> str:
+            if node is None:
+                free.append(var)
+                return f'?{var}'
+            return sparql_term(node)
+
+        pattern = f'{_slot(s, "s")} {_slot(p, "p")} {_slot(obj, "o")} .'
+        scoped = self._native_scoped(pattern)
+
+        has_tt = isinstance(s, _TT) or isinstance(obj, _TT)
+        if free or has_tt:
+            # DELETE DATA disallows both variables and (in some stores)
+            # triple terms - DELETE/WHERE with a matching pattern on both
+            # sides is the unrestricted equivalent, same rationale
+            # _native_add() already uses for INSERT.
+            sparql = f'DELETE {{ {scoped} }} WHERE {{ {scoped} }}'
+        else:
+            sparql = f'DELETE DATA {{ {scoped} }}'
+        http_update(u_url, sparql, hdrs)
+
     def remove(self, triple):
         """Remove a triple. Returns immediately if a TripleTerm in the pattern is not registered."""
         s, p, obj = triple
         if self._is_native:
-            super().remove((s, p, obj))
+            self._native_remove(s, p, obj)
             if self._invalidate_callback:
                 self._invalidate_callback()
             return
@@ -621,6 +769,46 @@ class StarlightGraph(Graph):
                             seen.add(key)
                             yield (self._restore(s_r), p_r, self._restore(o_r))
 
+    def _native_triples_choices(self, triple):
+        """Native-backend body of triples_choices() - built directly as a
+        SPARQL SELECT with a VALUES clause per list-valued position rather
+        than delegating to the store: SPARQLStore.triples_choices() (the
+        rdflib base class's own implementation) is an unconditional
+        ``raise NotImplementedError("Triples choices currently not
+        supported")`` - confirmed live against Oxigraph before this fix.
+        A single HTTP round trip regardless of how many choices are given,
+        same shape as _native_triples()'s own free-variable/ASK-vs-SELECT
+        dispatch.
+        """
+        from starlight.backends.native import sparql_term, http_select
+        from rdflib.term import Variable
+        s, p, o = triple
+        q_url, _, hdrs = self._store_http()
+
+        free = []
+        values_clauses = []
+
+        def _slot(node, var: str) -> str:
+            if node is None:
+                free.append(var)
+                return f'?{var}'
+            if isinstance(node, list):
+                free.append(var)
+                terms = ' '.join(sparql_term(n) for n in node)
+                values_clauses.append(f'VALUES ?{var} {{ {terms} }}')
+                return f'?{var}'
+            return sparql_term(node)
+
+        pattern = f'{_slot(s, "s")} {_slot(p, "p")} {_slot(o, "o")} .'
+        sparql = f'SELECT * WHERE {{ {self._native_scoped(pattern)} {" ".join(values_clauses)} }}'
+        vars_, bindings = http_select(q_url, sparql, hdrs)
+        for row in bindings:
+            yield (
+                row.get(Variable('s'), s) if 's' in free else s,
+                row.get(Variable('p'), p) if 'p' in free else p,
+                row.get(Variable('o'), o) if 'o' in free else o,
+            )
+
     def triples_choices(self, triple, context=None):
         """Iterate triples matching a choices pattern. Filters encoding triples; restores TripleTerms.
 
@@ -629,6 +817,9 @@ class StarlightGraph(Graph):
         an unregistered single TripleTerm causes the method to yield nothing.
         """
         s, p, o = triple
+        if self._is_native:
+            yield from self._native_triples_choices((s, p, o))
+            return
         s_n, skip_s = self._coerce_choices(s)
         o_n, skip_o = self._coerce_choices(o)
         if skip_s or skip_o:
@@ -647,13 +838,61 @@ class StarlightGraph(Graph):
             return False
         return super().__contains__((s_n, p, o_n))
 
+    def _native_len(self) -> int:
+        """COUNT(*) via one SPARQL SELECT, rather than __len__ falling
+        through to `self.triples((None, None, None))` and fetching + Python-
+        counting every triple over HTTP - the store already supports this
+        efficiently (plain SPARQLStore.__len__ already does a COUNT(*) for a
+        non-native graph; StarlightGraph's own __len__ override just never
+        used it for native).
+        """
+        from starlight.backends.native import http_select
+        from rdflib.term import Variable
+        q_url, _, hdrs = self._store_http()
+        sparql = f'SELECT (COUNT(*) AS ?c) WHERE {{ {self._native_scoped("?s ?p ?o .")} }}'
+        _vars, bindings = http_select(q_url, sparql, hdrs)
+        if not bindings:
+            return 0
+        return int(str(bindings[0][Variable('c')]))
+
     def __len__(self):
         """Count of visible (non-encoding) triples."""
+        if self._is_native:
+            return self._native_len()
         return sum(1 for _ in self.triples((None, None, None)))
 
     # ------------------------------------------------------------------
     # RDF 1.2-specific additions
     # ------------------------------------------------------------------
+
+    def _native_reifiers(self, TT, predicate, object):
+        """Native-backend body of reifiers() - uses self.triples() (which
+        dispatches through _native_triples()) rather than the rdf-1.1 path's
+        super().triples() + _tt_registry lookup, neither of which mean
+        anything for a native backend (no tt:HASH encoding, no local
+        registry of what's in the live store).
+        """
+        if TT is not None:
+            tt_reifiers = {r for r, _, _ in self.triples((None, RDF_REIFIES, TT))}
+        else:
+            tt_reifiers = None
+
+        if predicate is not None or object is not None:
+            prop_reifiers = {s for s, _, _ in self.triples((None, predicate, object))}
+        else:
+            prop_reifiers = None
+
+        if tt_reifiers is not None and prop_reifiers is not None:
+            candidates = tt_reifiers & prop_reifiers
+        elif tt_reifiers is not None:
+            candidates = tt_reifiers
+        elif prop_reifiers is not None:
+            all_reifiers = {r for r, _, _ in self.triples((None, RDF_REIFIES, None))}
+            candidates = prop_reifiers & all_reifiers
+        else:
+            candidates = {r for r, _, _ in self.triples((None, RDF_REIFIES, None))}
+
+        yield from candidates
 
     def add_reifier_annotation(self, predicate, obj, name=None):
         """Create a reifier node and add one annotation property to it.
@@ -676,6 +915,18 @@ class StarlightGraph(Graph):
     def add_reification(self, reifier, triple_term):
         """Add reifier rdf:reifies triple_term, making the node an official reifier."""
         tt = triple_term if isinstance(triple_term, TripleTerm) else TripleTerm(*triple_term)
+        if self._is_native:
+            # self.add() (-> _native_add()) writes tt using the backend's
+            # real <<( )>> syntax. The rdf-1.1 path below instead interns tt
+            # to its tt:HASH encoding (super().add() bypasses backend
+            # dispatch entirely, correct only for that encoding) - using it
+            # here for native would write raw rdf:subject/predicate/object
+            # fragments straight into a live RDF-1.2 endpoint instead of a
+            # real triple term. Confirmed live: a second StarlightGraph
+            # object (same store, no shared in-process state) read back
+            # nothing but the fragments via this path before this fix.
+            self.add((reifier, RDF_REIFIES, tt))
+            return
         tt_uri = self._intern_tt(tt)
         super().add((reifier, RDF_REIFIES, tt_uri))
 
@@ -689,6 +940,9 @@ class StarlightGraph(Graph):
         Filters combine: reifiers(TT=t, predicate=p, object=o) returns
         reifiers that reify t AND have (reifier, p, o) in the graph.
         """
+        if self._is_native:
+            yield from self._native_reifiers(TT, predicate, object)
+            return
         # Step 1 — candidate reifiers from TT filter (fast path via rdf:reifies index)
         if TT is not None:
             tt_uri = self._coerce_tt_read(TT)
@@ -724,6 +978,20 @@ class StarlightGraph(Graph):
             g.reifications()                 # all reified triple terms
             g.reifications(p=EX.knows)       # reified TTs with that predicate
         """
+        if self._is_native:
+            seen = set()
+            for _, _, tt in self.triples((None, RDF_REIFIES, None)):
+                if not isinstance(tt, TripleTerm) or tt in seen:
+                    continue
+                if s is not None and tt.subject != s:
+                    continue
+                if p is not None and tt.predicate != p:
+                    continue
+                if o is not None and tt.object != o:
+                    continue
+                seen.add(tt)
+                yield tt
+            return
         for tt in self.triple_terms(subject=s, predicate=p, object=o):
             tt_uri = self._coerce_tt_read(tt)
             if tt_uri and tt_uri is not _TT_NOT_FOUND:
@@ -735,6 +1003,12 @@ class StarlightGraph(Graph):
 
         Excludes the rdf:reifies triple itself.
         """
+        if self._is_native:
+            for reifier, _, _ in self.triples((None, RDF_REIFIES, TT)):
+                for _, pred, val in self.triples((reifier, None, None)):
+                    if pred != RDF_REIFIES:
+                        yield reifier, pred, val
+            return
         tt_uri = self._coerce_tt_read(TT)
         if tt_uri is None or tt_uri is _TT_NOT_FOUND:
             return
@@ -745,6 +1019,11 @@ class StarlightGraph(Graph):
 
     def reified_triples(self, reifier):
         """Yield the TripleTerms reified by the given reifier node."""
+        if self._is_native:
+            for _, _, o in self.triples((reifier, RDF_REIFIES, None)):
+                if isinstance(o, TripleTerm):
+                    yield o
+            return
         for _, _, o in super().triples((reifier, RDF_REIFIES, None)):
             if isinstance(o, URIRef) and str(o).startswith(TT_NS):
                 tt = self._tt_nodes.get(o)
@@ -759,6 +1038,22 @@ class StarlightGraph(Graph):
             g.triple_terms(predicate=EX.knows)      # all TTs with that predicate
             g.triple_terms(EX.bob, EX.knows, None)  # any TT with that s and p
         """
+        if self._is_native:
+            # No local registry for native (no tt:HASH encoding at all) -
+            # scan every triple in the graph for a triple-term-valued
+            # object instead. O(graph size), same complexity class as the
+            # rdf-1.1 path's _tt_nodes scan (also every triple term ever
+            # seen, just from a local dict instead of a live fetch).
+            seen = set()
+            for _, _, tt in self.triples((None, None, None)):
+                if not isinstance(tt, TripleTerm) or tt in seen:
+                    continue
+                if subject   is not None and tt.subject   != subject:   continue
+                if predicate is not None and tt.predicate != predicate: continue
+                if object    is not None and tt.object    != object:    continue
+                seen.add(tt)
+                yield tt
+            return
         for tt in self._tt_nodes.values():
             if subject   is not None and tt.subject   != subject:   continue
             if predicate is not None and tt.predicate != predicate: continue
@@ -767,11 +1062,17 @@ class StarlightGraph(Graph):
 
     def has_triple_term(self, subject, predicate, object):
         """Return True if a TripleTerm with these exact components exists in the graph."""
+        if self._is_native:
+            tt = TripleTerm(subject, predicate, object)
+            return any(True for _ in self.triples((None, None, tt)))
         key = TripleTerm(subject, predicate, object)._key()
         return key in self._tt_registry
 
     def remove_reification(self, reifier):
         """Remove the rdf:reifies triple(s) for the given reifier."""
+        if self._is_native:
+            self.remove((reifier, RDF_REIFIES, None))
+            return
         super().remove((reifier, RDF_REIFIES, None))
 
     def parse(self, source=None, publicID=None, format=None,
@@ -819,8 +1120,7 @@ class StarlightGraph(Graph):
                     # get written using the backend's real <<( )>> syntax,
                     # not the flat encoding-triple fragments.
                     from starlight.parsers.turtle_parser import decode_tt_encoded_triples
-                    for triple in decode_tt_encoded_triples(processed):
-                        self.add(triple)
+                    self._native_add_many(list(decode_tt_encoded_triples(processed)))
                 else:
                     for triple in processed:
                         super().add(triple)
@@ -840,8 +1140,11 @@ class StarlightGraph(Graph):
                     from starlight.parsers.ntriples12 import parse_nquads12
                     # merge all named graphs: drop the graph component
                     triples = [(s, p, o) for s, p, o, _g in parse_nquads12(text)]
-                for triple in triples:
-                    self.add(triple)
+                if self._is_native:
+                    self._native_add_many(list(triples))
+                else:
+                    for triple in triples:
+                        self.add(triple)
 
                 from starlight.model.conformance import check_version_conformance_for_graphs
                 check_version_conformance_for_graphs(
@@ -860,8 +1163,7 @@ class StarlightGraph(Graph):
                     skolemized = Graph()
                     for triple in parse_trig12(text):
                         skolemized.add(triple)
-                    for triple in decode_tt_encoded_triples(skolemized):
-                        self.add(triple)
+                    self._native_add_many(list(decode_tt_encoded_triples(skolemized)))
                 else:
                     for triple in parse_trig12(text):
                         super().add(triple)
@@ -872,25 +1174,67 @@ class StarlightGraph(Graph):
 
             elif format == 'trix12':
                 from starlight.parsers.trix12 import parse_trix12
-                for triple in parse_trix12(text):
-                    self.add(triple)
+                triples = parse_trix12(text)
+                if self._is_native:
+                    self._native_add_many(list(triples))
+                else:
+                    for triple in triples:
+                        self.add(triple)
 
             elif format == 'rdfxml12':
                 from starlight.parsers.rdfxml12 import parse_rdfxml12, extract_version_directive as _rx_version
-                for triple in parse_rdfxml12(text):
-                    self.add(triple)
+                triples = parse_rdfxml12(text)
+                if self._is_native:
+                    self._native_add_many(list(triples))
+                else:
+                    for triple in triples:
+                        self.add(triple)
 
                 from starlight.model.conformance import check_version_conformance_for_graphs
                 check_version_conformance_for_graphs(_rx_version(text), [self], context='RDF/XML document')
 
             elif format == 'jsonld12':
-                # Delegate to rdflib's JSON-LD parser (handles @context expansion);
-                # the tt: encoding triples and rdf:type rdf:TripleTerm markers are
-                # loaded into the store, then _build_registry_from_store rebuilds
-                # the TripleTerm registry.  rdf:type rdf:TripleTerm is filtered by
-                # _is_encoding_triple so it never surfaces to callers.
-                super().parse(data=text, format='json-ld')
-                self._build_registry_from_store()
+                if self._is_native:
+                    # super().parse() below writes straight into self's own
+                    # store via a bypassed rdflib-internal ConjunctiveGraph
+                    # wrapper (rdflib's json-ld parser's own sink, not
+                    # StarlightGraph.add()) - fine for the rdf-1.1 backend,
+                    # whose on-disk format *is* this tt:HASH encoding, but
+                    # wrong here: it would write the raw rdf:subject/
+                    # predicate/object encoding fragments directly into the
+                    # live native store instead of the real <<( )>> syntax
+                    # _native_add_many() produces, and _build_registry_from_
+                    # store() is a no-op for a native backend (see its own
+                    # docstring), so those fragments would never be
+                    # reconstructed - they'd leak into every later read.
+                    # Parsing into a throwaway plain Graph first and decoding
+                    # it exactly like the trig12 branch above avoids that.
+                    from starlight.parsers.turtle_parser import decode_tt_encoded_triples
+                    temp = Graph()
+                    temp.parse(data=text, format='json-ld')
+                    # rdf:type rdf:TripleTerm marker triples (see
+                    # starlight/serializers/jsonld12.py's own docstring for
+                    # this shape) aren't part of decode_tt_encoded_triples()'s
+                    # contract the way turtle12/trig12's own intermediate
+                    # sl:TripleTerm markers are (those are stripped by
+                    # _skolemize_encoding before decode_tt_encoded_triples
+                    # ever sees them) - left in place, decode_tt_encoded_
+                    # triples() would yield them as ordinary data with a
+                    # *reconstructed TripleTerm* as subject, which
+                    # _native_add_many() then correctly rejects (triple terms
+                    # aren't permitted in subject position).
+                    for tt_uri in list(temp.subjects(RDF.type, URIRef(_RDF_TRIPLE_TERM))):
+                        temp.remove((tt_uri, RDF.type, URIRef(_RDF_TRIPLE_TERM)))
+                    self._native_add_many(list(decode_tt_encoded_triples(temp)))
+                else:
+                    # Delegate to rdflib's JSON-LD parser (handles @context
+                    # expansion); the tt: encoding triples and rdf:type
+                    # rdf:TripleTerm markers are loaded into the store, then
+                    # _build_registry_from_store rebuilds the TripleTerm
+                    # registry.  rdf:type rdf:TripleTerm is filtered by
+                    # _is_encoding_triple so it never surfaces to callers.
+                    super().parse(data=text, format='json-ld')
+                    self._build_registry_from_store()
 
             return self
         return super().parse(source=source, publicID=publicID, format=format,
@@ -959,6 +1303,8 @@ class StarlightGraph(Graph):
         if r.type == 'SELECT':
             restore_select_bindings(r, self._restore)
         elif r.type == 'CONSTRUCT':
+            from starlight.model.encoding import inject_missing_tt_encoding
+            inject_missing_tt_encoding(r.graph, self._restore)
             r.graph = StarlightGraph.from_rdflib(r.graph)
         return r
 
@@ -1284,12 +1630,44 @@ class StarlightGraph(Graph):
         return self._deskolemize_to_graph().serialize(destination=destination, format=format, **kwargs)
 
     def _deskolemize_to_graph(self) -> Graph:
-        """Return a plain rdflib.Graph with internal tt:/rr: URIRefs replaced by BNodes.
+        """Return a plain rdflib.Graph with internal tt:/rr: URIRefs (or, for
+        a native backend, real TripleTerm values and rr: URIRefs) replaced
+        by BNodes.
 
-        Used by 1.1 serializers so triple terms appear as blank-node reifications
+        Used by non-RDF12 serializers (format='turtle', 'xml', etc, via
+        serialize()) so triple terms appear as blank-node reifications
         rather than opaque content-addressed URIRefs.
+
+        Native branch: `raw = Graph(store=self.store, identifier=self.identifier)`
+        below (a *plain* rdflib.Graph wrapping the same store, deliberately
+        bypassing StarlightGraph.triples()) is exactly wrong for native -
+        it hits SPARQLStore.triples()'s own SPARQL JSON parsing, which (per
+        starlight.backends.native's own module docstring) rdflib 7.x cannot
+        parse a "type":"triple" binding from at all. Uses self.triples()
+        (the native-dispatching, TripleTerm-restoring public method) plus
+        _unfold_native_triple_terms() instead, matching how
+        StarlightGraph.isomorphic() already handles this same asymmetry.
         """
         from starlight.model.encoding import TT_NS, RR_NS
+
+        if self._is_native:
+            rr_map: dict = {}
+
+            def _sub_rr(node):
+                if isinstance(node, URIRef) and str(node).startswith(RR_NS):
+                    if node not in rr_map:
+                        rr_map[node] = BNode()
+                    return rr_map[node]
+                return node
+
+            out = Graph()
+            for prefix, ns in self.namespaces():
+                if not str(ns).startswith(RR_NS):
+                    out.bind(prefix, ns)
+            for s, p, o in _unfold_native_triple_terms(self):
+                out.add((_sub_rr(s), p, _sub_rr(o)))
+            return out
+
         _INTERNAL_NS = (TT_NS, RR_NS, SL_NS)
 
         bnode_map: dict = {}

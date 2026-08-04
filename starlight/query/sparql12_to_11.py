@@ -34,13 +34,43 @@ TT_HASH_FN = f"<{TT_NS_PREFIX}fn/hash>"
 
 
 def _register_tt_hash_function() -> None:
-    from rdflib import URIRef
+    from rdflib import BNode, URIRef
     from rdflib.plugins.sparql.operators import register_custom_function
+    from rdflib.plugins.sparql.sparql import SPARQLError
 
-    from starlight.model.encoding import TT_NS, tt_hash, remember_tt_hash
+    from starlight.model.encoding import TT_NS, tt_hash, term_key, remember_tt_hash
 
     def _tt_hash_fn(s, p, o):
-        uri = URIRef(TT_NS + tt_hash(str(s), str(p), str(o)))
+        # RDF 1.2 (17.4.6, TRIPLE()): a triple term's subject must be an
+        # IRI or blank node, predicate an IRI - never a Literal in either
+        # position (object has no such restriction). Confirmed via a real
+        # W3C test (triple-on-literals): TRIPLE(?subject, ?predicate,
+        # ?object) with a VALUES row binding ?subject/?predicate to a
+        # Literal is expected to leave ?triple *unbound* for that row, not
+        # silently construct an invalid triple term - SPARQLError
+        # specifically (not ValueError) is what makes that happen: it's
+        # the one exception type evalExtend's own error handling catches
+        # and turns into "this BIND target stays unbound", instead of
+        # aborting the whole query.
+        if not isinstance(s, (URIRef, BNode)):
+            raise SPARQLError(f"TRIPLE(): subject must be an IRI or blank node, not {s!r}")
+        if not isinstance(p, URIRef):
+            raise SPARQLError(f"TRIPLE(): predicate must be an IRI, not {p!r}")
+        # A triple term is internally represented as a plain TT_NS-prefixed
+        # URIRef (the whole point of the encoding) - so the isinstance
+        # checks above alone don't catch "subject/predicate is *itself* a
+        # triple term", which RDF 1.2 forbids just as much as a Literal
+        # there (triple terms are only ever legal in object position).
+        # Confirmed via a real W3C test (triple-on-triple-terms): a VALUES
+        # row binding ?subject to a ground <<( )>> value must also leave
+        # ?triple unbound, not silently construct a nested-in-subject-
+        # position triple term - which would crash downstream anyway (see
+        # TripleTerm.__init__'s own, separate guard against exactly this).
+        if str(s).startswith(TT_NS):
+            raise SPARQLError("TRIPLE(): subject must not itself be a triple term")
+        if str(p).startswith(TT_NS):
+            raise SPARQLError("TRIPLE(): predicate must not itself be a triple term")
+        uri = URIRef(TT_NS + tt_hash(term_key(s), term_key(p), term_key(o)))
         # s/p/o here are rdflib's own already-resolved terms (this function
         # runs at SPARQL *evaluation* time, after parsing/prefix-resolution,
         # not at this module's text-rewrite time) - remembering them lets
@@ -63,6 +93,78 @@ def _register_tt_hash_function() -> None:
 # here since TT_NS/DIRLANG_NS are starlight's own namespaces, not shared with
 # any other library.
 _register_tt_hash_function()
+
+# SPARQL-callable functions computing SUBJECT()/PREDICATE()/OBJECT() of a
+# triple-term value (its tt:HASH URIRef). Registered as `raw=True` custom
+# functions (rdflib passes the already-evaluated Expr plus the live
+# evaluation Context, giving access to ctx.graph for a real store lookup -
+# confirmed via rdflib's own operators.Function/register_custom_function:
+# raw functions receive (e, ctx), e.expr already holds evaluated arguments,
+# and default_cast's own raw=True builtins use e.expr[0] as a plain already-
+# resolved term the same way).
+#
+# Needed because the *previous* mechanism (rewriting SUBJECT(?tt) into a
+# `?tt rdf:subject ?fresh_var .` graph-pattern *match*, still used by
+# nothing after this change - see _rewrite_bind_accessors/
+# _rewrite_triple_functions/_rewrite_group_content's inline handling, all
+# updated to emit a call to these functions instead) only works when ?tt's
+# value was already written to some graph. A value computed fresh via
+# TT_HASH_FN in a BIND/VALUES/FILTER expression (e.g. `BIND(TRIPLE(:s,:p,:o)
+# AS ?t)` with no matching WHERE-clause pattern at all) was never written
+# anywhere, so that match can never succeed - confirmed as a real,
+# reproducible bug via a W3C test (expr-2): SUBJECT(?t)/etc. on such a ?t
+# silently produced zero rows instead of the correct answer. These
+# functions check _TT_HASH_MEMO (populated by TT_HASH_FN for exactly this
+# "constructed but never written" case - see remember_tt_hash's own
+# docstring) first, falling back to a real ctx.graph dereference for a
+# value that *was* written to the graph - covering both cases uniformly
+# through one mechanism, rather than needing the rewriter to know in
+# advance (impossible at text-rewrite time) which case a given occurrence
+# is.
+_TT_ACCESSOR_FN = {
+    'SUBJECT':   f"<{TT_NS_PREFIX}fn/subject>",
+    'PREDICATE': f"<{TT_NS_PREFIX}fn/predicate>",
+    'OBJECT':    f"<{TT_NS_PREFIX}fn/object>",
+}
+
+
+def _register_tt_accessor_functions() -> None:
+    from rdflib import URIRef
+    from rdflib.namespace import RDF
+    from rdflib.plugins.sparql.operators import register_custom_function
+    from rdflib.plugins.sparql.sparql import SPARQLError
+
+    from starlight.model.encoding import TT_NS, lookup_tt_hash
+
+    def _make_accessor(label: str, index: int, pred):
+        def _accessor(e, ctx):
+            if len(e.expr) != 1:
+                raise SPARQLError(f"{label}() requires exactly 1 argument")
+            uri = e.expr[0]
+            if not (isinstance(uri, URIRef) and str(uri).startswith(TT_NS)):
+                raise SPARQLError(f"{label}(): argument is not a triple term")
+            remembered = lookup_tt_hash(uri)
+            if remembered is not None:
+                return remembered[index]
+            value = ctx.graph.value(uri, pred)
+            if value is None:
+                raise SPARQLError(f"{label}(): {uri!r} is not a known triple term")
+            return value
+
+        return _accessor
+
+    for name, index, pred in (
+        ('SUBJECT', 0, RDF.subject),
+        ('PREDICATE', 1, RDF.predicate),
+        ('OBJECT', 2, RDF.object),
+    ):
+        register_custom_function(
+            URIRef(_TT_ACCESSOR_FN[name][1:-1]), _make_accessor(name, index, pred),
+            override=True, raw=True,
+        )
+
+
+_register_tt_accessor_functions()
 
 _TRIPLE_FUNC_RE = _re.compile(
     r'\b(SUBJECT|PREDICATE|OBJECT)\s*\(\s*([?$][A-Za-z_][A-Za-z0-9_]*)\s*\)',
@@ -194,11 +296,21 @@ def _rewrite_dirlang_literals(query: str) -> str:
     --dir suffix and raises a ParseException on the "--" it doesn't expect.
 
     Runs early, before anything else, so every later pass only ever sees
-    plain SPARQL 1.1-parseable text. Does not (and cannot) fix a "text"@lang--dir
-    literal used directly as a graph-pattern term (e.g. `?s :p "hi"@en--rtl .`):
-    SPARQL syntax doesn't allow a function call in a term position, so that
-    position still needs a bound variable - already supported, just not via
-    literal syntax typed directly into a pattern.
+    plain SPARQL 1.1-parseable text. Emits a *directly typed literal*
+    (``"text"^^<dirlang-encoded-datatype-uri>``), computed here at rewrite
+    time via the exact same `{lang}--{direction}` URI shape
+    `starlight.model.encoding.encode_dirlang_datatype` uses for storage -
+    not a call to the registered dirlang: constructor function (used
+    elsewhere in this module, for STRLANGDIR()'s *dynamic*-argument case,
+    where the language/direction aren't known until evaluation time). A
+    directly typed literal, unlike a function call, is valid SPARQL syntax
+    in every position a literal can appear - term slots (VALUES rows,
+    ordinary triple patterns) included, not just expression positions
+    (BIND/FILTER). Confirmed as a real, previously-broken case via a W3C
+    test (triple-on-str-literals): a "text"@lang--dir literal written
+    directly inside a VALUES row produced a bare function-call token where
+    SPARQL's DataBlockValue grammar requires an actual ground term,
+    raising a ParseException at the VALUES keyword itself.
     """
     if '--' not in query:
         return query
@@ -228,8 +340,8 @@ def _rewrite_dirlang_literals(query: str) -> str:
 
         m = lang_dir_re.match(query, j)
         if m:
-            lang, direction = m.group(1), m.group(2)
-            result.append(f'{DIRLANG_CONSTRUCT_FN}({token}, "{lang}", "{direction}")')
+            lang, direction = m.group(1).lower(), m.group(2).lower()
+            result.append(f'{token}^^<{DIRLANG_NS_PREFIX}{lang}--{direction}>')
             i = m.end()
         else:
             result.append(token)
@@ -310,13 +422,7 @@ def _rewrite_dirlang_and_strlangdir(query: str) -> str:
         i = end
     return ''.join(result)
 
-_FUNC_TO_PRED = {
-    'SUBJECT':   RDF_SUBJECT,
-    'PREDICATE': RDF_PREDICATE,
-    'OBJECT':    RDF_OBJECT,
-}
-
-# BIND(SUBJECT(?tt) AS ?s)  →  ?tt <rdf:subject> ?s  (in-place, no outer injection)
+# BIND(SUBJECT(?tt) AS ?s)  →  BIND(<tt:fn/subject>(?tt) AS ?s)  (in-place, no outer injection)
 # $tt/$s are equally valid SPARQL variable syntax (the sigils are interchangeable)
 # and are the convention SHACL-SPARQL constraints use for $this/$value.
 _BIND_ACCESSOR_RE = _re.compile(
@@ -341,14 +447,32 @@ _T = (
 )
 
 # << s p o ~ reifier >> pred obj  — annotation subject with explicit reifier
-_ANN_SUBJECT_TILDE_RE = _re.compile(
-    rf'<<\s+({_T})\s+({_T})\s+({_T})\s+~\s+({_T})\s*>>\s+({_T})\s+({_T})',
-)
-
-# << s p o >> pred obj  — annotation subject pattern (anonymous reifier)
-_ANN_SUBJECT_RE = _re.compile(
-    rf'<<\s+({_T})\s+({_T})\s+({_T})\s*>>\s+({_T})\s+({_T})',
-)
+#
+# `<<`/`>>` boundaries use `\s*` (optional whitespace), not `\s+`: SPARQL's
+# own tokenization doesn't require whitespace immediately after `<<` or
+# immediately before/after `>>` (neither is a valid continuation character
+# for whatever term follows/precedes), so `<<:a :b :c>> ?p ?o` (no space
+# around the delimiters at all) is perfectly valid SPARQL syntax - and real,
+# not contrived: the W3C SPARQL 1.2 test suite's own `basic-2.rq` fixture
+# uses exactly this shape. Requiring `\s+` there was confirmed a real bug,
+# not a simplification with no practical impact - it silently failed to
+# rewrite (and therefore failed to parse at all) any query written this
+# way, which turned out to be the majority of the affected fixtures once
+# checked. `\s+` is kept between the *terms themselves* (s/p/o and the
+# trailing pred/obj) - those genuinely do need separating whitespace, since
+# e.g. two adjacent prefixed names with no space between them would
+# tokenize as one.
+#
+# The bracket reifier-shorthand forms themselves (`<<s p o>>`/
+# `<<s p o ~ r>>`) are NOT handled by a regex at all - see
+# _consume_reifier_term/_rewrite_reifier_term below, wired into
+# _rewrite_group_content's character scanner. A regex anchored on "subject
+# position, immediately followed by pred+obj" (which is what used to live
+# here) can't express "usable in ANY term position" - object, nested inside
+# another reifier/triple term, or standing alone as a whole statement with
+# no trailing pred/obj at all (`<<s p o ~ r>> .`) - all real shapes the W3C
+# test suite exercises. The scanner-based approach handles all of them
+# uniformly, the same way <<( )>> ground/pattern triple terms already are.
 
 # s p o {| ap av ; ap2 av2 |}  — inline annotation block
 _ANN_BLOCK_RE = _re.compile(
@@ -452,6 +576,32 @@ def _find_group_pattern_start(query: str) -> int | None:
     return brace_m.end() if brace_m else None
 
 
+def _find_group_pattern_end(query: str) -> int | None:
+    """Index of the outermost group graph pattern's own matching closing
+    brace - the companion to _find_group_pattern_start, for content that
+    must be appended *after* everything already in the WHERE clause rather
+    than prepended before it.
+
+    Needed because a BIND, unlike a BGP triple match, is evaluated in
+    sequence and must textually follow whatever pattern binds its own
+    argument variable, or that variable is still unbound when the BIND
+    runs. Confirmed as a real, reproducible regression (TestQ7,
+    `SELECT ?who (SUBJECT(?tt) AS ?knower) WHERE { ?who :says ?tt . }`):
+    _rewrite_triple_functions used to inject its accessor-function BIND at
+    _find_group_pattern_start's position (the very start of WHERE, correct
+    for the *previous* rdf:subject-match-pattern mechanism, which - like
+    any BGP triple - joins order-independently) - placing
+    `BIND(<tt:fn/subject>(?tt) AS ?__tt0)` *before* `?who :says ?tt .`
+    itself, so ?tt was still unbound when the BIND evaluated, silently
+    producing an unbound ?knower instead of raising.
+    """
+    start = _find_group_pattern_start(query)
+    if start is None:
+        return None
+    _, end = _consume_balanced(query, start - 1, '{', '}')
+    return end - 1
+
+
 def _inject_ground_binds_into_where(query: str, state: "_RewriteState") -> str:
     """Insert state.pending_ground_binds right after the WHERE clause's own
     opening brace, so they precede everything else in the query - see
@@ -494,11 +644,14 @@ def _rewrite_construct_query(query: str, state: "_RewriteState") -> str:
     """
     split = _try_split_construct_where(query)
     if split is None:
+        query = _rewrite_block_forms(query, state, in_construct_template=False)
         return _inject_ground_binds_into_where(_rewrite_group_content(query, state), state)
 
     prologue, template_inner, where_inner, epilogue = split
+    where_inner = _rewrite_block_forms(where_inner, state, in_construct_template=False)
     rewritten_where = _rewrite_group_content(where_inner, state, handle_funcs=True)
     state.in_construct_template = True
+    template_inner = _rewrite_block_forms(template_inner, state, in_construct_template=True)
     rewritten_template = _rewrite_group_content(template_inner, state, handle_funcs=True)
     state.in_construct_template = False
 
@@ -690,6 +843,17 @@ def _inline_ground_triple_terms(token: str) -> str:
     """
     token = token.strip()
     if not token.startswith('<<('):
+        if token == 'a':
+            # The bare "a" (rdf:type) predicate shorthand is only legal in
+            # an actual triple-pattern predicate slot, never as a general
+            # term/expression - confirmed a real, reproducible ParseException
+            # via a W3C test (triple-on-triple-terms, VALUES row containing
+            # <<(:x a :z)>>): embedding "a" verbatim as a tt:fn/hash(...)
+            # argument produces `tt:fn/hash(:x, a, :z)`, which plain rdflib
+            # rejects (`BIND(<fn>(:x, a, :z) AS ?x)` fails to parse
+            # standalone too, confirmed independent of this VALUES-rewriting
+            # path specifically).
+            return '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>'
         return token
     inner = token[3:-3].strip()
     parts = _split_top_level_terms(inner)
@@ -904,7 +1068,8 @@ def _rewrite_sparql12_to_11_tracked(query: str) -> tuple[str, frozenset]:
         query = _rewrite_dirlang_and_strlangdir(query)
 
     needs_tt   = "<<(" in query
-    needs_ann  = _re.search(r'<<[^(]|\{\|', query) is not None or '~' in query
+    needs_bare_reifier = _re.search(r'<<(?!\()', query) is not None
+    needs_ann  = needs_bare_reifier or '{|' in query or '~' in query
     needs_func = _TRIPLE_FUNC_RE.search(query) is not None
     needs_istt = _IS_TT_RE.search(query) is not None
 
@@ -922,9 +1087,6 @@ def _rewrite_sparql12_to_11_tracked(query: str) -> tuple[str, frozenset]:
 
     state = _RewriteState()
 
-    if needs_ann:
-        query = _rewrite_annotation_forms(query, state)
-
     if needs_func:
         # BIND(SUBJECT(?tt) AS ?s) → ?tt <rdf:subject> ?s  in-place.
         # This keeps the binding triple inside the same group graph pattern (and
@@ -933,10 +1095,21 @@ def _rewrite_sparql12_to_11_tracked(query: str) -> tuple[str, frozenset]:
         query = _rewrite_bind_accessors(query)
         needs_func = bool(_TRIPLE_FUNC_RE.search(query))
 
-    # Run _rewrite_group_content when there are <<( )>> patterns OR when there
-    # are non-BIND function calls that need inline injection inside blocks.
-    if needs_tt or needs_func or "<<(" in query:
+    # Run _rewrite_group_content (and, for a CONSTRUCT query, the {| |}
+    # annotation-block form - see _rewrite_construct_query, which calls
+    # _rewrite_block_forms itself with the right in_construct_template
+    # value for each of the template/WHERE clauses) whenever there are
+    # <<( )>>/bare <<...>> patterns, {| |} blocks, or non-BIND function
+    # calls needing inline injection inside blocks. This must run BEFORE
+    # _rewrite_tilde_form below - see that function's own docstring for why
+    # (its regex has no awareness of surrounding << >> brackets, so an
+    # unresolved bracket reifier term's own internal " ~ " would otherwise
+    # be misread as the bracket-free "s p o ~ r" form).
+    if needs_tt or needs_bare_reifier or needs_func or '{|' in query or "<<(" in query:
         query = _rewrite_construct_query(query, state)
+
+    if '~' in query:
+        query = _rewrite_tilde_form(query, state)
 
     # After inline handling, any remaining SUBJECT/PREDICATE/OBJECT calls live
     # outside {…} blocks (SELECT projections, HAVING, ORDER BY).  Inject their
@@ -988,7 +1161,68 @@ def _rewrite_sparql12_to_11_tracked(query: str) -> tuple[str, frozenset]:
             query,
         )
 
+    if state.generated_vars:
+        query = _exclude_generated_vars_from_select_star(query, state.generated_vars)
+
     return query, frozenset(state.generated_vars)
+
+
+_SELECT_STAR_RE = _re.compile(r'\bSELECT\s+((?:DISTINCT|REDUCED)\s+)?\*', _re.IGNORECASE)
+_VAR_RE = _re.compile(r'[?$][A-Za-z_]\w*')
+
+
+def _exclude_generated_vars_from_select_star(query: str, generated_vars: set) -> str:
+    """A bare ``SELECT *`` (with or without ``DISTINCT``/``REDUCED``)
+    projects every variable in scope - which, after this module's own
+    rewriting has run, now includes whatever internal bookkeeping
+    variables (``?__tt0``, ``?__tt1``, ...) it minted along the way for
+    triple-term/annotation/reifier handling. Those were never part of the
+    original query and must not leak into the result set. Confirmed a
+    real, reproducible bug via the W3C SPARQL 1.2 test suite's own
+    `basic-3` (`SELECT * { <<?s :b :c>> ?p ?o }`): the actual result rows
+    included `?__tt0`/`?__tt1` bindings alongside the real `?s`/`?p`/`?o`
+    ones, which the expected results obviously never contain.
+
+    Fixed by expanding a bare `*` into an explicit variable list -
+    every variable mentioned anywhere in the (already fully rewritten)
+    query text, in first-occurrence order, excluding `generated_vars` -
+    rather than trying to suppress the generated variables some other way
+    after the fact (SPARQL has no per-variable "hide from *" mechanism,
+    so an explicit list is the only way to reproduce "everything the user
+    originally wrote, nothing this rewriter separately introduced").
+
+    A no-op if there's no bare `SELECT *` in `query` at all (the far more
+    common case - a query with an explicit projection list was never
+    affected by this in the first place, since a rewriter-generated
+    variable was never going to appear in a list it didn't write).
+    """
+    m = _SELECT_STAR_RE.search(query)
+    if m is None:
+        return query
+
+    seen: list[str] = []
+    seen_set: set = set()
+    for var_match in _VAR_RE.finditer(query):
+        name = var_match.group(0)
+        bare = name[1:]
+        if bare in generated_vars or name in seen_set:
+            continue
+        seen_set.add(name)
+        seen.append(name)
+
+    if not seen:
+        # Every variable in the query was internally generated (e.g. a
+        # fully-ground pattern with no user-visible variables at all) -
+        # SPARQL doesn't allow an empty projection list, so there's
+        # nothing sensible to substitute; leave "*" as-is rather than
+        # produce invalid syntax. (This also means the query would have
+        # produced a result set entirely of internal bookkeeping vars
+        # before this fix - an edge case, not the common one this fix
+        # targets.)
+        return query
+
+    replacement = " ".join(seen)
+    return query[: m.start()] + m.group(0).replace("*", replacement, 1) + query[m.end() :]
 
 
 def rewrite_sparql12_to_11(query: str) -> str:
@@ -1016,69 +1250,52 @@ def rewrite_sparql12_to_11(query: str) -> str:
 
 
 def _rewrite_bind_accessors(query: str) -> str:
-    """Rewrite BIND(SUBJECT(?tt) AS ?s) → ?tt <rdf:subject> ?s in place.
+    """Rewrite BIND(SUBJECT(?tt) AS ?s) → BIND(<tt:fn/subject>(?tt) AS ?s).
 
-    Unlike the WHERE-level injection used for SELECT-projection function calls,
-    this keeps the binding triple inside the same group graph pattern as the
-    original BIND.  That is essential when the BIND appears inside a GRAPH { }
-    clause: rdflib's SPARQL engine does not propagate outer-scope variable
-    bindings into BIND or FILTER expressions inside a named-graph scope.
+    A function call substituted in place like this needs no positional
+    awareness at all (unlike the old rdf:subject-*match*-pattern rewrite
+    this replaced, whose own docstring used to explain why the matching
+    triple had to be injected *inside* the same group graph pattern as the
+    BIND - essential there because rdflib's SPARQL engine doesn't propagate
+    outer-scope variable bindings into a BIND/FILTER expression inside a
+    named-graph scope, so a matching pattern placed anywhere else could
+    silently fail to see ?tt's value at all). See the module-level comment
+    above _TT_ACCESSOR_FN for why a real function, not a pattern match, is
+    needed in the first place.
     """
     def _replace(m: _re.Match) -> str:
         func = m.group(1).upper()
         tt_var, result_var = m.group(2), m.group(3)
-        return f"{tt_var} {_FUNC_TO_PRED[func]} {result_var} ."
+        return f"BIND({_TT_ACCESSOR_FN[func]}({tt_var}) AS {result_var})"
     return _BIND_ACCESSOR_RE.sub(_replace, query)
 
 
-def _rewrite_annotation_forms(query: str, state: _RewriteState) -> str:
-    """Pre-pass: convert << >>, {| |}, and ~?r annotation forms.
+def _rewrite_tilde_form(query: str, state: _RewriteState) -> str:
+    """Pre-pass: convert the plain-text (bracket-free) ``s p o ~?r``
+    annotation form into an explicit ``rdf:reifies <<( )>>`` pattern.
 
-    All three forms are sugar for: assert the base triple, then query or bind
-    the reifier. Each rewrites to an explicit ``rdf:reifies <<( )>>`` pattern
-    that the main ``<<( )>>`` rewriter then expands.
+    The bracket forms (``<<s p o>>``, ``<<s p o ~ r>>``) are a completely
+    separate mechanism - see _consume_reifier_term/_rewrite_reifier_term,
+    wired into _rewrite_group_content's character scanner - and MUST already
+    have run (see _rewrite_sparql12_to_11_tracked's call order) before this
+    function does, precisely so `_TILDE_RE` below - which has no awareness
+    of surrounding `<<`/`>>` at all - can't accidentally match the
+    ``?s ?p ?o ~ ?t`` *inside* an unresolved ``<< ?s ?p ?o ~ ?t >>``, which
+    would silently strip the bracket form's semantics (it does NOT assert
+    the base triple, unlike this one) and leave stray `<<`/`>>` characters
+    in the output.
+
+    No CONSTRUCT-template variant is needed (unlike _rewrite_block_forms
+    below) - nothing in the current test set uses this bracket-free form
+    inside a CONSTRUCT template, only in ordinary WHERE-clause position.
 
     Limitation: term matching uses a simplified regex that covers variables,
     prefixed names, full IRIs, and simple literals. Complex literals with
     embedded spaces or datatype suffixes are not handled.
     """
-    # Pass 1: << s p o ~ reifier >> pred obj  — explicit reifier in subject
-    # Must run before _TILDE_RE so the bare `s p o ~?r` pattern doesn't consume
-    # the tilde that belongs inside << >>.
-    def _ann_subject_tilde(m: _re.Match) -> str:
-        s, p, o = m.group(1), m.group(2), m.group(3)
-        reifier, pred, obj = m.group(4), m.group(5), m.group(6)
-        tt_var = state.new_var()
-        parts = [f"{tt_var} {RDF_SUBJECT} {s}",
-                 f"{tt_var} {RDF_PREDICATE} {p}",
-                 f"{tt_var} {RDF_OBJECT} {o}",
-                 f"{reifier} {RDF_REIFIES} {tt_var}",
-                 f"{reifier} {pred} {obj}"]
-        return " .\n  ".join(parts)
-
-    query = _ANN_SUBJECT_TILDE_RE.sub(_ann_subject_tilde, query)
-
-    # Pass 2: << s p o >> pred obj  — anonymous reifier in subject
-    # No base-triple assertion. Component patterns still go before reification.
-    def _ann_subject(m: _re.Match) -> str:
-        s, p, o = m.group(1), m.group(2), m.group(3)
-        pred, obj = m.group(4), m.group(5)
-        r_var = state.new_var()
-        tt_var = state.new_var()
-        parts = [f"{tt_var} {RDF_SUBJECT} {s}",
-                 f"{tt_var} {RDF_PREDICATE} {p}",
-                 f"{tt_var} {RDF_OBJECT} {o}",
-                 f"{r_var} {RDF_REIFIES} {tt_var}",
-                 f"{r_var} {pred} {obj}"]
-        return " .\n  ".join(parts)
-
-    query = _ANN_SUBJECT_RE.sub(_ann_subject, query)
-
-    # Pass 3: s p o ~?r
     # Component patterns first (bind ?__tt via the selective rdf:subject index),
     # then find reifiers, then validate the base-triple assertion last.
     # Putting s p o last avoids a full triple-scan when s/p/o are variables.
-    # Runs after << >> forms are consumed so ~ inside << >> isn't matched here.
     def _tilde(m: _re.Match) -> str:
         s, p, o, r = m.group(1), m.group(2), m.group(3), m.group(4)
         tt_var = state.new_var()
@@ -1088,16 +1305,41 @@ def _rewrite_annotation_forms(query: str, state: _RewriteState) -> str:
                 f"{r} {RDF_REIFIES} {tt_var} .\n  "
                 f"{s} {p} {o}")
 
-    query = _TILDE_RE.sub(_tilde, query)
+    return _TILDE_RE.sub(_tilde, query)
 
-    # Pass 4: s p o {| ap av ; ... |}
-    # Same strategy: triple term components → reification → annotation properties
-    # → assertion check last. Any <<( )>> in annotation values are left for Phase 2.
+
+def _rewrite_block_forms(text: str, state: _RewriteState, in_construct_template: bool = False) -> str:
+    """Pre-pass: convert ``s p o {| ap av ; ... |}`` inline annotation
+    blocks into an explicit ``rdf:reifies <<( )>>`` pattern.
+
+    Called separately on the WHERE clause (``in_construct_template=False``)
+    and, when present, the CONSTRUCT template (``in_construct_template=True``)
+    by _rewrite_construct_query - NOT as one global pass over the whole
+    reassembled query text the way _rewrite_tilde_form is, because unlike
+    that form this one genuinely behaves differently in the two positions:
+    a CONSTRUCT template has no WHERE-clause match to bind tt_var/r_var
+    from (the template may be minting a reification that never existed in
+    the data), so both must be *computed* via a relocated BIND, mirroring
+    _rewrite_reifier_term's own in_construct_template branch - see that
+    function's docstring for why BNODE() is the right per-solution-scoped
+    choice for the anonymous reifier. The base triple assertion
+    (``{s} {p} {o}``) is still emitted unconditionally either way: even in
+    template position, this statement is the ONLY place that base triple
+    is written (confirmed via construct-4's own expected output, which
+    includes both the plain base triple and its annotation).
+
+    Same regex-simplification limitation as _rewrite_tilde_form above.
+    """
     def _ann_block(m: _re.Match) -> str:
         s, p, o = m.group(1), m.group(2), m.group(3)
         pairs = [pair.strip() for pair in m.group(4).split(';') if pair.strip()]
         r_var = state.new_var()
         tt_var = state.new_var()
+        if in_construct_template:
+            state.pending_binds.append(
+                f"BIND({TT_HASH_FN}({s}, {p}, {o}) AS {tt_var})"
+            )
+            state.pending_binds.append(f"BIND(BNODE() AS {r_var})")
         parts = [f"{tt_var} {RDF_SUBJECT} {s}",
                  f"{tt_var} {RDF_PREDICATE} {p}",
                  f"{tt_var} {RDF_OBJECT} {o}",
@@ -1106,34 +1348,38 @@ def _rewrite_annotation_forms(query: str, state: _RewriteState) -> str:
         parts.append(f"{s} {p} {o}")
         return " .\n  ".join(parts)
 
-    query = _ANN_BLOCK_RE.sub(_ann_block, query)
-
-    return query
+    return _ANN_BLOCK_RE.sub(_ann_block, text)
 
 
 def _rewrite_triple_functions(query: str, state: _RewriteState) -> str:
     """Rewrite SUBJECT/PREDICATE/OBJECT(?var) calls.
 
-    Each call is replaced with a fresh variable; the corresponding
-    rdf:subject/predicate/object triple is injected at the start of the
-    outermost WHERE { } body so the variable is bound before SELECT sees it.
+    Each call is replaced with a fresh variable; a BIND computing it via
+    the registered accessor function (see the module-level comment above
+    _TT_ACCESSOR_FN) is injected at the *end* of the outermost WHERE { }
+    body, after everything already there, so the variable it reads (?var)
+    is already bound by the time the BIND evaluates - see
+    _find_group_pattern_end's own docstring for the regression this fixes
+    (unlike the *previous* mechanism this replaced - an order-independent
+    rdf:subject *match* pattern - a BIND is evaluated in sequence and must
+    textually follow whatever binds its own argument).
     """
     injected: list[str] = []
 
     def replacer(m: _re.Match) -> str:
-        pred = _FUNC_TO_PRED[m.group(1).upper()]
+        fn = _TT_ACCESSOR_FN[m.group(1).upper()]
         src_var = m.group(2)
         new_var = state.new_var()
-        injected.append(f"{src_var} {pred} {new_var} .")
+        injected.append(f"BIND({fn}({src_var}) AS {new_var})")
         return new_var
 
     result = _TRIPLE_FUNC_RE.sub(replacer, query)
 
     if injected:
-        insert_pos = _find_group_pattern_start(result)
+        insert_pos = _find_group_pattern_end(result)
         if insert_pos is not None:
             result = (result[:insert_pos]
-                      + "\n  " + "\n  ".join(injected)
+                      + "\n  " + "\n  ".join(injected) + "\n  "
                       + result[insert_pos:])
 
     return result
@@ -1196,7 +1442,7 @@ def _rewrite_group_content(text: str, state: _RewriteState,
             buffer.append(literal)
             continue
 
-        if text[i] == '<' and not text.startswith("<<(", i):
+        if text[i] == '<' and not text.startswith("<<", i):
             iri, i = _consume_iri(text, i)
             buffer.append(iri)
             continue
@@ -1210,10 +1456,43 @@ def _rewrite_group_content(text: str, state: _RewriteState,
             pending_patterns.extend(patterns)
             continue
 
+        if text.startswith("<<", i):
+            is_expr_here = in_expression or paren_depth > 0
+            if _at_statement_start(text, i) and _stmt_end_follows(text, _consume_reifier_term(text, i)[1]):
+                # The ENTIRE current statement is just this reifier term
+                # (e.g. "<< ?s ?p ?o ~ ?t >> ." with nothing before or
+                # after it) - there is no enclosing "s p o ." triple whose
+                # trailing "." the usual pending_patterns-flush-at-'.'
+                # mechanism (below) can piggyback on, since substituting
+                # just the reifier in place would leave a syntactically
+                # invalid dangling "?t ." behind. Emit the match patterns
+                # directly as this statement's own content instead - each
+                # already self-terminated with " .", so this is already a
+                # complete, valid TriplesBlock on its own.
+                _, patterns, i = _rewrite_reifier_term(text, i, state, is_expression=is_expr_here)
+                buffer.append(_emit_pending_patterns(patterns))
+                j = i
+                while j < len(text) and text[j].isspace():
+                    j += 1
+                if j < len(text) and text[j] == '.':
+                    i = j + 1
+                continue
+            replacement, patterns, i = _rewrite_reifier_term(
+                text, i, state, is_expression=is_expr_here,
+            )
+            buffer.append(replacement)
+            pending_patterns.extend(patterns)
+            continue
+
         # Inline SUBJECT/PREDICATE/OBJECT detection — only inside blocks.
-        # Injects the binding triple into the current group graph pattern via
-        # pending_patterns, which is emitted at the next '.' or '}' boundary.
-        # This keeps the triple in the same named-graph scope as the function call.
+        # Injects a BIND computing the accessor function (see the
+        # module-level comment above _TT_ACCESSOR_FN) into the current
+        # group graph pattern via pending_patterns, which is emitted at the
+        # next '.' or '}' boundary. This keeps the BIND in the same
+        # named-graph scope as the function call - essential when it's
+        # inside a GRAPH { } clause (rdflib's SPARQL engine doesn't
+        # propagate outer-scope variable bindings into a BIND/FILTER
+        # expression inside a named-graph scope).
         if handle_funcs and text[i].isalpha():
             m = _TRIPLE_FUNC_RE.match(text, i)
             if m:
@@ -1221,7 +1500,7 @@ def _rewrite_group_content(text: str, state: _RewriteState,
                 tt_var = m.group(2)
                 fresh_var = state.new_var()
                 buffer.append(fresh_var)
-                pending_patterns.append(f"{tt_var} {_FUNC_TO_PRED[func]} {fresh_var} .")
+                pending_patterns.append(f"BIND({_TT_ACCESSOR_FN[func]}({tt_var}) AS {fresh_var})")
                 i = m.end()
                 continue
 
@@ -1393,11 +1672,109 @@ def _rewrite_triple_term(
     return tt_var, patterns, end, all_ground
 
 
+def _rewrite_reifier_term(
+    text: str, start: int, state: _RewriteState, is_expression: bool = False
+) -> tuple[str, list[str], int]:
+    """Rewrite one bare ``<<s p o>>``/``<<s p o ~ r>>`` reifier-shorthand
+    occurrence. Returns (replacement, patterns, end) where `replacement` is
+    always the *reifier* - a fresh variable, or the given one after ``~`` -
+    never the underlying triple term's own tt_var. That's not an
+    implementation detail: a triple term only ever appears as the OBJECT of
+    the internal ``rdf:reifies`` triple these patterns assert; nowhere else
+    is it a legal substitutable value for this syntax (unlike a ground
+    ``<<( s p o )>>``, which IS itself a value - see _rewrite_triple_term).
+
+    Unlike _rewrite_triple_term, there's no content-cache/dedup here:
+    `<<s p o>>` used twice is "some (possibly different) reifier of (s,p,o)"
+    each time, not a shared value, so each occurrence always mints its own
+    fresh tt_var/reifier variable.
+    """
+    token, end = _consume_reifier_term(text, start)
+    inner = token[2:-2].strip()
+    tokens = _split_top_level_terms(inner)
+    if len(tokens) == 3:
+        s_raw, p_raw, o_raw = tokens
+        explicit_reifier = None
+    elif len(tokens) == 5 and tokens[3] == '~':
+        s_raw, p_raw, o_raw, _, explicit_reifier = tokens
+    else:
+        raise ValueError(f"Reifier term must be '<<s p o>>' or '<<s p o ~ r>>': {token}")
+
+    subject_token, subject_patterns, _ = _rewrite_term(s_raw, state, is_expression)
+    predicate_token, predicate_patterns, _ = _rewrite_term(p_raw, state, is_expression)
+    object_token, object_patterns, _ = _rewrite_term(o_raw, state, is_expression)
+
+    patterns = []
+    patterns.extend(subject_patterns)
+    patterns.extend(predicate_patterns)
+    patterns.extend(object_patterns)
+
+    tt_var = state.new_var()
+    r_token = explicit_reifier if explicit_reifier is not None else state.new_var()
+
+    if state.in_construct_template:
+        # Mirrors _rewrite_triple_term's own in_construct_template branch:
+        # there is no WHERE-clause occurrence to match tt_var/r_token from
+        # (the template may be minting a reification that never existed
+        # anywhere in the data), so both must be *computed*, not matched.
+        # BNODE() is the standard SPARQL 1.1 builtin for "a fresh blank node,
+        # scoped per output solution the same way an ordinary blank node
+        # written directly in a CONSTRUCT template would be" - exactly the
+        # scoping an anonymous reifier needs here.
+        state.pending_binds.append(
+            f"BIND({TT_HASH_FN}({subject_token}, {predicate_token}, {object_token}) AS {tt_var})"
+        )
+        if explicit_reifier is None:
+            state.pending_binds.append(f"BIND(BNODE() AS {r_token})")
+    patterns.append(f"{tt_var} {RDF_SUBJECT} {subject_token} .")
+    patterns.append(f"{tt_var} {RDF_PREDICATE} {predicate_token} .")
+    patterns.append(f"{tt_var} {RDF_OBJECT} {object_token} .")
+    patterns.append(f"{r_token} {RDF_REIFIES} {tt_var} .")
+
+    return r_token, patterns, end
+
+
+def _at_statement_start(text: str, pos: int) -> bool:
+    """True if, scanning backward from `pos` over whitespace, the nearest
+    non-whitespace character is a statement/block boundary ('.' or '{') or
+    there isn't one (start of text) - i.e. nothing has been written for the
+    *current* statement yet. Combined with _stmt_end_follows, this is how
+    _rewrite_group_content tells "<<s p o ~ r>> ." (the entire statement is
+    just the reifier term - see _rewrite_group_content's own handling) apart
+    from "<<s p o>> pred obj ." (reifier term as an ordinary leading subject,
+    with more to come) or "?s ?p <<s p o>> ." (reifier term as an object -
+    not the start of its statement at all)."""
+    j = pos - 1
+    while j >= 0 and text[j].isspace():
+        j -= 1
+    return j < 0 or text[j] in '.{'
+
+
+def _stmt_end_follows(text: str, pos: int) -> bool:
+    """True if, scanning forward from `pos` over whitespace, the next
+    character is a statement/block boundary ('.' or '}') or there isn't one
+    (end of text) - see _at_statement_start."""
+    j = pos
+    while j < len(text) and text[j].isspace():
+        j += 1
+    return j >= len(text) or text[j] in '.}'
+
+
 def _rewrite_term(term: str, state: _RewriteState, is_expression: bool = False) -> tuple[str, list[str], bool]:
     stripped = term.strip()
     if stripped.startswith("<<("):
         replacement, patterns, _, is_ground = _rewrite_triple_term(stripped, 0, state, is_expression)
         return replacement, patterns, is_ground
+    if stripped.startswith("<<"):
+        # Bare <<s p o>>/<<s p o ~ r>> reifier-shorthand term - always
+        # substitutes to the reifier (a fresh variable, or the given one),
+        # never to a ground/pre-computable value the way <<( )>> can - see
+        # _rewrite_reifier_term. "not ground" is the conservative, always-
+        # correct answer here even when every one of s/p/o and an explicit
+        # reifier are themselves ground: nothing currently needs treating
+        # that narrower case as ground too.
+        replacement, patterns, _ = _rewrite_reifier_term(stripped, 0, state, is_expression)
+        return replacement, patterns, False
     is_ground = not (stripped.startswith('?') or stripped.startswith('$'))
     return stripped, [], is_ground
 
@@ -1424,7 +1801,7 @@ def _split_top_level_terms(text: str) -> list[str]:
             current.append(literal)
             continue
 
-        if text[i] == '<' and not text.startswith("<<(", i):
+        if text[i] == '<' and not text.startswith("<<", i):
             iri, i = _consume_iri(text, i)
             current.append(iri)
             continue
@@ -1432,6 +1809,11 @@ def _split_top_level_terms(text: str) -> list[str]:
         if text.startswith("<<(", i):
             triple_term, i = _consume_triple_term(text, i)
             current.append(triple_term)
+            continue
+
+        if text.startswith("<<", i):
+            reifier_term, i = _consume_reifier_term(text, i)
+            current.append(reifier_term)
             continue
 
         if text[i] == '(':
@@ -1492,6 +1874,55 @@ def _consume_triple_term(text: str, start: int) -> tuple[str, int]:
         i += 1
 
     raise ValueError("Unterminated triple term")
+
+
+def _consume_reifier_term(text: str, start: int) -> tuple[str, int]:
+    """Consume one bare ``<<...>>`` reifier-shorthand occurrence starting at
+    `start` (``text[start:start+2] == '<<'``, and NOT immediately followed by
+    ``(`` - that's _consume_triple_term's ground/pattern ``<<( )>>`` form
+    instead, a completely different production). Mirrors
+    _consume_triple_term's own nesting/string/IRI handling, extended to also
+    recognize a nested BARE reifier term (not just a nested ground ``<<( )>>``
+    one) inside its own content - real W3C test data nests both kinds, e.g.
+    ``<< <<:s :p2 :o>> :p3 :z>>`` (bare nested inside bare) and
+    ``<<?s ?p <<( ?st ?pt ?ot )>> >>`` (ground nested inside bare)."""
+    if not (text.startswith("<<", start) and not text.startswith("<<(", start)):
+        raise ValueError("Reifier term must start with '<<' (not '<<(')")
+    i = start + 2
+    depth = 1
+
+    while i < len(text):
+        if text.startswith('"""', i) or text.startswith("'''", i):
+            _, i = _consume_string(text, i, text[i:i + 3])
+            continue
+
+        if text[i] in {'"', "'"}:
+            _, i = _consume_string(text, i, text[i])
+            continue
+
+        if text[i] == '<' and not text.startswith("<<", i):
+            _, i = _consume_iri(text, i)
+            continue
+
+        if text.startswith("<<(", i):
+            _, i = _consume_triple_term(text, i)
+            continue
+
+        if text.startswith(">>", i):
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return text[start:i], i
+            continue
+
+        if text.startswith("<<", i):
+            depth += 1
+            i += 2
+            continue
+
+        i += 1
+
+    raise ValueError("Unterminated reifier term")
 
 
 def _consume_balanced(text: str, start: int, opener: str, closer: str) -> tuple[str, int]:

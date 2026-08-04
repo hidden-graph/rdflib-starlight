@@ -44,6 +44,7 @@ from rdflib import URIRef, Literal, BNode
 from rdflib.query import Result
 from rdflib.term import Variable
 
+from starlight.model.encoding import BN_NS
 from starlight.model.triple import TripleTerm
 from starlight.model.dirlangstring import DirLangString
 
@@ -52,24 +53,79 @@ from starlight.model.dirlangstring import DirLangString
 # Term serialization
 # ---------------------------------------------------------------------------
 
-def sparql_term(node) -> str:
+def sparql_term(node, skolemize_bnodes: bool = True) -> str:
     """Serialize an RDF node to its SPARQL inline string.
 
     TripleTerms are rendered as <<( s p o )>>. A DirLangString is rendered as
     the real "text"@lang--dir lexical form - unlike TripleTerm's tt:HASH
     encoding, the native RDF 1.2 endpoint understands this syntax directly, so
     no internal encoding is involved here at all. All other nodes use
-    rdflib's .n3() which produces correct SPARQL syntax.
+    rdflib's .n3() which produces correct SPARQL syntax - except BNode, which
+    by default is skolemized to a stable BN_NS URI first (see
+    skolemize_bnode()'s docstring for why: a blank node's own SPARQL syntax
+    label is *not* enough to keep its identity across separate HTTP
+    requests).
+
+    skolemize_bnodes=False renders a real, unskolemized blank node instead -
+    only safe when every triple that might share this exact BNode object is
+    going out together in the *same* HTTP request (see
+    StarlightGraph._native_add_many(), the only caller that passes this),
+    since that's the one case SPARQL 1.1 Update's per-request blank-node
+    scoping doesn't bite - and it avoids skolemize_bnode()'s own cost (the
+    endpoint no longer recognizing it as a real blank node for ORDER BY /
+    isBLANK()) for exactly the triples that don't need to pay it.
     """
     if isinstance(node, TripleTerm):
-        s = sparql_term(node.subject)
-        p = sparql_term(node.predicate)
-        o = sparql_term(node.object)
+        s = sparql_term(node.subject, skolemize_bnodes)
+        p = sparql_term(node.predicate, skolemize_bnodes)
+        o = sparql_term(node.object, skolemize_bnodes)
         return f'<<( {s} {p} {o} )>>'
     if isinstance(node, DirLangString):
         escaped = node.value.replace('\\', '\\\\').replace('"', '\\"')
         return f'"{escaped}"@{node.language}--{node.direction}'
+    if isinstance(node, BNode) and skolemize_bnodes:
+        return skolemize_bnode(node).n3()
     return node.n3()
+
+
+# ---------------------------------------------------------------------------
+# Blank-node skolemization (native backend only)
+# ---------------------------------------------------------------------------
+
+def skolemize_bnode(node: BNode) -> URIRef:
+    """Map a blank node to a stable URI for the wire, deterministically from
+    its own internal label - no registry needed, since a BNode's label is
+    already a stable, globally-unique-within-process string and every write
+    involving "the same" blank node is always the same Python BNode object
+    (or an equal one carrying the same label).
+
+    Why this exists at all: StarlightGraph._native_add() issues one SPARQL
+    Update request per triple (see its own docstring), and SPARQL 1.1 Update
+    scopes blank-node labels to the single request they appear in - reusing
+    a label like ``_:b`` across two separate INSERT requests does *not*
+    refer to the same node on the far side, it mints two unrelated ones.
+    Confirmed empirically against live Oxigraph: ``g.add((b, :r, :o1));
+    g.add((b, :r, :o2))`` for one Python BNode produced two different
+    store-side blank nodes, and a query joining on the shared subject
+    returned nothing. Skolemizing to a URI sidesteps request-scoping
+    entirely - a URI means the same thing in every request, exactly like
+    this project's existing RR_NS scheme skolemizes anonymous reifiers for
+    the same underlying reason (see encoding.py's module docstring).
+    Reversed by deskolemize_bnode() on every read path.
+    """
+    return URIRef(BN_NS + str(node))
+
+
+def deskolemize_bnode(node):
+    """Reverse skolemize_bnode(): a BN_NS URIRef becomes the BNode with the
+    same label back; any other value passes through unchanged. Recurses into
+    a TripleTerm's own subject/object so a blank node nested inside one
+    (e.g. ``<<( _:b :r :o )>>``) is restored too."""
+    if isinstance(node, TripleTerm):
+        return TripleTerm(deskolemize_bnode(node.subject), node.predicate, deskolemize_bnode(node.object))
+    if isinstance(node, URIRef) and str(node).startswith(BN_NS):
+        return BNode(str(node)[len(BN_NS):])
+    return node
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +136,13 @@ def _parse_json_term(term_dict: dict):
     """Convert a SPARQL JSON binding term to an rdflib node, DirLangString, or TripleTerm."""
     t = term_dict['type']
     if t == 'uri':
-        return URIRef(term_dict['value'])
+        value = term_dict['value']
+        # Reverse skolemize_bnode(): a binding that resolves to one of our
+        # own BN_NS URIs is a blank node we wrote, not a real URI - see
+        # skolemize_bnode()'s docstring for why writes go out this way.
+        if value.startswith(BN_NS):
+            return BNode(value[len(BN_NS):])
+        return URIRef(value)
     if t == 'bnode':
         return BNode(term_dict['value'])
     if t in ('literal', 'typed-literal'):
@@ -291,8 +353,16 @@ def native_query(store, backend: str, query_object, processor='sparql', result='
         body, _ = http_construct(q_url, sparql, hdrs)
         g = StarlightGraph()
         g.parse(data=body.decode('utf-8'), format='turtle12')
+        # Reverse skolemize_bnode(): a CONSTRUCT template can echo back a
+        # stored triple containing one of our own BN_NS URIs (a blank node
+        # we skolemized on write - see skolemize_bnode()'s docstring), which
+        # the Turtle parser above has no way to recognize as anything but an
+        # ordinary URIRef.
+        deskolemized = StarlightGraph()
+        for s, p, o in g.triples((None, None, None)):
+            deskolemized.add((deskolemize_bnode(s), p, deskolemize_bnode(o)))
         r = RDFResult('CONSTRUCT')
-        r.graph = g
+        r.graph = deskolemized
         return r
 
     vars_, bindings = http_select(q_url, sparql, hdrs)

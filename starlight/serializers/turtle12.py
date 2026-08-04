@@ -96,6 +96,28 @@ def _graph_has_dirlangstring(sg) -> bool:
     return any(isinstance(o, DirLangString) for _, _, o in sg.triples((None, None, None)))
 
 
+def _graph_has_triple_term(sg) -> bool:
+    """True if any triple in sg has a TripleTerm-valued object - used to
+    decide whether the @version "1.2" directive is needed.
+
+    Prefers the already-populated _tt_nodes registry when available (rdf-1.1
+    backend - O(1), no store round-trip) over scanning every triple. Falls
+    back to scanning only for a native backend, whose _tt_nodes is always
+    empty (StarlightGraph._build_registry_from_store() is a no-op there -
+    no tt:HASH encoding, so no local registry to check at all) - confirmed
+    a real bug: `getattr(sg, '_tt_nodes', None)` alone silently omitted the
+    version directive for every native-backend graph containing real triple
+    terms, since that check is always falsy for native regardless of actual
+    content.
+    """
+    if getattr(sg, '_tt_nodes', None):
+        return True
+    if not getattr(sg, '_is_native', False):
+        return False
+    from starlight.model.triple import TripleTerm
+    return any(isinstance(o, TripleTerm) for _, _, o in sg.triples((None, None, None)))
+
+
 def _build_fold_map(sg):
     """Return (fold_map, folded_reifiers, tt_subj_map, tt_subj_reifiers).
 
@@ -262,7 +284,7 @@ def serialize_turtle12(graph) -> str:
 
     # --- Pass 2: emit version declaration and used prefix declarations ---
     prefix_lines = []
-    if getattr(sg, '_tt_nodes', None) or _graph_has_dirlangstring(sg):
+    if _graph_has_triple_term(sg) or _graph_has_dirlangstring(sg):
         prefix_lines.append('@version "1.2" .')
     for prefix, ns_uri in sorted(sg.namespaces(), key=lambda x: x[0]):
         ns = str(ns_uri)
@@ -318,7 +340,7 @@ def serialize_longturtle12(graph) -> str:
     triple_lines.append('')
 
     prefix_lines = []
-    if getattr(sg, '_tt_nodes', None) or _graph_has_dirlangstring(sg):
+    if _graph_has_triple_term(sg) or _graph_has_dirlangstring(sg):
         prefix_lines.append('@version "1.2" .')
     for prefix, ns_uri in sorted(sg.namespaces(), key=lambda x: x[0]):
         ns = str(ns_uri)

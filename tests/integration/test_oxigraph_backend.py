@@ -75,6 +75,18 @@ def _clear_graph():
     ).raise_for_status()
 
 
+def _clear_all():
+    """Clear the default graph and every named graph - needed for tests
+    that span multiple/arbitrary graph names, unlike _clear_graph() which
+    only clears the one fixed GRAPH_URI the `sg` fixture uses."""
+    requests.post(
+        UPDATE_URL,
+        data='CLEAR SILENT ALL',
+        headers={'Content-Type': 'application/sparql-update'},
+        timeout=10,
+    ).raise_for_status()
+
+
 @pytest.fixture
 def sg():
     """Fresh StarlightGraph backed by Oxigraph in rdf-1.2 native mode."""
@@ -350,6 +362,253 @@ class TestOxigraphDatasetQuery:
 
 
 @oxigraph
+class TestOxigraphRemove:
+    """StarlightGraph.remove() on the native backend used to call
+    super().remove() directly - bypassing sparql_term()/skolemize_bnode()
+    entirely - which reaches rdflib's own SPARQLUpdateStore._node_to_sparql()
+    and crashes outright on any BNode ("SPARQLStore does not support
+    BNodes!"), confirmed live against Oxigraph before this fix. Also had no
+    live test coverage of any kind (BNode or not). Fixed with a dedicated
+    _native_remove() mirroring _native_add()/_native_triples()'s own
+    sparql_term()-based dispatch.
+    """
+
+    def test_remove_plain_triple(self, sg):
+        t = (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        sg.add(t)
+        assert t in sg
+        sg.remove(t)
+        assert t not in sg
+
+    def test_remove_bnode_triple(self, sg):
+        from rdflib import BNode
+        b = BNode()
+        t = (b, URIRef(EX+'r'), URIRef(EX+'o'))
+        sg.add(t)
+        assert t in sg
+        sg.remove(t)
+        assert list(sg.triples((None, None, None))) == []
+
+    def test_remove_triple_term_valued_triple(self, sg):
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        t = (URIRef(EX+'stmt'), RDF_REIF, tt)
+        sg.add(t)
+        assert list(sg.triples((URIRef(EX+'stmt'), RDF_REIF, None)))
+        sg.remove(t)
+        assert list(sg.triples((URIRef(EX+'stmt'), RDF_REIF, None))) == []
+
+    def test_remove_wildcard_pattern(self, sg):
+        sg.add((URIRef(EX+'x1'), URIRef(EX+'p'), URIRef(EX+'y')))
+        sg.add((URIRef(EX+'x2'), URIRef(EX+'p'), URIRef(EX+'y')))
+        sg.add((URIRef(EX+'x3'), URIRef(EX+'other'), URIRef(EX+'y')))
+        sg.remove((None, URIRef(EX+'p'), None))
+        remaining = list(sg.triples((None, None, None)))
+        assert remaining == [(URIRef(EX+'x3'), URIRef(EX+'other'), URIRef(EX+'y'))]
+
+
+@oxigraph
+class TestOxigraphAddN:
+    """addN() on the native backend batches through
+    StarlightGraph._native_add_many() (added alongside parse()'s own
+    batching, same session) but had no live test calling addN() directly -
+    only exercised indirectly via parse(). Confirmed here against a real
+    endpoint, including a triple-term-valued quad.
+    """
+
+    def test_addN_plain_and_triple_term(self, sg):
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        quads = [
+            (URIRef(EX+'x'), URIRef(EX+'p'), URIRef(EX+'y'), sg),
+            (URIRef(EX+'stmt'), RDF_REIF, tt, sg),
+        ]
+        sg.addN(quads)
+        assert (URIRef(EX+'x'), URIRef(EX+'p'), URIRef(EX+'y')) in sg
+        results = list(sg.triples((URIRef(EX+'stmt'), RDF_REIF, None)))
+        assert len(results) == 1
+        assert results[0][2] == tt
+
+    def test_addN_shared_bnode_identity(self, sg):
+        """A blank node referenced by more than one quad in the same addN()
+        call must keep its identity - the whole point of batching into one
+        request rather than one _native_add() HTTP call per quad (see
+        _native_add_many()'s own docstring)."""
+        from rdflib import BNode
+        b = BNode()
+        quads = [
+            (b, URIRef(EX+'r'), URIRef(EX+'o1'), sg),
+            (b, URIRef(EX+'r'), URIRef(EX+'o2'), sg),
+        ]
+        sg.addN(quads)
+        subjects = {s for s, _, _ in sg.triples((None, URIRef(EX+'r'), None))}
+        assert len(subjects) == 1
+
+    def test_addN_ignores_quads_for_other_graphs(self, sg):
+        other = StarlightGraph(identifier=URIRef(EX+'other'))
+        sg.addN([(URIRef(EX+'x'), URIRef(EX+'p'), URIRef(EX+'y'), other)])
+        assert list(sg.triples((None, None, None))) == []
+
+
+@oxigraph
+class TestOxigraphJsonld12Parse:
+    """parse(format='jsonld12') never checked self._is_native at all - it
+    unconditionally called super().parse(data=text, format='json-ld'),
+    which writes through a bypassed rdflib-internal ConjunctiveGraph wrapper
+    (rdflib's json-ld parser's own sink), never through _native_add(). On a
+    native backend this would write the raw rdf:subject/predicate/object
+    tt:HASH encoding fragments directly into the live store instead of real
+    <<( )>> syntax, and _build_registry_from_store() (a no-op for native
+    backends) would never reconstruct them - a real, previously-untested
+    correctness gap. Fixed by parsing into a throwaway plain Graph and
+    decoding it exactly like the trig12/turtle12 branches already do.
+    """
+
+    def test_plain_triple_round_trips(self, sg):
+        src = StarlightGraph()
+        src.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        jsonld_text = src.serialize(format='jsonld12')
+        sg.parse(data=jsonld_text, format='jsonld12')
+        assert (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) in sg
+
+    def test_triple_term_round_trips(self, sg):
+        src = StarlightGraph()
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        src.add((URIRef(EX+'stmt'), RDF_REIF, tt))
+        jsonld_text = src.serialize(format='jsonld12')
+        sg.parse(data=jsonld_text, format='jsonld12')
+        results = list(sg.triples((URIRef(EX+'stmt'), RDF_REIF, None)))
+        assert len(results) == 1
+        restored = results[0][2]
+        assert isinstance(restored, TripleTerm)
+        assert restored == tt
+
+    def test_no_encoding_triples_visible_after_parse(self, sg):
+        src = StarlightGraph()
+        tt = TripleTerm(URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o'))
+        src.add((URIRef(EX+'stmt'), RDF_REIF, tt))
+        jsonld_text = src.serialize(format='jsonld12')
+        sg.parse(data=jsonld_text, format='jsonld12')
+        predicates = {p for _, p, _ in sg.triples((None, None, None))}
+        assert URIRef(RDF_NS + 'subject')   not in predicates
+        assert URIRef(RDF_NS + 'predicate') not in predicates
+        assert URIRef(RDF_NS + 'object')    not in predicates
+        types = {o for _, p, o in sg.triples((None, None, None)) if p == URIRef(RDF_NS + 'type')}
+        assert URIRef(RDF_NS + 'TripleTerm') not in types
+
+
+@oxigraph
+class TestOxigraphNt12Parse:
+    """parse(format='nt12') already branches on self._is_native correctly
+    (routes through _native_add_many()), unlike jsonld12's historical bug -
+    this had simply never been run against a live endpoint at all."""
+
+    def test_triple_term_decodes_correctly(self, sg):
+        nt = f'<{EX}stmt1> <{RDF_NS}reifies> <<( <{EX}alice> <{EX}knows> <{EX}bob> )>> .\n'
+        sg.parse(data=nt, format='nt12')
+        results = list(sg.triples((URIRef(EX+'stmt1'), RDF_REIF, None)))
+        assert len(results) == 1
+        assert results[0][2] == TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+
+
+@oxigraph
+class TestOxigraphNq12Parse:
+    """parse(format='nq12') merges every named graph into this one graph
+    (per its own docstring) - confirmed here with a 2-distinct-graph
+    fixture that a live native backend accepts and merges without error,
+    same as the in-memory backend already does."""
+
+    def test_multi_graph_data_merges_correctly(self, sg):
+        nq = (
+            f'<{EX}s> <{EX}p> <{EX}o> <{EX}graph1> .\n'
+            f'<{EX}stmt1> <{RDF_NS}reifies> <<( <{EX}alice> <{EX}knows> <{EX}bob> )>> <{EX}graph1> .\n'
+            f'<{EX}stmt2> <{RDF_NS}reifies> <<( <{EX}bob> <{EX}likes> <{EX}carol> )>> <{EX}graph2> .\n'
+        )
+        sg.parse(data=nq, format='nq12')
+        assert (URIRef(EX+'s'), URIRef(EX+'p'), URIRef(EX+'o')) in sg
+        r1 = list(sg.triples((URIRef(EX+'stmt1'), RDF_REIF, None)))
+        r2 = list(sg.triples((URIRef(EX+'stmt2'), RDF_REIF, None)))
+        assert r1 and r1[0][2] == TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+        assert r2 and r2[0][2] == TripleTerm(URIRef(EX+'bob'), URIRef(EX+'likes'), URIRef(EX+'carol'))
+
+
+@oxigraph
+class TestOxigraphTrix12Parse:
+
+    def test_triple_term_decodes_correctly(self, sg):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<trix xmlns="http://www.w3.org/2004/03/trix/trix-1/">'
+            '<graph>'
+            f'<triple><uri>{EX}stmt</uri>'
+            f'<uri>{RDF_NS}reifies</uri>'
+            f'<triple><uri>{EX}alice</uri><uri>{EX}knows</uri><uri>{EX}bob</uri></triple>'
+            '</triple></graph></trix>'
+        )
+        sg.parse(data=xml, format='trix12')
+        results = list(sg.triples((URIRef(EX+'stmt'), RDF_REIF, None)))
+        assert len(results) == 1
+        assert results[0][2] == TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+
+
+@oxigraph
+class TestOxigraphRdfxml12Parse:
+
+    def test_triple_term_decodes_correctly(self, sg):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            f' xmlns:ex="{EX}">'
+            f'<rdf:Description rdf:about="{EX}stmt">'
+            '<rdf:reifies>'
+            '<rdf:TripleTerm>'
+            f'<rdf:subject rdf:resource="{EX}alice"/>'
+            f'<rdf:predicate rdf:resource="{EX}knows"/>'
+            f'<rdf:object rdf:resource="{EX}bob"/>'
+            '</rdf:TripleTerm>'
+            '</rdf:reifies>'
+            '</rdf:Description></rdf:RDF>'
+        )
+        sg.parse(data=xml, format='rdfxml12')
+        results = list(sg.triples((URIRef(EX+'stmt'), RDF_REIF, None)))
+        assert len(results) == 1
+        assert results[0][2] == TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+
+
+@oxigraph
+class TestOxigraphReconnect:
+    """A SPARQLUpdateStore-backed StarlightGraph has no real open/close
+    lifecycle of its own (HTTP is stateless per-call, unlike a file-backed
+    store such as Sleepycat) - the meaningful equivalent for this backend
+    is confirming a *second*, independent StarlightGraph/store/process
+    reconnecting to the same live endpoint sees data a first one wrote,
+    with nothing cached in-process bridging the two. Previously untested
+    from any angle.
+    """
+
+    def test_second_graph_object_sees_data_from_first(self):
+        _clear_graph()
+        g1 = StarlightGraph(store=_make_store(), identifier=GRAPH_URI, backend='rdf-1.2')
+        tt = TripleTerm(URIRef(EX+'alice'), URIRef(EX+'knows'), URIRef(EX+'bob'))
+        g1.add((URIRef(EX+'stmt1'), RDF_REIF, tt))
+
+        # A brand new StarlightGraph, brand new SPARQLUpdateStore, same
+        # endpoint/identifier - nothing shared with g1 except the live
+        # Oxigraph store itself.
+        g2 = StarlightGraph(store=_make_store(), identifier=GRAPH_URI, backend='rdf-1.2')
+        results = list(g2.triples((URIRef(EX+'stmt1'), RDF_REIF, None)))
+        assert len(results) == 1
+        assert results[0][2] == tt
+
+    def test_close_does_not_lose_or_corrupt_data(self):
+        _clear_graph()
+        g1 = StarlightGraph(store=_make_store(), identifier=GRAPH_URI, backend='rdf-1.2')
+        g1.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        g1.close()
+
+        g2 = StarlightGraph(store=_make_store(), identifier=GRAPH_URI, backend='rdf-1.2')
+        assert (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) in g2
+
+
+@oxigraph
 class TestOxigraphDatasetUpdate:
     """StarlightDataset.update() against a remote store 400'd on any update
     text containing its own ``GRAPH <uri> { }`` clause - the normal way to
@@ -384,6 +643,65 @@ class TestOxigraphDatasetUpdate:
             WHERE {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}b> ?o }} }}
         """)
         assert (URIRef(EX+'a'), URIRef(EX+'marked'), URIRef(EX+'c')) in g1
+
+    def test_delete_data_with_graph_clause(self):
+        """DELETE DATA had no live coverage at all (only INSERT variants
+        did) - native_update() forwards DELETE the same mechanical way as
+        INSERT, but that was an untested assumption, not a verified fact."""
+        ds = self._dataset()
+        g1 = ds.get_context(GRAPH_URI)
+        g1.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        ds.update(f'DELETE DATA {{ GRAPH <{GRAPH_URI}> {{ <{EX}a> <{EX}b> <{EX}c> . }} }}')
+        assert (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) not in g1
+
+    def test_delete_where_with_graph_clause(self):
+        ds = self._dataset()
+        g1 = ds.get_context(GRAPH_URI)
+        g1.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        g1.add((URIRef(EX+'x'), URIRef(EX+'y'), URIRef(EX+'z')))
+        ds.update(f"""
+            DELETE {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}b> ?o }} }}
+            WHERE {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}b> ?o }} }}
+        """)
+        assert (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) not in g1
+        assert (URIRef(EX+'x'), URIRef(EX+'y'), URIRef(EX+'z')) in g1
+
+
+@oxigraph
+class TestOxigraphGraphUpdate:
+    """StarlightGraph.update() (as opposed to StarlightDataset.update(),
+    already covered by TestOxigraphDatasetUpdate) had no live-backend test
+    coverage at all - the only existing test of it mocked requests.post
+    outright and asserted just "a POST happened", not that INSERT/DELETE
+    semantics actually round-trip against a real endpoint.
+    """
+
+    def test_insert_data(self, sg):
+        sg.update(f'INSERT DATA {{ GRAPH <{GRAPH_URI}> {{ <{EX}a> <{EX}b> <{EX}c> . }} }}')
+        assert (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) in sg
+
+    def test_delete_data(self, sg):
+        sg.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        sg.update(f'DELETE DATA {{ GRAPH <{GRAPH_URI}> {{ <{EX}a> <{EX}b> <{EX}c> . }} }}')
+        assert (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) not in sg
+
+    def test_delete_where(self, sg):
+        sg.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        sg.add((URIRef(EX+'x'), URIRef(EX+'y'), URIRef(EX+'z')))
+        sg.update(f"""
+            DELETE {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}b> ?o }} }}
+            WHERE {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}b> ?o }} }}
+        """)
+        assert (URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) not in sg
+        assert (URIRef(EX+'x'), URIRef(EX+'y'), URIRef(EX+'z')) in sg
+
+    def test_insert_where(self, sg):
+        sg.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        sg.update(f"""
+            INSERT {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}marked> ?o }} }}
+            WHERE {{ GRAPH <{GRAPH_URI}> {{ ?s <{EX}b> ?o }} }}
+        """)
+        assert (URIRef(EX+'a'), URIRef(EX+'marked'), URIRef(EX+'c')) in sg
 
 
 # ---------------------------------------------------------------------------
@@ -546,3 +864,165 @@ class TestOxigraphRdf12SparqlFunctions:
         assert row[r.vars[2]] == DirLangString('hi', 'en', 'ltr')
         assert row[r.vars[3]] == Literal('en')
         assert row[r.vars[4]] == Literal(True)
+
+
+# ---------------------------------------------------------------------------
+# Backend gaps unrelated to SPARQL parsing/translation - the reification
+# convenience API, triples_choices(), isomorphic(), non-RDF12 serialize(),
+# and __len__ all had zero (or silently wrong) native-backend dispatch.
+# ---------------------------------------------------------------------------
+
+@oxigraph
+class TestOxigraphReificationAPI:
+    """add_reification/reifiers/reifications/reifier_annotations/
+    reified_triples/triple_terms/has_triple_term/remove_reification had no
+    _is_native awareness at all. add_reification() wrote the rdf-1.1
+    backend's own tt:HASH encoding fragments (rdf:subject/predicate/object
+    on a synthetic tt: URIRef) directly into the live native store instead
+    of a real <<( )>> triple term, and every read method keyed off
+    self._tt_registry/_tt_nodes, which are always empty for native (see
+    StarlightGraph._build_registry_from_store()'s own no-op there) - so
+    reads only ever "worked" by accident, off the same process's stale
+    local state. Confirmed live: a second StarlightGraph object (same
+    store, no shared in-process state) read back nothing.  Each test here
+    uses a fresh object with no shared state to guard against exactly that
+    false-positive.
+    """
+
+    def _fresh(self):
+        return StarlightGraph(store=_make_store(), identifier=GRAPH_URI, backend='rdf-1.2')
+
+    def test_add_and_find_reification(self, sg):
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        r1 = sg.add_reifier_annotation(EX_CONF, Literal('0.9'), name=URIRef(EX+'r1'))
+        sg.add_reification(r1, tt)
+
+        fresh = self._fresh()
+        assert list(fresh.reifiers(TT=tt)) == [URIRef(EX+'r1')]
+        assert list(fresh.reifications()) == [tt]
+        assert list(fresh.reifier_annotations(tt)) == [(URIRef(EX+'r1'), EX_CONF, Literal('0.9'))]
+        assert list(fresh.reified_triples(URIRef(EX+'r1'))) == [tt]
+        assert list(fresh.triple_terms()) == [tt]
+        assert fresh.has_triple_term(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')) is True
+        assert fresh.has_triple_term(URIRef(EX+'x'), URIRef(EX+'y'), URIRef(EX+'z')) is False
+
+    def test_no_raw_encoding_fragments_written(self, sg):
+        """add_reification() must write a real <<( )>> triple term, not the
+        rdf-1.1 backend's rdf:subject/predicate/object encoding fragments."""
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        r1 = sg.add_reifier_annotation(EX_CONF, Literal('0.9'), name=URIRef(EX+'r1'))
+        sg.add_reification(r1, tt)
+        predicates = {p for _, p, _ in sg.triples((None, None, None))}
+        assert URIRef(RDF_NS + 'subject')   not in predicates
+        assert URIRef(RDF_NS + 'predicate') not in predicates
+        assert URIRef(RDF_NS + 'object')    not in predicates
+
+    def test_remove_reification(self, sg):
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        r1 = sg.add_reifier_annotation(EX_CONF, Literal('0.9'), name=URIRef(EX+'r1'))
+        sg.add_reification(r1, tt)
+        sg.remove_reification(URIRef(EX+'r1'))
+        assert list(self._fresh().reifiers(TT=tt)) == []
+
+
+@oxigraph
+class TestOxigraphTriplesChoices:
+    """triples_choices() had no native dispatch and fell through to
+    SPARQLStore.triples_choices(), an unconditional
+    raise NotImplementedError - confirmed live before this fix."""
+
+    def test_list_valued_predicate(self, sg):
+        sg.add((URIRef(EX+'a'), URIRef(EX+'p'), URIRef(EX+'x')))
+        sg.add((URIRef(EX+'b'), URIRef(EX+'p'), URIRef(EX+'y')))
+        sg.add((URIRef(EX+'c'), URIRef(EX+'other'), URIRef(EX+'z')))
+        results = set(sg.triples_choices((None, [URIRef(EX+'p')], None)))
+        assert results == {
+            (URIRef(EX+'a'), URIRef(EX+'p'), URIRef(EX+'x')),
+            (URIRef(EX+'b'), URIRef(EX+'p'), URIRef(EX+'y')),
+        }
+
+    def test_list_valued_object(self, sg):
+        sg.add((URIRef(EX+'a'), URIRef(EX+'p'), URIRef(EX+'x')))
+        sg.add((URIRef(EX+'a'), URIRef(EX+'p'), URIRef(EX+'y')))
+        sg.add((URIRef(EX+'a'), URIRef(EX+'p'), URIRef(EX+'z')))
+        results = set(sg.triples_choices((None, None, [URIRef(EX+'x'), URIRef(EX+'z')])))
+        assert results == {
+            (URIRef(EX+'a'), URIRef(EX+'p'), URIRef(EX+'x')),
+            (URIRef(EX+'a'), URIRef(EX+'p'), URIRef(EX+'z')),
+        }
+
+
+@oxigraph
+class TestOxigraphIsomorphicAndSerialize:
+    """isomorphic() and serialize() to a non-RDF12 format (e.g. 'xml',
+    'turtle') both bypassed native dispatch via raw store.triples()/
+    Graph.triples() - which can't parse a "type":"triple" SPARQL JSON
+    binding at all (see starlight.backends.native's own module docstring) -
+    so both would mishandle or crash on any native-backend graph containing
+    a triple term. Also covers the turtle12 serializer's @version "1.2"
+    directive, which used to check self._tt_nodes (always empty for native)
+    and so silently omitted the directive for native-backend graphs that
+    did contain real triple terms.
+    """
+
+    def test_isomorphic_native_vs_in_memory(self, sg):
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        sg.add((URIRef(EX+'stmt'), RDF_REIF, tt))
+
+        other = StarlightGraph()  # in-memory, structurally identical
+        other.add((URIRef(EX+'stmt'), RDF_REIF, tt))
+        assert sg.isomorphic(other) is True
+
+        different = StarlightGraph()
+        different.add((URIRef(EX+'stmt'), RDF_REIF,
+                        TripleTerm(URIRef(EX+'x'), URIRef(EX+'y'), URIRef(EX+'z'))))
+        assert sg.isomorphic(different) is False
+
+    def test_serialize_non_rdf12_format_with_triple_term(self, sg):
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        sg.add((URIRef(EX+'stmt'), RDF_REIF, tt))
+        xml = sg.serialize(format='xml')
+        assert 'rdf:RDF' in xml
+        reparsed = StarlightGraph()
+        reparsed.parse(data=xml, format='xml')
+        # De-skolemized to a BNode-based reification - the base triple
+        # itself is not asserted by rdf:subject/predicate/object alone,
+        # just confirm parsing the native-backend graph's XML output at
+        # all succeeds and carries the reifies edge through.
+        assert (URIRef(EX+'stmt'), RDF_REIF, None) in reparsed or \
+               any(p == RDF_REIF for _, p, _ in reparsed)
+
+    def test_turtle12_version_directive_present_for_native_triple_term(self, sg):
+        tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+        sg.add((URIRef(EX+'stmt'), RDF_REIF, tt))
+        ttl = sg.serialize(format='turtle12')
+        assert '@version "1.2"' in ttl
+
+
+@oxigraph
+class TestOxigraphLen:
+    """__len__ fetched and Python-counted every triple over HTTP instead of
+    using the store's already-available COUNT(*) support (what
+    SPARQLStore.__len__ already does for a non-native graph)."""
+
+    def test_graph_len(self, sg):
+        sg.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        sg.add((URIRef(EX+'x'), URIRef(EX+'y'), URIRef(EX+'z')))
+        assert len(sg) == 2
+
+    def test_dataset_len_sums_across_all_graphs(self):
+        """StarlightDataset had no __len__ override at all, so it inherited
+        Dataset.__len__ -> store.__len__(context=None), which for
+        SPARQLStore queries only the endpoint's true default graph -
+        GRAPH-scoped content is invisible to it. Confirmed live: 3 triples
+        (1 default + 1 each in two named graphs) came back as 1 via
+        inheritance before this fix."""
+        _clear_all()
+        store = _make_store()
+        ds = StarlightDataset(store=store, backend='rdf-1.2')
+        ds.default_graph.add((URIRef(EX+'d'), URIRef(EX+'e'), URIRef(EX+'f')))
+        g1 = ds.get_context(URIRef(EX+'g1'))
+        g1.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        g2 = ds.get_context(URIRef(EX+'g2'))
+        g2.add((URIRef(EX+'x'), URIRef(EX+'y'), URIRef(EX+'z')))
+        assert len(ds) == 3

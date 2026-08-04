@@ -51,9 +51,20 @@ from starlight.query.evaluate_patches import (
     patch_evalextend_forgotten_bind_vars as _patch_evalextend_forgotten_bind_vars,
 )
 
+# Fix for a starlight-side (not rdflib) gap: CONSTRUCT has no equivalent of
+# SELECT's own encoding-triple row filtering, so an unconstrained WHERE
+# pattern (e.g. a bare `?s ?p ?o`) can leak internal rdf:subject/predicate/
+# object encoding triples into CONSTRUCT output. See
+# starlight/query/evaluate_patches.py's own docstring for the full
+# root-cause trace.
+from starlight.query.evaluate_patches import (
+    patch_construct_skips_encoding_solutions as _patch_construct_skips_encoding_solutions,
+)
+
 _apply_all_operator_patches()
 _patch_algebra_translator_bugs()
 _patch_evalextend_forgotten_bind_vars()
+_patch_construct_skips_encoding_solutions()
 
 __all__ = [
     # rdflib primitives

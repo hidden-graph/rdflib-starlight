@@ -18,7 +18,7 @@ from rdflib.namespace import RDF, XSD
 from starlight.parsers import lexer as _lexer
 from starlight.parsers import syntax as _syntax
 from starlight.parsers.errors import TurtleSyntaxError
-from starlight.model.encoding import TT_NS, RR_NS, tt_hash, encode_dirlang_datatype
+from starlight.model.encoding import TT_NS, RR_NS, tt_hash, term_key, encode_dirlang_datatype
 
 # Legacy sl: constants — kept for the intermediate build phase only;
 # stripped from the final graph by _skolemize_encoding().
@@ -209,10 +209,16 @@ def _to_node(val, prefix_map, base_uri):
     """Convert a string token or coerced Python value to an rdflib term."""
     if isinstance(val, bool):
         return Literal(val, datatype=XSD.boolean)
-    if isinstance(val, int):
-        return Literal(val, datatype=XSD.integer)
-    if isinstance(val, float):
-        return Literal(val, datatype=XSD.decimal)
+    if isinstance(val, Literal):
+        # A bare (unquoted) numeric literal - syntax.coerce_object() already
+        # classified it into a correctly-typed, lexical-form-preserving
+        # Literal (INTEGER/DECIMAL/DOUBLE can't be told apart, nor can the
+        # exact source spelling be preserved, once collapsed through a
+        # Python int/float - see coerce_object's own docstring). Passed
+        # through as-is rather than falling into the generic string
+        # handling below, which would re-parse its lexical form as if it
+        # were raw Turtle token text.
+        return val
     if not isinstance(val, str):
         return Literal(str(val))
 
@@ -525,7 +531,7 @@ class _Expander:
 # Public parser class
 # ---------------------------------------------------------------------------
 
-def _skolemize_encoding(g: Graph) -> Graph:
+def _skolemize_encoding(g: Graph, rr_counter: list[int] | None = None) -> Graph:
     """Replace intermediate bnodes with stable URIRefs and strip sl: type triples.
 
     The parser builds a graph with anonymous bnodes and sl:TripleTerm /
@@ -536,6 +542,20 @@ def _skolemize_encoding(g: Graph) -> Graph:
       * Each anon reifier bnode → URIRef(RR_NS + N)     (sequential, distinct)
       * sl:TripleTerm and sl:Reification type triples → removed
       * sl: namespace binding → removed; tt: and rr: added
+
+    rr_counter, if given, is a shared, mutable ``[next_index]`` box: reifier
+    numbering starts from ``rr_counter[0]`` instead of scanning `g` itself,
+    and is advanced in place so a second call sharing the same box continues
+    numbering where the first left off. Needed by trig12.py's per-GRAPH-block
+    parsing (parse_trig12()/parse_trig12_named()): each block is parsed via
+    its own, independent call to this function on a fresh Graph, so scanning
+    each block's *own* `g` for already-used indices (the rr_counter=None
+    default, used for a single whole-document parse) can't see reifiers
+    minted for an *earlier* block in the same document - confirmed via the
+    W3C SPARQL 1.2 eval-triple-terms/expr-1 fixture's data-4.trig, whose
+    ``:g`` and ``:g2`` blocks each independently mint their own unrelated
+    "rr:0", which then collide once a query result puts content from both
+    graphs in one place (e.g. this fixture's own CONSTRUCT template).
     """
     # --- find TT bnodes (tagged sl:TripleTerm in intermediate graph) ---
     tt_bnodes = frozenset(
@@ -568,18 +588,46 @@ def _skolemize_encoding(g: Graph) -> Graph:
         s_n = next(g.objects(bn, RDF.subject),   None)
         p_n = next(g.objects(bn, RDF.predicate), None)
         o_n = next(g.objects(bn, RDF.object),    None)
-        s_key = str(bn_to_uri.get(s_n, s_n))
-        p_key = str(p_n)
-        o_key = str(bn_to_uri.get(o_n, o_n))
+        s_key = term_key(bn_to_uri.get(s_n, s_n))
+        p_key = term_key(p_n)
+        o_key = term_key(bn_to_uri.get(o_n, o_n))
         bn_to_uri[bn] = URIRef(TT_NS + tt_hash(s_key, p_key, o_key))
 
     # --- map anonymous reifier bnodes to rr:N URIRefs ---
+    # Numbering must not collide with any rr:N URIRef *already* present in g
+    # - g isn't always a fresh parse (StarlightGraph.from_rdflib() also
+    # routes a SPARQL CONSTRUCT result through this same function, and that
+    # result can legitimately contain both a pre-existing rr:N value passed
+    # through unchanged from a variable binding *and* a fresh anonymous
+    # reifier minted by <<s p o>> shorthand in the template). Numbering
+    # fresh reifiers from 0 regardless of what's already in the graph would
+    # silently collide the two into one URI, merging two unrelated nodes -
+    # confirmed via a real StarlightGraph.query() CONSTRUCT result mixing a
+    # passed-through rr:0 with a freshly-minted one (see the W3C SPARQL 1.2
+    # eval-triple-terms/construct-3 and expr-1 fixtures, which both do
+    # exactly this). Scanning for the highest already-used index first and
+    # continuing after it keeps every rr:N in the final graph distinct.
+    if rr_counter is not None:
+        _next_rr = rr_counter[0]
+    else:
+        _existing_rr_indices = [
+            int(str(term)[len(RR_NS):])
+            for s, p, o in g.triples((None, None, None))
+            for term in (s, p, o)
+            if isinstance(term, URIRef) and str(term).startswith(RR_NS)
+            and str(term)[len(RR_NS):].isdigit()
+        ]
+        _next_rr = max(_existing_rr_indices, default=-1) + 1
+
     reif_bnodes = sorted(
         {s for s, p, o in g.triples((None, RDF_REIFIES, None)) if isinstance(s, BNode)},
         key=str,
     )
-    for i, bn in enumerate(reif_bnodes):
-        bn_to_uri[bn] = URIRef(RR_NS + str(i))
+    for offset, bn in enumerate(reif_bnodes):
+        bn_to_uri[bn] = URIRef(RR_NS + str(_next_rr + offset))
+
+    if rr_counter is not None:
+        rr_counter[0] = _next_rr + len(reif_bnodes)
 
     # --- rebuild graph with substitutions, dropping sl: type triples ---
     new_g = Graph()

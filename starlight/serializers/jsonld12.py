@@ -86,13 +86,13 @@ def _tt_local(tt: TripleTerm) -> str:
     Avoids importing StarlightGraph; recomputes the hash on-the-fly.
     For efficiency, callers that already have the URI should pass it directly.
     """
-    from starlight.model.encoding import tt_hash
+    from starlight.model.encoding import tt_hash, term_key
     s = tt.subject
     p = tt.predicate
     o = tt.object
-    s_str = (TT_NS + _tt_local(s)) if isinstance(s, TripleTerm) else str(s)
-    o_str = (TT_NS + _tt_local(o)) if isinstance(o, TripleTerm) else str(o)
-    return tt_hash(s_str, str(p), o_str)
+    s_str = (TT_NS + _tt_local(s)) if isinstance(s, TripleTerm) else term_key(s)
+    o_str = (TT_NS + _tt_local(o)) if isinstance(o, TripleTerm) else term_key(o)
+    return tt_hash(s_str, term_key(p), o_str)
 
 
 def _tt_node(tt_local: str, tt: TripleTerm) -> dict:

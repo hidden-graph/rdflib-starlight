@@ -130,3 +130,85 @@ def patch_evalextend_forgotten_bind_vars() -> bool:
         _evaluate_patch_status = False
 
     return _evaluate_patch_status
+
+
+_construct_patch_status: bool | None = None
+
+
+def patch_construct_skips_encoding_solutions() -> bool:
+    """Fix a real, general gap (not an rdflib bug - a starlight-side one):
+    ``StarlightGraph.query()``/``StarlightDataset.query()`` execute the
+    rewritten SPARQL 1.1 text against a *raw*, unfiltered view of the
+    underlying store (``raw = Graph(store=self.store, ...)`` in
+    ``starlight_graph.py``) - deliberately, since triple-term pattern
+    rewriting (``sparql12_to_11.py``) needs to match the internal
+    ``rdf:subject``/``rdf:predicate``/``rdf:object`` encoding triples
+    directly. An *unconstrained* pattern like a bare ``?s ?p ?o .`` matches
+    those internal triples too, alongside ordinary user-visible ones.
+
+    For SELECT, ``starlight.model.encoding.restore_select_bindings`` already
+    drops any result row that incidentally matched these internal triples
+    (a TT_NS-prefixed URIRef paired with an encoding predicate as a bound
+    *value* - never something a real query result should surface). CONSTRUCT
+    has no equivalent: rdflib's own ``evalConstructQuery`` iterates WHERE
+    solutions and instantiates the template for every one, with no per-
+    solution filtering hook. Confirmed via two real W3C SPARQL 1.2 test
+    fixtures (construct-3, expr-1), both using an unconstrained ``?s ?p ?o``
+    inside a CONSTRUCT/GRAPH block over data that already contains
+    reification/triple-term encoding triples: the template silently wrapped
+    an internal row (e.g. ``tt:HASH rdf:subject :a``) into a bogus *nested*
+    triple term, which then crashed downstream in
+    ``StarlightGraph.from_rdflib``/``_restore`` with "the subject of a
+    triple term must be an IRI or blank node, not a triple term" - not a
+    query-authoring mistake, a leak of storage internals into CONSTRUCT
+    output that should never have been visible in the first place.
+
+    Fix: the same skip-check ``restore_select_bindings`` already applies to
+    SELECT rows, applied here per-solution before templating instead of
+    per-output-row after.
+    """
+    global _construct_patch_status
+    if _construct_patch_status is not None:
+        return _construct_patch_status
+
+    try:
+        original_eval_construct = evaluate.evalConstructQuery
+        if getattr(original_eval_construct, "_starlight_construct_patch", False):
+            _construct_patch_status = True
+            return True
+
+        from rdflib import Graph, URIRef
+
+        from starlight.model.encoding import ENCODING_PREDS, TT_NS
+
+        evalPart = evaluate.evalPart
+        _fillTemplate = evaluate._fillTemplate
+
+        def _is_encoding_solution(c) -> bool:
+            values = list(c.values())
+            return (
+                any(isinstance(v, URIRef) and str(v).startswith(TT_NS) for v in values)
+                and bool(ENCODING_PREDS.intersection(values))
+            )
+
+        def _patched_eval_construct_query(ctx, query):
+            template = query.template
+            if not template:
+                # a construct-where query
+                template = query.p.p.triples  # query->project->bgp ...
+
+            graph = Graph()
+            for c in evalPart(ctx, query.p):
+                if _is_encoding_solution(c):
+                    continue
+                graph += _fillTemplate(template, c)
+
+            return {"type_": "CONSTRUCT", "graph": graph}
+
+        _patched_eval_construct_query._starlight_construct_patch = True  # type: ignore[attr-defined]
+        evaluate.evalConstructQuery = _patched_eval_construct_query
+        _construct_patch_status = True
+    except Exception:
+        _construct_patch_status = False
+
+    return _construct_patch_status

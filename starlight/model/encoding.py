@@ -18,11 +18,43 @@ from rdflib.namespace import RDF
 TT_NS      = 'https://github.com/hidden-graph/rdflib-starlight/ns/tt#'       # triple-term content-addressed URIs
 RR_NS      = 'https://github.com/hidden-graph/rdflib-starlight/ns/rr#'       # anonymous reifier URIs
 DIRLANG_NS = 'https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#'  # dirLangString datatype encoding
+BN_NS      = 'https://github.com/hidden-graph/rdflib-starlight/ns/bn#'       # native-backend blank-node skolemization
 
 # Predicates used in the internal TripleTerm URIRef encoding - shared by
 # StarlightGraph and StarlightDataset's _is_encoding_triple() checks and by
 # restore_select_bindings() below.
 ENCODING_PREDS = frozenset({RDF.subject, RDF.predicate, RDF.object})
+
+
+def term_key(term) -> str:
+    """Canonical string form of an RDF term/pre-resolved URI string, for use
+    as one of tt_hash's three inputs.
+
+    NOT the same as plain str(term) - confirmed a real, reproducible bug via
+    a W3C SPARQL 1.2 test (triple-on-str-literals): str(Literal) always
+    returns just the lexical form, dropping BOTH the language tag and the
+    datatype entirely (str(Literal("c")) == str(Literal("c", lang="nl")) ==
+    str(Literal("c", datatype=<dirlang-uri>)) == "c"), so three genuinely
+    different triple-term object values all hashed to the *same* tt:HASH
+    URI - not just a comparison false-positive, a real content-addressing
+    collision that silently overwrote _TT_HASH_MEMO's remembered (s,p,o)
+    for that URI with whichever of the three was computed last, corrupting
+    the other two. `.n3()` includes the datatype/language, correctly
+    distinguishing them - safe to switch to uniformly (not just for
+    Literals) per tt_hash's own docstring ("safe to change without a
+    migration story"). Passing through an already-string value unchanged
+    supports the common "already resolved to a tt: URI string" case every
+    caller also needs (a nested triple term's own hash, computed via plain
+    string concatenation, e.g. TT_NS + local_hash - not an rdflib term at
+    all). Checked via `isinstance(term, Node)`, NOT `isinstance(term, str)`:
+    URIRef/BNode/Literal are ALL str subclasses in rdflib, so a bare
+    `isinstance(term, str)` check would catch them too and skip `.n3()`
+    entirely, reintroducing the exact bug this function exists to fix.
+    """
+    from rdflib.term import Node
+    if isinstance(term, Node):
+        return term.n3()
+    return str(term)
 
 
 def tt_hash(s_str: str, p_str: str, o_str: str) -> str:
@@ -147,3 +179,63 @@ def restore_select_bindings(r, restore_fn) -> None:
                     for v in row.values())
                 and ENCODING_PREDS.intersection(row.values()))
     ]
+
+
+def _reencode_tt(tt, out_graph) -> URIRef:
+    """Emit tt's rdf:subject/predicate/object encoding triples into
+    out_graph (recursively for any nested TripleTerm component) and return
+    its content-addressed URI - the write-side mirror of
+    StarlightGraph._intern_tt(), but writing to an arbitrary graph rather
+    than `self`, and given an already-fully-resolved TripleTerm (no nested
+    tt:HASH URIRefs left to look up) rather than one that might still
+    contain them. See inject_missing_tt_encoding()'s docstring for why this
+    exists.
+    """
+    from starlight.model.triple import TripleTerm
+    s_n = _reencode_tt(tt.subject, out_graph) if isinstance(tt.subject, TripleTerm) else tt.subject
+    o_n = _reencode_tt(tt.object, out_graph) if isinstance(tt.object, TripleTerm) else tt.object
+    uri = URIRef(TT_NS + tt_hash(term_key(s_n), term_key(tt.predicate), term_key(o_n)))
+    out_graph.add((uri, RDF.subject, s_n))
+    out_graph.add((uri, RDF.predicate, tt.predicate))
+    out_graph.add((uri, RDF.object, o_n))
+    return uri
+
+
+def inject_missing_tt_encoding(graph, restore_fn) -> None:
+    """Scan a freshly-built CONSTRUCT result graph for any tt:HASH URIRef
+    that appears with no rdf:subject/predicate/object encoding triples of
+    its own already in `graph`, and - wherever `restore_fn` (the querying
+    graph/dataset's own ``_restore``/``_restore_any``) can still resolve it
+    - inject those triples so the value survives being wrapped in
+    ``StarlightGraph.from_rdflib()`` afterwards.
+
+    Why this is needed: a CONSTRUCT template can embed a tt:HASH URIRef that
+    was never freshly computed by this query at all - just read straight off
+    an existing WHERE-clause binding, e.g. ``BIND(<<(?s ?p ?o)>> AS ?t)``
+    where ``?o`` itself already held a *nested* triple-term value from the
+    graph being queried. Such a value is only "known" via the *querying*
+    graph's own ``_tt_nodes`` registry (built when that data was originally
+    parsed) - the plain rdflib Graph rdflib's SPARQL engine hands back for a
+    CONSTRUCT result has no rdf:subject/predicate/object triples for it at
+    all (those were never re-derived, since nothing re-interned it), so
+    ``StarlightGraph.from_rdflib()``'s registry-building pass
+    (``_build_registry_from_store()``) has nothing to find, and the raw
+    tt:HASH URIRef leaks straight through to callers instead of the
+    TripleTerm it's supposed to mean. Confirmed via the W3C SPARQL 1.2
+    eval-triple-terms/expr-1 fixture, whose CONSTRUCT template does exactly
+    this. Called on `graph` *before* ``StarlightGraph.from_rdflib(graph)``,
+    from both ``StarlightGraph.query()`` and ``StarlightDataset.query()``.
+    """
+    from starlight.model.triple import TripleTerm
+
+    already_encoded = {s for s, _p, _o in graph.triples((None, RDF.subject, None))}
+    candidates = {
+        term for s, p, o in graph for term in (s, o)
+        if isinstance(term, URIRef) and str(term).startswith(TT_NS)
+    }
+    for uri in candidates:
+        if uri in already_encoded:
+            continue
+        restored = restore_fn(uri)
+        if isinstance(restored, TripleTerm):
+            _reencode_tt(restored, graph)

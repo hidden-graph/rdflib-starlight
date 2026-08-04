@@ -6,6 +6,8 @@ extract_fields, and expand_triple_set.
 """
 
 import pytest
+from rdflib import Literal
+from rdflib.namespace import XSD
 from starlight.parsers.syntax import (
     coerce_object,
     classify_statement,
@@ -18,15 +20,61 @@ from starlight.parsers.errors import TurtleSyntaxError
 
 
 class TestCoerceObject:
+    """Numeric literals come back as a correctly-typed, lexical-form-
+    preserving Literal, not a Python int/float - see coerce_object's own
+    docstring: a Python numeric type can't tell INTEGER/DECIMAL/DOUBLE
+    apart from the lexical shape alone (e.g. "123e0" is xsd:double despite
+    having no decimal point), and converting through one would also
+    silently canonicalize the lexical form (e.g. "04" -> "4")."""
     def test_true(self):      assert coerce_object('true') is True
     def test_false(self):     assert coerce_object('false') is False
-    def test_integer(self):   assert coerce_object('42') == 42
-    def test_negative(self):  assert coerce_object('-5') == -5
-    def test_positive(self):  assert coerce_object('+3') == 3
-    def test_float(self):     assert coerce_object('3.14') == 3.14
-    def test_float_exp(self): assert coerce_object('1.5e2') == 150.0
+
+    def test_integer(self):
+        result = coerce_object('42')
+        assert result.datatype == XSD.integer
+        assert str(result) == '42'
+
+    def test_negative(self):
+        result = coerce_object('-5')
+        assert result.datatype == XSD.integer
+        assert str(result) == '-5'
+
+    def test_positive(self):
+        # Lexical form preserved exactly, including the leading "+" - not
+        # normalized away even though "+3" and "3" are the same value.
+        result = coerce_object('+3')
+        assert result.datatype == XSD.integer
+        assert str(result) == '+3'
+
+    def test_float(self):
+        result = coerce_object('3.14')
+        assert result.datatype == XSD.decimal
+        assert str(result) == '3.14'
+
+    def test_float_exp(self):
+        # Lexical form preserved exactly - not collapsed to the value's
+        # canonical "150.0" form.
+        result = coerce_object('1.5e2')
+        assert result.datatype == XSD.double
+        assert str(result) == '1.5e2'
+
+    def test_integer_with_exponent_is_double(self):
+        """"123e0" has no decimal point but does have an exponent - Turtle
+        grammar makes that xsd:double, not xsd:decimal or xsd:integer."""
+        result = coerce_object('123e0')
+        assert result.datatype == XSD.double
+        assert str(result) == '123e0'
+
+    def test_leading_zero_lexical_form_preserved(self):
+        result = coerce_object('04')
+        assert result.datatype == XSD.integer
+        assert str(result) == '04'
+
     def test_string(self):    assert coerce_object(':foo') == ':foo'
-    def test_whitespace(self):assert coerce_object('  42  ') == 42
+    def test_whitespace(self):
+        result = coerce_object('  42  ')
+        assert result.datatype == XSD.integer
+        assert str(result) == '42'
 
 
 class TestClassifyStatement:

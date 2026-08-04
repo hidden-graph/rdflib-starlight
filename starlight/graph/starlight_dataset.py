@@ -33,7 +33,8 @@ from rdflib import Dataset, Graph, URIRef, BNode
 from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 
 from starlight.graph.starlight_graph import StarlightGraph, VALID_BACKENDS, _raw_triples, _read_source_text
-from starlight.model.encoding import TT_NS, ENCODING_PREDS as _ENCODING_PREDS, restore_select_bindings
+from starlight.model.encoding import TT_NS, ENCODING_PREDS as _ENCODING_PREDS, lookup_tt_hash, restore_select_bindings
+from starlight.model.triple import TripleTerm
 
 _raw_graph_add = Graph.add
 
@@ -313,13 +314,29 @@ class StarlightDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _restore_any(self, node):
-        """Restore a tt:HASH URIRef to a TripleTerm by searching all cached graph registries."""
+        """Restore a tt:HASH URIRef to a TripleTerm by searching all cached graph
+        registries, falling back to the process-wide TT_HASH_FN memo (see
+        starlight.model.encoding's lookup_tt_hash) for a fully-ground
+        TRIPLE()/<<( )>> value that was computed but never written to any
+        graph - mirrors StarlightGraph._restore's own fallback, which this
+        one lacked (a real, separate gap: confirmed via a W3C test, expr-2,
+        that only reaches StarlightDataset because its data fixture happens
+        to be an empty .nq file, routing it through StarlightDataset._new_graph
+        instead of a plain StarlightGraph - the query itself never touches
+        any actual dataset content). Recurses like StarlightGraph._restore
+        does, so a nested triple-term component (itself a tt:HASH URIRef)
+        resolves fully rather than leaving an inner URIRef unresolved.
+        """
         if not (isinstance(node, URIRef) and str(node).startswith(TT_NS)):
             return node
         for sg in self._sg_cache.values():
             tt = sg._tt_nodes.get(node)
             if tt is not None:
-                return tt
+                return TripleTerm(self._restore_any(tt.subject), tt.predicate, self._restore_any(tt.object))
+        remembered = lookup_tt_hash(node)
+        if remembered is not None:
+            s, p, o = remembered
+            return TripleTerm(self._restore_any(s), p, self._restore_any(o))
         return node
 
     def _build_raw_execution_graph(self) -> Dataset:
@@ -351,6 +368,33 @@ class StarlightDataset(Dataset):
                 raw_ctx.add(t)
         self._raw_execution_graph = raw
         return raw
+
+    def __len__(self) -> int:
+        """Total triple count across the *entire* dataset (default graph +
+        every named graph) - matching rdflib's own Dataset.__len__ docstring
+        ("Number of triples in the entire conjunctive graph") and this
+        class's own behavior for the default in-memory backend, where
+        Dataset.__len__ -> self.store.__len__() already sums everything
+        (a Memory store has no separate per-context counting concept).
+
+        Native backend needed its own override: SPARQLStore.__len__(context=
+        None) (what the inherited Dataset.__len__ calls) queries only the
+        endpoint's true default graph - GRAPH-scoped content is invisible to
+        it - so plain inheritance would silently undercount any native-
+        backed dataset with named-graph content. Confirmed live: 3 triples
+        (1 default + 1 each in two named graphs) came back as 1 via
+        inheritance, 3 via the UNION query here.
+        """
+        if self._backend != 'rdf-1.2':
+            return super().__len__()
+        from starlight.backends.native import http_select, resolve_store_http
+        from rdflib.term import Variable
+        q_url, _, hdrs = resolve_store_http(self.store, self._backend)
+        sparql = 'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }'
+        _vars, bindings = http_select(q_url, sparql, hdrs)
+        if not bindings:
+            return 0
+        return int(str(bindings[0][Variable('c')]))
 
     def query(self, query_object, processor='sparql', result='sparql',
               initNs=None, initBindings=None, use_store_provided=True, **kwargs):
@@ -396,6 +440,8 @@ class StarlightDataset(Dataset):
         if r.type == 'SELECT':
             restore_select_bindings(r, self._restore_any)
         elif r.type == 'CONSTRUCT':
+            from starlight.model.encoding import inject_missing_tt_encoding
+            inject_missing_tt_encoding(r.graph, self._restore_any)
             r.graph = StarlightGraph.from_rdflib(r.graph)
         return r
 

@@ -82,15 +82,21 @@ def test_rewrite_subject_function_in_select_projection_without_where_keyword():
     # WHERE is optional in SPARQL for SELECT ("SELECT (...) { }" is valid).
     # _rewrite_triple_functions used to locate its injection point by
     # searching for literal "WHERE {" text with no fallback, silently
-    # dropping the injected rdf:subject binding triple when that keyword was
-    # absent - leaving ?__tt0 permanently unbound instead of raising or
-    # working. Fixed by _find_group_pattern_start, shared with the ground-
-    # TRIPLE()-as-value BIND injection (see test_dataset_query.py::TestAsk::
+    # dropping the injected BIND when that keyword was absent - leaving
+    # ?__tt0 permanently unbound instead of raising or working. Fixed by
+    # _find_group_pattern_start, shared with the ground-TRIPLE()-as-value
+    # BIND injection (see test_dataset_query.py::TestAsk::
     # test_ask_false_when_no_match for that sibling fix).
+    #
+    # Injects a BIND calling the registered tt:fn/subject accessor function,
+    # not a rdf:subject *match* pattern (which only works when ?tt's value
+    # was already written to some graph - see the module-level comment
+    # above _TT_ACCESSOR_FN in sparql12_to_11.py for why a real function is
+    # needed instead).
     query = "SELECT (SUBJECT(?tt) AS ?s) { }"
     rewritten = rewrite_sparql12_to_11(query)
 
-    assert "?tt <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> ?__tt0 ." in rewritten
+    assert "BIND(<https://github.com/hidden-graph/rdflib-starlight/ns/tt#fn/subject>(?tt) AS ?__tt0)" in rewritten
 
     from rdflib.plugins.sparql.parser import parseQuery
     parseQuery(rewritten)  # must not raise
@@ -110,7 +116,7 @@ SELECT $this $value WHERE {
 
     assert "$value" in rewritten
     assert "PREDICATE(" not in rewritten
-    assert "$value <http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate> ?__tt0 ." in rewritten
+    assert "BIND(<https://github.com/hidden-graph/rdflib-starlight/ns/tt#fn/predicate>($value) AS ?__tt0)" in rewritten
 
 
 def test_rewrite_subject_of_triple_term_literal_extracts_component_directly():
@@ -454,22 +460,25 @@ def test_dirlang_literal_directly_in_function_argument():
     # variable bound from stored data, which already worked) must not be
     # handed unchanged to rdflib's SPARQL 1.1 parser - it has no notion of
     # the --dir suffix and raises a ParseException on the "--" it doesn't
-    # expect. It must be rewritten to a call to the registered dirlang:
-    # constructor function instead.
+    # expect. It must be rewritten to a directly typed literal using the
+    # same dirlang-encoded datatype URI storage uses (not a function call -
+    # that only works in expression positions, not term slots like a VALUES
+    # row; a directly typed literal works everywhere. See
+    # starlight.model.encoding.encode_dirlang_datatype).
     query = 'SELECT (LANGDIR("hi"@en--rtl) AS ?dir) WHERE {}'
     rewritten = rewrite_sparql12_to_11(query)
 
     assert '@en--rtl' not in rewritten
-    assert 'https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#fn/construct>("hi"@en--rtl' not in rewritten
-    assert '<https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#fn/construct>("hi", "en", "rtl")' in rewritten
+    assert 'fn/construct' not in rewritten
+    assert '"hi"^^<https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#en--rtl>' in rewritten
 
 
 def test_dirlang_literal_single_quoted_and_triple_quoted():
     rewritten = rewrite_sparql12_to_11("SELECT (LANG('hi'@en--rtl) AS ?l) WHERE {}")
-    assert "<https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#fn/construct>('hi', \"en\", \"rtl\")" in rewritten
+    assert "'hi'^^<https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#en--rtl>" in rewritten
 
     rewritten2 = rewrite_sparql12_to_11('SELECT (LANG("""hi there"""@en--rtl) AS ?l) WHERE {}')
-    assert '<https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#fn/construct>("""hi there""", "en", "rtl")' in rewritten2
+    assert '"""hi there"""^^<https://github.com/hidden-graph/rdflib-starlight/ns/dirlang#en--rtl>' in rewritten2
 
 
 def test_dirlang_literal_untouched_when_no_direction_suffix():
