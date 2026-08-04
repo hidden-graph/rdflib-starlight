@@ -544,6 +544,219 @@ def _rewrite_triple_calls(query: str) -> str:
     return ''.join(result)
 
 
+_VALUES_KEYWORD_RE = _re.compile(r'\bVALUES\b', _re.IGNORECASE)
+
+
+def _consume_values_clause(text: str, start: int) -> tuple[str, int] | None:
+    """Consume one ``VALUES (...) { ... }`` / ``VALUES ?v { ... }`` clause
+    starting at the ``VALUES`` keyword (index ``start``). Returns
+    ``(full_matched_text, end_index)``, or ``None`` if what follows
+    ``VALUES`` isn't actually shaped like a values clause (defensive only -
+    ``\\bVALUES\\b`` already rules out most false positives; this just
+    avoids raising on genuinely malformed input, leaving it for the real
+    SPARQL parser downstream to reject with a proper error)."""
+    i = start + len('VALUES')
+    while i < len(text) and text[i].isspace():
+        i += 1
+    if i >= len(text):
+        return None
+    if text[i] == '(':
+        _, i = _consume_balanced(text, i, '(', ')')
+    elif text[i] in ('?', '$'):
+        i += 1
+        while i < len(text) and (text[i].isalnum() or text[i] == '_'):
+            i += 1
+    else:
+        return None
+    while i < len(text) and text[i].isspace():
+        i += 1
+    if i >= len(text) or text[i] != '{':
+        return None
+    _, i = _consume_balanced(text, i, '{', '}')
+    return text[start:i], i
+
+
+def _rewrite_values_clause(clause: str) -> str | None:
+    """Rewrite one ``VALUES`` clause (``clause`` is the full text starting
+    at ``VALUES`` and ending after the matching ``}``, as returned by
+    ``_consume_values_clause``) into an equivalent UNION-of-BIND-groups
+    form, IF any row contains a ground triple term (``<<( )>>`` -
+    ``TRIPLE(...)`` calls are already normalised to this spelling by the
+    time this runs, see ``_rewrite_sparql12_to_11_tracked``'s call order).
+    Returns ``None`` (caller keeps the clause verbatim) when no row
+    contains one - the ordinary ``VALUES`` form is already correct
+    SPARQL 1.1 and needs no rewriting at all.
+
+    Why this is needed, not just a stylistic alternative: a VALUES row's
+    values must each be a syntactically *ground* term (SPARQL's own
+    ``DataBlockValue`` production is
+    ``iri | RDFLiteral | NumericLiteral | BooleanLiteral | 'UNDEF'`` - no
+    variable alternative at all). This module's usual strategy for a
+    fully-ground triple term elsewhere (mint ``tt:fn/hash(...)`` as a
+    fresh variable via a hoisted ``BIND``, then substitute that *variable*
+    in place of the original ``<<( )>>`` text - see
+    ``_rewrite_triple_term``'s "elif all_ground" branch) produces exactly
+    that illegal shape when "in place" happens to be a VALUES row
+    (``VALUES (?o) { (?__tt0) }`` is a syntax error: a bare variable is
+    never a legal ``DataBlockValue``) - confirmed as a real, reproducible
+    failure via the W3C SPARQL 1.2 test suite's `basic-8`/`basic-9`
+    (``VALUES ?o { <<( :s :p "o" )>> ... }``), which is what surfaced this
+    gap. ``VALUES`` is already defined to be semantics-equivalent to
+    unioning each row's bindings as alternative solutions (the standard
+    "``VALUES`` desugars to a ``UNION`` of ``BIND``s" reading) - rewriting
+    to that form sidesteps the ``DataBlockValue`` restriction entirely,
+    since a ``BIND``'s right-hand side is an ordinary *expression*
+    position, where ``tt:fn/hash(...)`` already substitutes correctly in
+    place with no hoisting at all (``_rewrite_triple_term``'s "elif
+    is_expression" branch, reused completely unchanged by the rest of the
+    pipeline once this function hands back BIND-shaped text - this
+    function only reshapes the surrounding syntax; the per-term rewriting
+    itself is whatever the rest of the pipeline already does correctly to
+    any other expression-position triple term).
+    """
+    i = len('VALUES')
+    while clause[i].isspace():
+        i += 1
+    parenthesized_vars = clause[i] == '('
+    if parenthesized_vars:
+        varlist_text, i = _consume_balanced(clause, i, '(', ')')
+        variables = _split_top_level_terms(varlist_text[1:-1])
+    else:
+        j = i
+        while not clause[j].isspace() and clause[j] != '{':
+            j += 1
+        variables = [clause[i:j]]
+        i = j
+    while clause[i].isspace():
+        i += 1
+    data_block_text, i = _consume_balanced(clause, i, '{', '}')
+    data_inner = data_block_text[1:-1]
+
+    if '<<(' not in data_inner:
+        return None
+
+    if parenthesized_vars:
+        rows = []
+        j = 0
+        while j < len(data_inner):
+            if data_inner[j].isspace():
+                j += 1
+                continue
+            row_text, j = _consume_balanced(data_inner, j, '(', ')')
+            rows.append(_split_top_level_terms(row_text[1:-1]))
+    else:
+        rows = [[tok] for tok in _split_top_level_terms(data_inner)]
+
+    branches = []
+    for row in rows:
+        binds = []
+        for var, val in zip(variables, row):
+            if val.upper() == 'UNDEF':
+                continue
+            var_name = var if var.startswith(('?', '$')) else '?' + var
+            binds.append(f'BIND({_inline_ground_triple_terms(val)} AS {var_name})')
+        branches.append('{ ' + ' '.join(binds) + ' }')
+
+    return '{ ' + ' UNION '.join(branches) + ' }'
+
+
+def _inline_ground_triple_terms(token: str) -> str:
+    """Recursively rewrite every ``<<( s p o )>>`` inside ``token`` to
+    inline ``tt:fn/hash(s, p, o)`` text - with no hoisting to a top-level
+    ``BIND`` and no sharing via ``state.pending_ground_binds``/
+    ``_content_cache`` at all, unlike ``_rewrite_triple_term``'s own
+    "elif all_ground" branch (see its comment for why that branch checks
+    ``all_ground`` *before* ``is_expression``, and why this function exists
+    as a separate, narrower path instead of just calling it).
+
+    Used only by ``_rewrite_values_clause``, where it's not just an
+    optimization but a correctness requirement: every value in a VALUES
+    row is *already* guaranteed fully ground by SPARQL's own grammar
+    (``DataBlockValue`` has no variable alternative), so there is never a
+    matching-pattern case to consider here - but a hoisted, shared
+    ``BIND(tt:fn/hash(...) AS ?__ttN)`` referenced from *inside* one of
+    this function's UNION branches hits a real, confirmed rdflib evaluator
+    bug: a ``BIND`` that reads an *earlier* hoisted ``BIND``'s variable,
+    inside a ``UNION`` branch, followed by a join outside the union,
+    produces duplicated/wrong results. Reproduced with plain, unmodified
+    rdflib (``BIND(:v1 AS ?t). {{BIND(?t AS ?o)}UNION{...}} ?s :p ?o.``
+    gives wrong results; inlining the value directly instead of `?t` gives
+    the correct ones) - independent of anything starlight- or
+    triple-term-specific, first surfaced via the W3C SPARQL 1.2 test suite
+    (`basic-8`, triple terms inside VALUES). Each UNION branch generated by
+    ``_rewrite_values_clause`` needs to be fully self-contained rather than
+    referencing shared hoisted state, which is exactly what this function
+    guarantees by never touching ``state`` at all.
+    """
+    token = token.strip()
+    if not token.startswith('<<('):
+        return token
+    inner = token[3:-3].strip()
+    parts = _split_top_level_terms(inner)
+    if len(parts) != 3:
+        raise ValueError(f"Triple term must contain exactly 3 terms: {token}")
+    s, p, o = (_inline_ground_triple_terms(part) for part in parts)
+    return f'{TT_HASH_FN}({s}, {p}, {o})'
+
+
+def _rewrite_values_blocks(query: str) -> str:
+    """Find every ``VALUES`` clause in ``query`` and, for each whose data
+    block contains a ground triple term, replace it with an equivalent
+    UNION-of-BIND-groups form via ``_rewrite_values_clause`` - see that
+    function's own docstring for why. VALUES clauses with no triple term
+    in any row are left completely untouched (the overwhelming majority -
+    this pass is a no-op for any query that doesn't mix ``VALUES`` with
+    ``<<( )>>``/``TRIPLE(...)``).
+
+    Runs as an early, standalone pass - before the rest of this module's
+    ``<<( )>>`` handling (``_rewrite_group_content`` et al.) - so that
+    generic triple-term processing downstream only ever sees a triple term
+    in a position it already handles correctly (an ordinary graph-pattern
+    term slot, or - after this pass has run - a BIND's expression
+    position), never inside a raw VALUES row it can't safely rewrite in
+    place.
+
+    Uses the same character-scanning conventions as the rest of this
+    module (skip strings/IRIs/comments verbatim, everything else copied
+    through) rather than a single regex, since ``VALUES`` can legitimately
+    appear as a substring of other text (inside a string literal, an IRI,
+    a comment) that must not be touched.
+    """
+    buffer: list[str] = []
+    i = 0
+    n = len(query)
+    while i < n:
+        if query.startswith('#', i):
+            end = query.find('\n', i)
+            end = n if end == -1 else end + 1
+            buffer.append(query[i:end])
+            i = end
+            continue
+        if query.startswith('"""', i) or query.startswith("'''", i):
+            literal, i = _consume_string(query, i, query[i:i + 3])
+            buffer.append(literal)
+            continue
+        if query[i] in {'"', "'"}:
+            literal, i = _consume_string(query, i, query[i])
+            buffer.append(literal)
+            continue
+        if query[i] == '<' and not query.startswith("<<(", i):
+            iri, i = _consume_iri(query, i)
+            buffer.append(iri)
+            continue
+        if _VALUES_KEYWORD_RE.match(query, i):
+            consumed = _consume_values_clause(query, i)
+            if consumed is not None:
+                clause_text, end = consumed
+                rewritten = _rewrite_values_clause(clause_text)
+                buffer.append(rewritten if rewritten is not None else clause_text)
+                i = end
+                continue
+        buffer.append(query[i])
+        i += 1
+    return ''.join(buffer)
+
+
 def _rewrite_triple_accessor_literals(query: str) -> str:
     """Desugar SUBJECT/PREDICATE/OBJECT(<<( s p o )>>) - the accessor applied
     directly to a triple-term literal - to the relevant component (s, p, or
@@ -669,6 +882,15 @@ def _rewrite_sparql12_to_11_tracked(query: str) -> tuple[str, frozenset]:
 
     if _TRIPLE_CALL_RE.search(query):
         query = _rewrite_triple_calls(query)
+
+    if '<<(' in query and _VALUES_KEYWORD_RE.search(query):
+        # Must run after _rewrite_triple_calls (so a TRIPLE(...)-spelled
+        # VALUES row value is already <<( )>> by now, matching what
+        # _rewrite_values_clause's detection looks for) and before every
+        # other pass below that would otherwise treat a triple term inside
+        # a VALUES row as an ordinary graph-pattern term slot - see
+        # _rewrite_values_blocks's own docstring for why that's wrong.
+        query = _rewrite_values_blocks(query)
 
     if _TRIPLE_ACCESSOR_LITERAL_RE.search(query):
         # Must run after _rewrite_triple_calls (so a TRIPLE(...)-spelled
@@ -1123,6 +1345,22 @@ def _rewrite_triple_term(
         # placement can't guarantee: e.g. for
         # `?stmt rdf:reifies TRIPLE(:a,:b,:c)`, tt_var is read by the very
         # statement being rewritten, immediately at this position.
+        #
+        # Checked before is_expression (not after - tried swapping the two
+        # once, see git history if curious) so that e.g.
+        # `isTRIPLE(TRIPLE(a,b,c))` still desugars to `isTRIPLE(?__tt0)` -
+        # a bare-variable argument, which is what _IS_TT_RE's own regex
+        # requires to recognize and rewrite it (it only matches
+        # `isTRIPLE([?$]var)`, never a nested function-call argument).
+        # Swapping the order breaks that specific downstream consumer
+        # (confirmed: caused test_is_triple_of_nested_triple_constructor
+        # and several sibling tests to regress) even though it would have
+        # been the more locally-obvious fix for a different, narrower
+        # problem - see _rewrite_values_clause's own docstring for how that
+        # problem (a real rdflib evaluator bug involving a hoisted BIND
+        # variable referenced inside a UNION branch) is actually fixed
+        # instead, entirely inside VALUES-clause handling, without touching
+        # this function's existing, relied-upon branch order at all.
         if is_new:
             state.pending_ground_binds.append(
                 f"BIND({TT_HASH_FN}({subject_token}, {predicate_token}, {object_token}) AS {tt_var}) ."

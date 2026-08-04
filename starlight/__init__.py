@@ -28,7 +28,32 @@ from starlight.parsers.errors import TurtleSyntaxError
 # spec-correct results. See starlight/query/operator_patches.py.
 from starlight.query.operator_patches import apply_all_operator_patches as _apply_all_operator_patches
 
+# Compatibility shims for confirmed bugs in plain rdflib's own
+# _AlgebraTranslator/translateAlgebra (algebra-tree-to-SPARQL-text
+# serialization, not evaluation) - applied eagerly for the same reason.
+# Not exercised by starlight's own pipeline (it never calls
+# translateAlgebra itself), but protects any other consumer that does. See
+# starlight/query/algebra_translator_patches.py and
+# docs/rdflib-upstream-issues.md issues 3, 4, and 6.
+from starlight.query.algebra_translator_patches import (
+    patch_algebra_translator_bugs as _patch_algebra_translator_bugs,
+)
+
+# Compatibility shim for a confirmed bug in plain rdflib's own SPARQL
+# *evaluator* (evalExtend/BIND) - the most important of these patches,
+# since the bug it fixes silently produces wrong query results with no
+# error at all, rather than failing loudly. Applies to every query
+# evaluated through rdflib, including starlight's own (unlike the
+# algebra-translator patches above, this one *is* exercised by starlight's
+# own pipeline). See starlight/query/evaluate_patches.py and
+# docs/rdflib-upstream-issues.md issue 5.
+from starlight.query.evaluate_patches import (
+    patch_evalextend_forgotten_bind_vars as _patch_evalextend_forgotten_bind_vars,
+)
+
 _apply_all_operator_patches()
+_patch_algebra_translator_bugs()
+_patch_evalextend_forgotten_bind_vars()
 
 __all__ = [
     # rdflib primitives
