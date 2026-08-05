@@ -11,7 +11,9 @@ anywhere in its own pipeline (confirmed: no reference to either name in
 support in the downstream ``sparql1_2_to_rdf`` project, which *does* use
 ``_AlgebraTranslator`` directly (subclassing it in its own
 ``serialize12.py``); issues 3 and 6 already have independent workarounds
-there. Patching here too is still worthwhile, matching
+there (issue 7's empty-``PV`` fix does not — that project's own ``Project``
+handling is about a different, CONSTRUCT-specific empty-``PV`` case, not
+this one). Patching here too is still worthwhile, matching
 ``operator_patches.py``'s own stated rationale: any *other* current or
 future consumer of this package that calls ``translateAlgebra``/
 ``_AlgebraTranslator`` directly (not through that specific downstream
@@ -36,10 +38,28 @@ fix, or any other branch's behavior, passes through completely unaffected.
 
 from __future__ import annotations
 
+import re
+
+from rdflib import Variable
 from rdflib.plugins.sparql.algebra import _AlgebraTranslator
 from rdflib.plugins.sparql.parserutils import CompValue
 
 _algebra_translator_patch_status: bool | None = None
+
+# rdflib's own internal naming convention for the synthetic result variable
+# of an implicit aggregate (see algebra.py::translateAggregates - "aggvar =
+# Variable('__agg_%d__' % ...)"). An Extend node whose expr is one of these
+# is never a real, user-written BIND - it's rdflib wrapping a GROUP BY'd
+# variable that's *also* directly projected in an implicit SAMPLE() (or
+# wrapping a genuine aggregate function's own result var) so it can be
+# treated uniformly as "just another projected expression." See Issue 7 in
+# docs/rdflib-upstream-issues.md for the full writeup of why the patched
+# "Extend" branch below can't treat this case the same as an ordinary BIND.
+_AGG_RESULT_VAR_RE = re.compile(r"^__agg_\d+__$")
+
+
+def _is_aggregate_result_var(expr: object) -> bool:
+    return isinstance(expr, Variable) and bool(_AGG_RESULT_VAR_RE.match(str(expr)))
 
 
 def patch_algebra_translator_bugs() -> bool:
@@ -147,6 +167,33 @@ def patch_algebra_translator_bugs() -> bool:
                 # in the downstream sparql1_2_to_rdf project).
                 return None
 
+            if (
+                isinstance(node, CompValue)
+                and node.name == "Extend"
+                and _is_aggregate_result_var(node.expr)
+            ):
+                # An implicit-aggregate-wrapping Extend (rdflib's own
+                # "SELECT ?p ... GROUP BY ?p" -> implicit SAMPLE(?p)
+                # machinery, or any genuine aggregate function's own result
+                # var) - never legal as an ordinary in-place BIND (SPARQL's
+                # grammar doesn't permit an Aggregate inside BIND's
+                # Expression at all, only directly in a SELECT-list/HAVING/
+                # ORDER BY position), so this branch's own general "render
+                # as an in-place BIND" fix (see below) is wrong here
+                # specifically. Falls through to the original, unpatched
+                # logic instead, whose "-*-select-*-"-anchored search-and-
+                # wrap approach - despite being the very thing this file
+                # otherwise replaces - is also what performs the paired
+                # "(SAMPLE(x) as x)" suppression the "AggregateJoin" branch
+                # depends on (a literal-text match against exactly the
+                # lowercase-`as`, no-`BIND(`-wrapper shape the *original*
+                # Extend branch produces - this branch's own `BIND(... AS
+                # ...)` shape never matches it, silently defeating the
+                # suppression and leaking a spurious
+                # `BIND(SAMPLE(?p) AS ?p)` into the output). See Issue 7 in
+                # docs/rdflib-upstream-issues.md.
+                return original_sparql_query_text(self, node)
+
             if isinstance(node, CompValue) and node.name == "Extend":
                 # Renders as an explicit, in-place `BIND(expr AS var) .`
                 # statement at this node's own position in the tree -
@@ -216,6 +263,35 @@ def patch_algebra_translator_bugs() -> bool:
                 # BGP branch's own "-*-select-*- -> SELECT" marker
                 # cleanup, leaving the literal marker text in the output
                 # too.
+                return None
+
+            if isinstance(node, CompValue) and node.name == "Project" and not node.PV:
+                # "Project"'s own PV (projected-variables) list is only ever
+                # empty for a "SELECT *" query whose WHERE pattern contains
+                # zero variables anywhere (a fully-ground BGP, e.g.
+                # `SELECT * WHERE { :a :b :c . }`) - for any pattern with at
+                # least one variable, rdflib's own translateQuery already
+                # expands "*" into the concrete variable list at algebra-
+                # construction time (confirmed: PV is never `[]` for
+                # "SELECT * WHERE { ?s ?p ?o }"), so this branch only fires
+                # for that one narrow, but valid and unremarkable, shape.
+                # The original branch (below, still used for the non-empty
+                # case) builds the projection text via
+                # `" ".join(project_variables)`, which is simply the empty
+                # string when `node.PV` is `[]` - producing `SELECT {...}`
+                # with no `*` at all, which rdflib's own parser then can't
+                # re-parse (`Expected SelectQuery, found '{'`). See Issue 7
+                # in docs/rdflib-upstream-issues.md for the full writeup.
+                # SPARQL's grammar requires a SelectClause to be either `*`
+                # or a non-empty Var/`(Expression AS Var)` list - an empty
+                # PV is unambiguous, there's no other query shape it could
+                # represent - so rendering it as `*` unconditionally is
+                # always correct, not just a heuristic guess.
+                order_by_pattern = "ORDER BY {OrderConditions}" if node.p.name == "OrderBy" else ""
+                self._replace(
+                    "{Project}",
+                    "* {{" + node.p.name + "}}{GroupBy}" + order_by_pattern + "{Having}",
+                )
                 return None
 
             return original_sparql_query_text(self, node)

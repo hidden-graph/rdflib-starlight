@@ -67,9 +67,23 @@ class TripleTerm:
         return f'<<( {self.subject.n3(nm)} {self.predicate.n3(nm)} {self.object.n3(nm)} )>>'
 
     def __str__(self):
-        return self.n3()
+        try:
+            return self.n3()
+        except AttributeError:
+            # __init__ rejects an invalid subject (see above) before ever
+            # assigning any of __slots__ - so an instance can reach here
+            # half-constructed (e.g. a traceback formatter repr()'ing the
+            # failed __init__ call's own `self` argument). Falls back to
+            # __repr__'s own equally-defensive formatting rather than
+            # raising a second, unrelated AttributeError on top of
+            # whatever real error is already being reported.
+            return repr(self)
 
     def __repr__(self):
-        return f'TripleTerm({self.subject!r}, {self.predicate!r}, {self.object!r})'
+        fields = ', '.join(
+            repr(getattr(self, name, '<unset>'))
+            for name in ('subject', 'predicate', 'object')
+        )
+        return f'TripleTerm({fields})'
 
 

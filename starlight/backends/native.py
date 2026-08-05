@@ -170,7 +170,33 @@ def _parse_json_term(term_dict: dict):
         s = _parse_json_term(v['subject'])
         p = _parse_json_term(v['predicate'])
         o = _parse_json_term(v['object'])
-        return TripleTerm(s, p, o)
+        try:
+            return TripleTerm(s, p, o)
+        except ValueError as e:
+            # A conformant engine should never produce this (RDF 1.2: a
+            # triple term's own subject may never itself be a triple term -
+            # TripleTerm.__init__ enforces the same rule this library uses
+            # internally). Confirmed reproducible against live Fuseki 5.5.0
+            # specifically: TRIPLE(?subject, ...) fails to validate a
+            # triple-term-valued `subject` argument the way it already
+            # validates `predicate` (see docs/fuseki-upstream-issues.md
+            # Issue 1) - so a native backend can genuinely hand this back as
+            # a query *result*, not just reject it as malformed input.
+            # Re-raised (not swallowed - this is a real data problem, not
+            # something safe to silently paper over) as a clear, single
+            # error identifying the actual cause, instead of propagating
+            # TripleTerm's own bare ValueError: that failure happens before
+            # any of TripleTerm's __slots__ are assigned, so anything that
+            # tries to repr() the half-constructed instance afterward
+            # (pytest's own traceback formatting, notably) hits a *second*,
+            # unrelated AttributeError on top of the first, obscuring what
+            # actually went wrong.
+            raise ValueError(
+                f'native backend returned a triple term with an invalid RDF 1.2 subject '
+                f'(subject={s!r}, predicate={p!r}, object={o!r}) - a triple term\'s own '
+                f'subject may never itself be a triple term. This indicates a spec-conformance '
+                f'bug in the native SPARQL engine, not in this library.'
+            ) from e
     raise ValueError(f'Unknown SPARQL JSON term type: {t!r}')
 
 

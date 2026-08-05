@@ -1,12 +1,12 @@
 # rdflib Upstream Issues
 
-*Last reviewed: 2026-08-03*
+*Last reviewed: 2026-08-04*
 
 Bugs found in plain `rdflib` (https://github.com/RDFLib/rdflib) while building this repo's own SPARQL 1.2 support on top of it. Every reproduction below uses only plain `rdflib`, no `starlight`/`rdflib-starlight` code at all, so each is reproducible standalone against a stock `rdflib` install. All confirmed against `rdflib` 7.6.0 (the version this project currently pins).
 
 ## Status Summary
 
-All six issues are planned to be reported upstream - each a clean, unambiguous, spec-mapping or self-consistency bug with a minimal plain-`rdflib` reproduction. None has been filed yet (no existing GitHub issue/PR search performed yet - do that before actually opening any). All six now have a real fix applied *in this repo* (not just an avoidance workaround) - see the table below for which module each lives in. This repo's own SPARQL query pipeline is intended to route every query through this project's SPARQL 1.2 → algebra → `translateAlgebra`-based regeneration path, not just a downstream test suite, so all six are patched here directly rather than left as point-avoidances in one consumer's own code.
+All seven issues are planned to be reported upstream - each a clean, unambiguous, spec-mapping or self-consistency bug with a minimal plain-`rdflib` reproduction. None has been filed yet (no existing GitHub issue/PR search performed yet - do that before actually opening any). All seven now have a real fix applied *in this repo* (not just an avoidance workaround) - see the table below for which module each lives in. This repo's own SPARQL query pipeline is intended to route every query through this project's SPARQL 1.2 → algebra → `translateAlgebra`-based regeneration path, not just a downstream test suite, so all seven are patched here directly rather than left as point-avoidances in one consumer's own code.
 
 | # | Issue | Reporting upstream? | Fix in this repo |
 | --- | --- | --- | --- |
@@ -16,10 +16,13 @@ All six issues are planned to be reported upstream - each a clean, unambiguous, 
 | 4 | `translateAlgebra` mis-nests `UNION` branches that each contain a subquery + `BIND` | **Yes** (not yet filed) | `starlight/query/algebra_translator_patches.py::patch_algebra_translator_bugs` |
 | 5 | Evaluator bug: a `BIND` referencing an earlier hoisted `BIND`'s variable, inside a `UNION` branch, followed by a join, gives duplicated/wrong results | **Yes** (not yet filed) | `starlight/query/evaluate_patches.py::patch_evalextend_forgotten_bind_vars` (real fix, not just the avoidance `_inline_ground_triple_terms` used before this) |
 | 6 | `RelationalExpression`'s list-handling guard is inverted (`isinstance(list, type(node.other))`), so multi-value `IN`/`NOT IN` always crashes `translateAlgebra` | **Yes** (not yet filed) | `starlight/query/algebra_translator_patches.py::patch_algebra_translator_bugs` (also independently fixed in the downstream `sparql1.2_to_rdf` project's own serializer, which doesn't fall through to this repo's patched method for this branch) |
+| 7 | `translateAlgebra`'s `"Project"` branch renders `SELECT * WHERE { <fully-ground pattern> }` (zero variables anywhere) as invalid `SELECT {...}`, missing the `*` | **Yes** (not yet filed) | `starlight/query/algebra_translator_patches.py::patch_algebra_translator_bugs` |
 
 Issues 1-2 were found while triaging the W3C SHACL 1.2 test suite's remaining failures in the downstream `starShacl`/`pyshacl-starlight` project (that suite's own `node-expr/shnex-sparql/{multiply,divide,ceil,floor,round}.ttl` and `sparql/rules/rectangle-*.ttl` fixtures) - see that repo's `docs/starlight-upstream-change-log.md` 2026-08-01 entries for the full downstream-impact writeup.
 
 Issues 3-6 were found while building RDF 1.2 triple-term support in the downstream `sparql1.2_to_rdf` project (which extends rdflib's own grammar/algebra rather than depending on this repo's text-rewrite pipeline for its own representation - see that project's `CLAUDE.md`) and, for issue 5 specifically, while fixing this repo's own `sparql12_to_11.py` rewriter's handling of a triple term inside a `VALUES` clause (see this repo's `CHANGELOG.md`/git history around 2026-08-03). All four are now patched directly in this repo (`starlight/query/algebra_translator_patches.py` for 3/4/6, `starlight/query/evaluate_patches.py` for 5), applied eagerly at import time the same way issues 1-2 already were - not just left as downstream-only workarounds, since this repo's own pipeline is expected to exercise all of these paths going forward.
+
+Issue 7 was found the same way as issues 3-6 (the downstream `sparql1.2_to_rdf` project's adversarial round-trip test battery, `tests/test_adversarial_roundtrip.py`, built specifically to try to falsify that project's "round-trip preserves semantics" claim rather than just re-confirm it on curated fixtures) - unrelated to triple terms/RDF 1.2 at all, a plain SPARQL 1.1 edge case (`SELECT * WHERE { <fully-ground triple> }`) that a curated conformance suite is unlikely to happen to cover. Also patched directly in `starlight/query/algebra_translator_patches.py`, same eager-apply-at-import convention as the others.
 
 ## How To Use
 
@@ -47,6 +50,7 @@ Each entry uses this structure - the `##` heading plus `###` subheadings - so it
 | 4 | `translateAlgebra` mis-nests `UNION` branches that each contain a subquery + `BIND` | 2026-08-03 |
 | 5 | A `BIND` referencing an earlier hoisted `BIND`'s variable, inside a `UNION` branch, followed by a join, gives duplicated/wrong results | 2026-08-03 |
 | 6 | `RelationalExpression`'s list-handling guard is inverted, so multi-value `IN`/`NOT IN` always crashes `translateAlgebra` | 2026-08-03 |
+| 7 | `translateAlgebra`'s `"Project"` branch drops the `*` for `SELECT * WHERE { <fully-ground pattern> }` | 2026-08-04 |
 
 ## Issue 1 - `MultiplicativeExpression` doesn't apply SPARQL 1.1's numeric type-promotion rules for `*` (found 2026-08-01)
 
@@ -353,6 +357,14 @@ Two real bugs surfaced while implementing this, both fixed:
 
 Found 2026-08-03 while triaging W3C SPARQL 1.2 test suite failures in the downstream `sparql1.2_to_rdf` project (`order-1`/`order-2` in that project's test suite). Root-caused down to the `"Extend"` branch's search-and-wrap mechanism (see Suspected root cause) the same day. Reporting upstream planned, not yet filed. Fixed directly in this repo (`starlight/query/algebra_translator_patches.py`), verified against both a 2-branch and 3-branch reproduction (structural reparse *and* actual query execution compared against the pre-fix/non-`UNION` equivalent), with zero regressions across this repo's own suite (772 passed) and the downstream `sparql1.2_to_rdf` project's suite (108 core + 198/218 W3C, both unchanged).
 
+### Addendum (found 2026-08-04) - the fix above regressed `GROUP BY` + implicit `SAMPLE`
+
+Found via the downstream `sparql1.2_to_rdf` project's own adversarial round-trip test battery (`tests/test_adversarial_roundtrip.py`, built specifically to try to falsify that project's "round-trip preserves semantics" claim). A query combining a `BIND` with `GROUP BY` on the bound variable - e.g. `SELECT ?p (COUNT(?tt) AS ?c) WHERE { ?r rdf:reifies ?tt . BIND(PREDICATE(?tt) AS ?p) } GROUP BY ?p` - regenerated as syntactically invalid text: `SELECT ?p ?c{...BIND(PREDICATE(?tt) AS ?p)BIND(SAMPLE(?p) AS ?p)BIND(COUNT(?tt) AS ?c)}GROUP BY ?p`. `Aggregate` (`SAMPLE`/`COUNT`/etc.) is not part of SPARQL's `Expression` grammar and cannot legally appear inside an ordinary in-pattern `BIND` - only directly in a `SELECT`-list/`HAVING`/`ORDER BY` position - so this is invalid syntax, and Oxigraph rejects it with HTTP 400.
+
+Root cause: rdflib's own aggregate-translation pass (`algebra.py::translateAggregates`) wraps any `GROUP BY`'d variable that's *also* directly projected in an implicit `Extend(var=p, expr=Variable('__agg_N__'))`, where `__agg_N__` is a synthetic result variable for an `Aggregate_Sample` node - purely internal bookkeeping, never meant to surface as a literal `BIND`. Stock rdflib's *unpatched* `"Extend"` branch happens to handle this correctly (if fragile-looking): its `"-*-select-*-"`-anchored search-and-wrap collapses the whole `Extend` chain into a single `SELECT`-list `(expr AS ?v)` entry, and the sibling `"AggregateJoin"` branch has a paired, purely textual suppression step (`self._replace("(SAMPLE({0}) as {0})".format(...), ...)`) that only fires against that *exact* lowercase-`as`, no-`BIND(`-wrapper text shape. This addendum's own fix (above) - rendering *every* `Extend` as an explicit `BIND(expr AS var)` - produces a different text shape (`BIND(... AS ...)`) that the `AggregateJoin` branch's suppression never matches, so the implicit-`SAMPLE`/`COUNT` text leaks into the output as an illegal in-pattern `BIND`. Confirmed with a plain, unmodified `rdflib.plugins.sparql.algebra.translateAlgebra`/`prepareQuery` reproduction with zero triple-term/RDF-1.2 involvement, and confirmed the algebra tree itself is identical with or without this repo's patch active - only the *serialization* diverges, purely because of which `sparql_query_text` implementation runs.
+
+Fixed by narrowing this addendum's own `"Extend"` branch: an `Extend` node whose `expr` is a bare `Variable` matching rdflib's internal `__agg_\d+__` naming convention now falls through to the *original*, unpatched `sparql_query_text` for that node specifically (whose `"-*-select-*-"`/`AggregateJoin`-paired handling is what correctly suppresses/collapses it), while every other `Extend` (ordinary `BIND`s, including the multi-`UNION`-branch case this issue was originally about) still gets this file's own in-place-`BIND` rendering. Verified: the minimal reproduction above now regenerates as `SELECT ?p (COUNT(?tt) as ?c){...BIND(PREDICATE(?tt) AS ?p)}GROUP BY ?p` (re-parses, and executes to identical results as the original against a real `rdflib.Graph`); zero regressions across this repo's own suite (806 passed, 2 xfailed) or the downstream `sparql1.2_to_rdf` project's suite (same 16 pre-existing, unrelated W3C failures with or without this fix, confirmed via `git stash`); the downstream project's adversarial battery gained 2 passes (the aggregate case, single- and double-round-trip) with no new failures. See `starlight/query/algebra_translator_patches.py::_is_aggregate_result_var`.
+
 ## Issue 5 - A `BIND` referencing an earlier hoisted `BIND`'s variable, inside a `UNION` branch, followed by a join, gives duplicated/wrong results (found 2026-08-03)
 
 **rdflib version:** 7.6.0 (SPARQL algebra evaluator, `rdflib/plugins/sparql/evaluate.py` - exact function not yet isolated further than "the `UNION`/`Extend`/`Join` evaluation interaction"; see Suspected root cause)
@@ -526,3 +538,80 @@ Same shape as issue 3: owning the serializer downstream makes this a small, loca
 ### Status
 
 Found 2026-08-03 while triaging W3C SPARQL 1.2 test suite failures in the downstream `sparql1.2_to_rdf` project (`basic-9`, `FILTER (?o IN (<<( :s :p "o" )>>, ...))`). Reporting upstream planned, not yet filed. Fixed both in the downstream project's own serializer and directly in this repo.
+
+## Issue 7 - `translateAlgebra`'s `"Project"` branch drops the `*` for `SELECT * WHERE { <fully-ground pattern> }` (found 2026-08-04)
+
+**rdflib version:** 7.6.0 (`rdflib/plugins/sparql/algebra.py::_AlgebraTranslator.sparql_query_text`, `"Project"` branch)
+
+### Description
+
+`translateQuery` represents `SELECT *` by expanding it into the concrete list of every variable used anywhere in the WHERE pattern (`Project.PV`) at algebra-construction time - confirmed empirically: `SELECT * WHERE { ?s ?p ?o }` produces `Project.PV == [Variable('o'), Variable('p'), Variable('s')]`, never an empty list. The one case where `PV` genuinely stays `[]` is a `SELECT *` whose WHERE pattern contains no variables at all (a fully-ground BGP, e.g. `SELECT * WHERE { :a :b :c . }` - an unusual but entirely valid "does this fact exist" query). `translateAlgebra`'s `"Project"` branch builds the projection text via `" ".join(project_variables)`, with no special case for an empty list - which is simply the empty string, producing `SELECT {...}` with no `*` at all. rdflib's own parser then can't re-parse its own output.
+
+### Reproduction
+
+```python
+from rdflib.plugins.sparql.processor import prepareQuery
+from rdflib.plugins.sparql.algebra import translateAlgebra
+
+q = prepareQuery("SELECT * WHERE { <http://example/a> <http://example/b> <http://example/c> . }")
+print(q.algebra.PV)          # [] - confirmed only for a fully-ground pattern; a query with
+                              # any variable anywhere already has PV populated by translateQuery
+print(translateAlgebra(q))
+```
+
+### Expected behavior
+
+`'SELECT * {<http://example/a> <http://example/b> <http://example/c>.}'` - re-parseable, matching what every other `SELECT *` query already correctly regenerates as (an explicit variable list, or `*` when there happen to be no variables to list).
+
+### Actual behavior
+
+```
+'SELECT {<http://example/a> <http://example/b> <http://example/c>.}'
+```
+
+```python
+>>> prepareQuery(translateAlgebra(q))
+pyparsing.exceptions.ParseException: Expected SelectQuery, found '{'  (at char 7), (line:1, col:8)
+```
+
+### Suspected root cause
+
+```python
+elif node.name == "Project":
+    project_variables = []
+    for var in node.PV:
+        ...
+        project_variables.append(var.n3())
+    ...
+    self._replace(
+        "{Project}",
+        " ".join(project_variables)
+        + "{{" + node.p.name + "}}"
+        + "{GroupBy}" + order_by_pattern + "{Having}",
+    )
+```
+
+`" ".join(project_variables)` is simply `""` when `node.PV` is `[]` - there's no branch anywhere in `"Project"` handling that recognizes an empty `PV` as "this was `SELECT *`, not `SELECT` with a mistakenly-empty list" and emits `*` instead. Since SPARQL's own grammar requires a `SelectClause` to be either `*` or a non-empty `Var`/`(Expression AS Var)` list, an empty `PV` is unambiguous - there is no other query shape it could represent - so this isn't a case requiring extra context to disambiguate, just a missing special case.
+
+### Impact
+
+Any `translateAlgebra` call on a `SELECT *` query whose WHERE pattern happens to contain zero variables anywhere produces invalid, unparseable output - a narrow but real edge case (a "does this exact fact exist" query, with no variables at all, is unusual but entirely valid SPARQL). Confirmed via the downstream `sparql1.2_to_rdf` project's adversarial round-trip test battery (`tests/test_adversarial_roundtrip.py`), which specifically targets shapes a curated conformance suite is unlikely to happen to cover - this one has nothing to do with RDF 1.2/triple terms at all, it's a plain SPARQL 1.1 gap.
+
+### Suggested fix
+
+```python
+self._replace(
+    "{Project}",
+    (" ".join(project_variables) if project_variables else "*")
+    + "{{" + node.p.name + "}}"
+    + "{GroupBy}" + order_by_pattern + "{Having}",
+)
+```
+
+### Possible workaround / fix applied
+
+Patched directly in this repo (`starlight/query/algebra_translator_patches.py::patch_algebra_translator_bugs`), adding a `"Project"` branch ahead of the base class's own: when `node.PV` is empty, renders `"* {{" + node.p.name + "}}{GroupBy}" + order_by_pattern + "{Having}"` and returns `None` (not `return node` - `node.p`'s own placeholder still needs `_traverse`'s later recursion, same reasoning as every other non-self-contained branch in this file). This repo's patched `_AlgebraTranslator` is what the downstream `sparql1.2_to_rdf` project's own `_AlgebraTranslator12` subclass falls through to via `super().sparql_query_text(node)` for any branch it doesn't override itself - `"Project"` is one such branch, so this fix reaches both consumers without needing an independent copy in `serialize12.py`.
+
+### Status
+
+Found 2026-08-04 during the downstream `sparql1.2_to_rdf` project's adversarial round-trip test battery, alongside this file's Issue 4 addendum (a second finding from the same run). Root-caused and fixed the same day. Reporting upstream planned, not yet filed. Verified: the minimal reproduction above now regenerates as valid, re-parseable `SELECT *` text that executes to identical results as the original against a real `rdflib.Graph`; zero regressions across this repo's own suite (881 passed, 3 xfailed) or the downstream `sparql1.2_to_rdf` project's suite (same pre-existing, unrelated failures with or without this fix); the downstream project's adversarial battery gained 2 passes (the zero-variable-`SELECT *` case, single- and double-round-trip) with no new failures.
