@@ -51,6 +51,16 @@ from starlight.query.evaluate_patches import (
     patch_evalextend_forgotten_bind_vars as _patch_evalextend_forgotten_bind_vars,
 )
 
+# Compatibility shim for a second, distinct confirmed bug in plain rdflib's
+# own SPARQL evaluator (evalJoin/evalLazyJoin) - same root cause as the
+# evalExtend patch above (a BIND's own expression-only variables aren't
+# visible in _vars), but affects join *ordering* rather than evalExtend's
+# own variable-forgetting, and isn't covered by that fix. See
+# starlight/query/evaluate_patches.py::patch_lazy_join_expr_dependency_order.
+from starlight.query.evaluate_patches import (
+    patch_lazy_join_expr_dependency_order as _patch_lazy_join_expr_dependency_order,
+)
+
 # Fix for a starlight-side (not rdflib) gap: CONSTRUCT has no equivalent of
 # SELECT's own encoding-triple row filtering, so an unconstrained WHERE
 # pattern (e.g. a bare `?s ?p ?o`) can leak internal rdf:subject/predicate/
@@ -81,12 +91,24 @@ from starlight.query.evaluate_patches import (
     patch_order_by_tt_hash_term_kind as _patch_order_by_tt_hash_term_kind,
 )
 
+# Fix for a starlight-side (not rdflib) gap: an *unconstrained* BGP match
+# (e.g. a bare `?s ?p ?o` inside a nested SELECT subquery, not just
+# CONSTRUCT - see patch_construct_skips_encoding_solutions above, which only
+# covers that one case) can incidentally match the in-memory backend's own
+# internal tt:HASH encoding triples. See
+# starlight/query/evaluate_patches.py::patch_bgp_skips_encoding_triples.
+from starlight.query.evaluate_patches import (
+    patch_bgp_skips_encoding_triples as _patch_bgp_skips_encoding_triples,
+)
+
 _apply_all_operator_patches()
 _patch_algebra_translator_bugs()
 _patch_evalextend_forgotten_bind_vars()
+_patch_lazy_join_expr_dependency_order()
 _patch_construct_skips_encoding_solutions()
 _patch_relational_expression_tt_hash_equality()
 _patch_order_by_tt_hash_term_kind()
+_patch_bgp_skips_encoding_triples()
 
 __all__ = [
     # rdflib primitives

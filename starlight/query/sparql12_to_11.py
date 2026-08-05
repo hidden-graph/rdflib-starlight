@@ -519,36 +519,68 @@ class _RewriteState:
 
 _CONSTRUCT_RE = _re.compile(r'\bCONSTRUCT\s*(?=\{)', _re.IGNORECASE)
 _WHERE_RE = _re.compile(r'\bWHERE\s*(?=\{)', _re.IGNORECASE)
+_CONSTRUCT_WHERE_SHORTHAND_RE = _re.compile(r'\bCONSTRUCT\s+WHERE\s*(?=\{)', _re.IGNORECASE)
 
 
 def _try_split_construct_where(query: str):
     """Split ``... CONSTRUCT { template } WHERE { where } ...`` into
-    ``(prologue, template_inner, where_inner, epilogue)``.
+    ``(prologue, template_inner, where_inner, epilogue)`` - or, for the
+    ``CONSTRUCT WHERE { pattern }`` shorthand (the pattern serves as *both*
+    the WHERE clause and the template - SPARQL's own defined equivalence),
+    ``(prologue, pattern, pattern, epilogue)``: the same source text
+    returned as both halves, so the caller's already-existing two-pass
+    rewrite (matching semantics for ``where_inner``, fresh-per-solution
+    ``in_construct_template=True`` semantics for ``template_inner`` - see
+    _rewrite_construct_query) runs on it twice independently, exactly as if
+    it had been written out in the explicit two-block form. Confirmed
+    necessary, not just convenient: before this, a WHERE-less split ran
+    the entire shorthand as an ordinary (non-template) WHERE clause once,
+    which - for an annotation block (``{| ap av |}``) inside it - used the
+    WHERE-clause reifier-*matching* semantics for what is also the
+    CONSTRUCT template's own reifier, instead of minting a fresh one for
+    the template as ordinary CONSTRUCT semantics require for any
+    otherwise-unbound blank-node-shaped template part. The official W3C
+    SPARQL 1.2 fixture ``construct-5`` expects exactly two distinct
+    reifiers for this shape (one from matching, one freshly constructed);
+    the old single-pass behavior produced one shared node instead.
 
     Returns ``None`` for any other query form (SELECT/ASK/DESCRIBE, or a
     CONSTRUCT form this simple two-block split doesn't recognize) so callers
     can fall back to the single-pass rewrite unchanged.
     """
     m = _CONSTRUCT_RE.search(query)
-    if not m:
-        return None
+    if m:
+        try:
+            brace_start = query.index('{', m.end())
+            template_span, after_template = _consume_balanced(query, brace_start, '{', '}')
 
-    try:
-        brace_start = query.index('{', m.end())
-        template_span, after_template = _consume_balanced(query, brace_start, '{', '}')
+            wm = _WHERE_RE.search(query, after_template)
+            if not wm or query[after_template:wm.start()].strip():
+                return None
 
-        wm = _WHERE_RE.search(query, after_template)
-        if not wm or query[after_template:wm.start()].strip():
+            where_brace_start = query.index('{', wm.end())
+            where_span, after_where = _consume_balanced(query, where_brace_start, '{', '}')
+        except ValueError:
             return None
 
-        where_brace_start = query.index('{', wm.end())
-        where_span, after_where = _consume_balanced(query, where_brace_start, '{', '}')
-    except ValueError:
-        return None
+        prologue = query[:m.start()]
+        epilogue = query[after_where:]
+        return prologue, template_span[1:-1], where_span[1:-1], epilogue
 
-    prologue = query[:m.start()]
-    epilogue = query[after_where:]
-    return prologue, template_span[1:-1], where_span[1:-1], epilogue
+    sm = _CONSTRUCT_WHERE_SHORTHAND_RE.search(query)
+    if sm:
+        try:
+            brace_start = query.index('{', sm.end())
+            pattern_span, after_pattern = _consume_balanced(query, brace_start, '{', '}')
+        except ValueError:
+            return None
+
+        prologue = query[:sm.start()]
+        epilogue = query[after_pattern:]
+        pattern_inner = pattern_span[1:-1]
+        return prologue, pattern_inner, pattern_inner, epilogue
+
+    return None
 
 
 def _find_group_pattern_start(query: str) -> int | None:
@@ -1775,7 +1807,31 @@ def _rewrite_term(term: str, state: _RewriteState, is_expression: bool = False) 
         # that narrower case as ground too.
         replacement, patterns, _ = _rewrite_reifier_term(stripped, 0, state, is_expression)
         return replacement, patterns, False
-    is_ground = not (stripped.startswith('?') or stripped.startswith('$'))
+    # A blank node - either a labelled `_:x` (what the sparql1_2_to_rdf
+    # project's own algebra-regenerated text always uses for an anonymous
+    # reifier - see the W3C eval-triple-terms/pattern-6 fixture, which
+    # motivated this check) or an anonymous `[...]`/`[]` - is, like a
+    # variable, something that must be *matched* against whatever already
+    # exists in the data, never something with a fixed, computable value:
+    # a query's own blank node labels are existentially-quantified pattern
+    # variables scoped to that query, per SPARQL's own semantics, not a
+    # constant the way a ground IRI/Literal is. Treating one as "ground"
+    # here previously let it reach _rewrite_triple_term's "elif all_ground"
+    # branch, which tries to *compute* this triple term's hash via
+    # `BIND(<tt#fn/hash>(_:x, ...) AS ...)` - but a blank node can never be
+    # a legal function-call argument in SPARQL at all (confirmed via a
+    # minimal, plain-rdflib reproduction: `BIND(<urn:fn>(_:b) AS ?x)` fails
+    # to parse), so this produced unparseable rewritten text whenever a
+    # triple term's own subject/object happened to be a blank node -
+    # reproducibly via pattern-6's `<< <<:s :p2 :o>> :p3 :z>> :q ?q` (the
+    # reification shorthand's own anonymous reifier for the inner
+    # `<<:s :p2 :o>>` becomes exactly this kind of blank node once
+    # round-tripped through the sparql1_2_to_rdf project's own RDF algebra
+    # encoding).
+    is_ground = not (
+        stripped.startswith('?') or stripped.startswith('$')
+        or stripped.startswith('_:') or stripped.startswith('[')
+    )
     return stripped, [], is_ground
 
 

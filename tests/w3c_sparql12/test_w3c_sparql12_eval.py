@@ -161,19 +161,15 @@ def _mark_known_divergences(entries, known: dict):
 
 EVAL_SELECT_OXIGRAPH = _mark_known_divergences(EVAL_SELECT, _OXIGRAPH_KNOWN_DIVERGENCES)
 
-# Known, understood limitations of the in-memory (rdf-1.1, tt:HASH content-
-# addressed URI encoding + SPARQL 1.2 -> 1.1 text rewrite) backend
-# specifically - confirmed NOT limitations of RDF 1.2/SPARQL 1.2 support
-# itself: the native backend (Oxigraph - see EVAL_SELECT_OXIGRAPH above,
-# and EVAL_CONSTRUCT used directly, unwrapped, by
-# test_eval_construct_original_query_oxigraph below) already passes all
-# three cleanly, with zero query rewriting - proof this is specific to the
-# in-memory backend's own representation choice, not a gap in this
-# project's RDF 1.2 support. (op-2 used to be here too - see the "fixed
-# 2026-08-05" note below, and its own separate Oxigraph-side quirk in
-# _OXIGRAPH_KNOWN_DIVERGENCES above.)
+# Historical note: this table used to document 4 known, understood
+# limitations of the in-memory (rdf-1.1, tt:HASH content-addressed URI
+# encoding + SPARQL 1.2 -> 1.1 text rewrite) backend specifically - op-2,
+# order-1, order-2, construct-5 - confirmed NOT limitations of RDF 1.2/
+# SPARQL 1.2 support itself (the native Oxigraph backend already passed
+# all 4 cleanly with zero query rewriting, proving it). All 4 are now
+# genuinely fixed as of 2026-08-05, in this order:
 #
-# op-2 - fixed 2026-08-05, two real fixes, not a workaround:
+# op-2 - two fixes:
 #   1. starlight/query/evaluate_patches.py::patch_relational_expression_tt_hash_equality
 #      patches `=`/`!=` to decode a tt:HASH URIRef's rdf:subject/predicate/
 #      object encoding triples on the fly and recursively re-apply RDF 1.2
@@ -187,80 +183,57 @@ EVAL_SELECT_OXIGRAPH = _mark_known_divergences(EVAL_SELECT, _OXIGRAPH_KNOWN_DIVE
 #      result is expected to match a real engine's own results instead,
 #      e.g. "123e0" canonicalizing to "123.0").
 #
-# order-1/order-2 - the term-kind-ordering part is genuinely fixed
-# (starlight/query/evaluate_patches.py::patch_order_by_tt_hash_term_kind
-# gives a tt:HASH URIRef its own ORDER BY term-kind bucket, after literal
-# per RDF 1.2, instead of stock rdflib's `_val`, which has no bucket for
-# triple terms at all and sorts one as an ordinary IRI) - but both remain
-# xfail'd, blocked by a separate, deeper, pre-existing bug the fix exposed
-# rather than caused: this fixture's own query shape (`{ SELECT ?v { ?s ?p
-# ?v } ORDER BY ?v OFFSET N LIMIT 1 }`, an unconstrained BGP) can
-# incidentally match the in-memory backend's own internal tt:HASH
-# rdf:subject/predicate/object encoding triples - confirmed to reproduce
-# identically with *stock, unpatched* ORDER BY too (the old, wrong sort
-# order just coincidentally kept the leaked rows outside the OFFSET/LIMIT
-# window most of the time, masking it). A general fix (filtering encoding
-# triples out of every BGP match, the way
-# patch_construct_skips_encoding_solutions already does for CONSTRUCT
-# specifically) was attempted and reverted: it isn't safely generalizable
-# at the BGP level - the SPARQL 1.2 -> 1.1 rewriter's own generated queries
-# *legitimately* need to match these same rdf:subject/predicate/object
-# triples to decode a triple-term pattern containing a variable (confirmed
-# via basic-5's `<<:a :b ?o>> ?q :z .`, which regressed hard - actual
-# results went from correct to empty - when a blanket BGP-level filter was
-# tried), so a filter can't distinguish "accidental wildcard leak" from
-# "the rewriter's own deliberate, required access" using only the local
-# per-triple information available inside evalBGP. Not attempted further,
-# since (as with construct-5 below) this whole rewrite-to-1.1 pipeline is
-# already documented as intended to be superseded.
-#
 # construct-5: `CONSTRUCT WHERE { :a :b ?c {| ?q ?z |} . }`'s annotation-
-# shorthand reifier is meant to behave like any other anonymous-blank-node-
+# shorthand reifier needed to behave like any other anonymous-blank-node-
 # shaped part of a CONSTRUCT template - fresh per solution, independent of
 # whatever (irrelevant) reifier identity was used purely for WHERE-clause
-# pattern *matching* - confirmed via direct inspection: the official
-# expected output has *two* distinct reifiers for the same underlying
-# triple (one from matching, one freshly constructed for the template's
-# own `{| |}` re-assertion), while this backend's rewriter collapses them
-# into one shared node. A real, if narrower, semantics gap in how the
-# SPARQL 1.2 -> 1.1 rewriter threads annotation-derived reifier variables
-# through CONSTRUCT WHERE specifically - not attempted, since this whole
-# rewrite-to-1.1 pipeline is the thing docs/rdflib-upstream-issues.md
-# already documents as intended to be superseded by the SPARQL 1.2 ->
-# algebra -> regenerate pipeline (see that file's own framing), which
-# routes to a native backend rather than this encoding.
-_IN_MEMORY_KNOWN_DIVERGENCES = {
-    "order-1": (
-        "In-memory backend: term-kind ordering itself is fixed "
-        "(patch_order_by_tt_hash_term_kind), but this query's own shape "
-        "(unconstrained ?s ?p ?v inside a nested SELECT subquery) can "
-        "incidentally match the backend's own internal tt:HASH encoding "
-        "triples - a separate, pre-existing bug (reproduces with stock, "
-        "unpatched ORDER BY too) that a general BGP-level fix was tried "
-        "and reverted for (unsafely broke basic-5's legitimate use of the "
-        "same encoding triples - see the comment above this table). The "
-        "native (Oxigraph) backend passes this query correctly with zero "
-        "rewriting."
-    ),
-    "order-2": (
-        "Same as order-1 (a longer ORDER BY case exercising more term "
-        "kinds) - term-kind ordering fixed, blocked by the same separate, "
-        "pre-existing BGP-level encoding-triple-leak bug. The native "
-        "(Oxigraph) backend passes this query correctly with zero "
-        "rewriting."
-    ),
-    "construct-5": (
-        "In-memory backend: the SPARQL 1.2 -> 1.1 rewriter's expansion of "
-        "CONSTRUCT WHERE's annotation shorthand (`{| ?q ?z |}`) reuses the "
-        "same reifier identity for both WHERE-clause pattern matching and "
-        "CONSTRUCT template instantiation, instead of minting a fresh "
-        "blank node for the template's own re-assertion (ordinary CONSTRUCT "
-        "semantics for any otherwise-unbound blank-node-shaped template "
-        "part) - the official expected output has two distinct reifiers for "
-        "the same triple, this backend produces one shared one. The native "
-        "(Oxigraph) backend passes this query correctly with zero rewriting."
-    ),
-}
+# pattern *matching* (the official expected output has *two* distinct
+# reifiers for the same underlying triple: one from matching, one freshly
+# constructed for the template's own `{| |}` re-assertion). Root cause:
+# `sparql12_to_11.py::_try_split_construct_where` only recognized the
+# *explicit* `CONSTRUCT { template } WHERE { where }` two-block form - for
+# the `CONSTRUCT WHERE { pattern }` shorthand specifically, it fell through
+# to a single-pass rewrite of `pattern` as an ordinary (non-template) WHERE
+# clause, so an annotation block inside it only ever got WHERE-clause
+# matching semantics for its reifier, never the template's own fresh-per-
+# solution one. Fixed by teaching `_try_split_construct_where` to recognize
+# this shorthand and return the *same* source text as both
+# `template_inner` and `where_inner` - the caller (`_rewrite_construct_query`)
+# already rewrites those two independently (matching semantics for one,
+# `in_construct_template=True` fresh-BIND semantics for the other), each
+# minting its own fresh internal variable names, so feeding it the same
+# text twice needed no other change.
+#
+# order-1/order-2 - two fixes, the second a revised, more precise version
+# of a first attempt that was tried and reverted:
+#   1. starlight/query/evaluate_patches.py::patch_order_by_tt_hash_term_kind
+#      gives a tt:HASH URIRef its own ORDER BY term-kind bucket, after
+#      literal per RDF 1.2, instead of stock rdflib's `_val`, which has no
+#      bucket for triple terms at all and sorts one as an ordinary IRI.
+#   2. Fixing (1) exposed a separate, deeper, pre-existing bug: this
+#      fixture's own query shape (`{ SELECT ?v { ?s ?p ?v } ORDER BY ?v
+#      OFFSET N LIMIT 1 }`, an unconstrained BGP) could incidentally match
+#      the in-memory backend's own internal tt:HASH rdf:subject/predicate/
+#      object encoding triples - confirmed to reproduce identically with
+#      *stock, unpatched* ORDER BY too (the old, wrong sort order just
+#      coincidentally kept the leaked rows outside the OFFSET/LIMIT window
+#      most of the time, masking it). A first, blanket "filter every BGP
+#      match against an encoding triple" fix regressed a real, previously-
+#      passing test (basic-5's `<<:a :b ?o>> ?q :z .`, whose own rewritten
+#      form *legitimately* needs to match these same triples to decode a
+#      triple-term pattern containing a variable) and was reverted. The
+#      precise fix - starlight/query/evaluate_patches.py::
+#      patch_bgp_skips_encoding_triples - only filters a match where the
+#      *pattern's own* predicate position was unconstrained (a variable,
+#      not yet bound before this triple is matched) - never one where the
+#      pattern itself already specifies the predicate as a literal
+#      rdf:subject/predicate/object IRI, which is exactly the shape every
+#      rewriter-generated decode pattern always uses. That distinction -
+#      "did the query text ask for this predicate specifically" vs "did an
+#      unconstrained wildcard happen to match it" - isn't visible from the
+#      matched triple's values alone (what the first attempt checked), but
+#      is directly available from the pattern's own pre-match term.
+_IN_MEMORY_KNOWN_DIVERGENCES: dict = {}
 
 EVAL_SELECT_IN_MEMORY = _mark_known_divergences(EVAL_SELECT, _IN_MEMORY_KNOWN_DIVERGENCES)
 EVAL_CONSTRUCT_IN_MEMORY = _mark_known_divergences(EVAL_CONSTRUCT, _IN_MEMORY_KNOWN_DIVERGENCES)

@@ -146,6 +146,136 @@ def patch_evalextend_forgotten_bind_vars() -> bool:
     return _evaluate_patch_status
 
 
+# ---------------------------------------------------------------------------
+# Lazy-join evaluation order - a second, distinct manifestation of the same
+# root cause as issue 5 (`_addVars`'s "Extend" case deliberately excluding
+# expr-only variables from `_vars`), this time affecting `evalJoin`/
+# `evalLazyJoin` rather than `evalExtend` itself.
+# ---------------------------------------------------------------------------
+
+_lazy_join_patch_status: bool | None = None
+
+
+def _bind_expr_dependencies(node) -> set:
+    """The set of variables some ``Extend`` (``BIND``) node *anywhere* in
+    `node`'s subtree references in its own expression - a conservative,
+    over-inclusive approximation of what this subtree actually needs bound
+    before it can evaluate correctly, as opposed to what it's statically
+    attributed as *producing* (`node`'s own ``_vars``, which - per
+    ``_addVars``'s "Extend" case - deliberately excludes exactly these
+    variables). Recurses into every ``CompValue``/``list``/``tuple`` found,
+    mirroring ``_traverseAgg``'s own generic traversal shape.
+    """
+    found: set = set()
+
+    def walk(n):
+        if isinstance(n, CompValue):
+            if n.name == "Extend":
+                found.update(_expr_free_vars(dict.get(n, "expr")))
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, (list, tuple)):
+            for item in n:
+                walk(item)
+
+    walk(node)
+    return found
+
+
+def patch_lazy_join_expr_dependency_order() -> bool:
+    """Fix a confirmed bug in plain rdflib's own ``evalLazyJoin``: it always
+    evaluates a ``Join``'s left branch (``join.p1``) first, then pushes its
+    bindings into evaluating the right branch (``join.p2``) - an
+    optimization that assumes ``p1`` never depends on a variable only
+    ``p2`` provides. That assumption can be wrong, and rdflib has no check
+    for it: a ``BIND`` inside ``p1`` whose own expression references a
+    variable that's only ever bound inside ``p2`` evaluates with that
+    variable unbound (``p1`` runs first, before ``p2`` has bound anything),
+    silently yields with ``p1``'s own ``Extend`` variable left unbound too
+    (``evalExtend`` swallows the resulting ``SPARQLError``), and the
+    mistake propagates through the join and any ``FILTER`` referencing that
+    variable, silently emptying the result with no error at all.
+
+    Confirmed via a minimal, standalone plain-rdflib reproduction (no
+    starlight/sparql1_2_to_rdf code involved)::
+
+        SELECT ?t{FILTER(?a0 = 1) { BIND(?t + 0 AS ?a0) { BIND(1 AS ?t) } }}
+
+    should return ``?t = 1`` (the ``FILTER`` sees ``?a0 = 1`` since
+    ``?t = 1``) but returns empty against plain, unpatched rdflib - even
+    with ``patch_evalextend_forgotten_bind_vars`` above already applied,
+    which fixes a related but distinct bug (``evalExtend`` forgetting a
+    variable *within its own* evaluation) - this one is about *join
+    ordering*, a different rdflib function, not covered by that fix.
+    Same root cause underneath both, though: ``_addVars``'s "Extend" case
+    excludes a ``BIND``'s own expression-only variables from ``_vars`` (by
+    design, for computing what a node's result rows actually contain) -
+    which also means the join-ordering logic that reads ``_vars`` to decide
+    "can I skip pushing bindings, is order-independent lazy evaluation
+    safe" has no way to see this specific kind of cross-branch dependency.
+
+    Fix: before evaluating a lazy join's branches in rdflib's own default
+    order, check whether ``p1`` actually depends (via
+    ``_bind_expr_dependencies``, which - unlike ``_vars`` - does see
+    expression-only variables) on anything only ``p2`` provides
+    (``p2``'s own, correctly-computed ``_vars``) and isn't already bound in
+    the incoming context. If so, swap: evaluate ``p2`` first and push its
+    bindings into ``p1``, exactly mirroring rdflib's own existing
+    ``evalLazyJoin`` logic, just with the two sides reversed. The ordinary,
+    overwhelmingly common case (neither side has this dependency) is
+    unaffected - falls through to rdflib's own unmodified, unswapped
+    behavior.
+
+    Idempotent and defensive, matching the established
+    ``operator_patches.py``/``algebra_translator_patches.py`` idiom -
+    returns ``False`` without raising if rdflib's internals don't match
+    what this shim expects.
+    """
+    global _lazy_join_patch_status
+    if _lazy_join_patch_status is not None:
+        return _lazy_join_patch_status
+
+    try:
+        original_eval_join = evaluate.evalJoin
+        if getattr(original_eval_join, "_starlight_lazy_join_patch", False):
+            _lazy_join_patch_status = True
+            return True
+
+        evalPart = evaluate.evalPart
+
+        def _lazy_join(ctx, p_first, p_second):
+            for a in evalPart(ctx, p_first):
+                c = ctx.thaw(a)
+                for b in evalPart(c, p_second):
+                    yield b.merge(a)
+
+        def _patched_eval_join(ctx, join):
+            if not join.lazy:
+                a = evalPart(ctx, join.p1)
+                b = set(evalPart(ctx, join.p2))
+                from rdflib.plugins.sparql.evaluate import _join
+
+                return _join(a, b)
+
+            p1_needs = _bind_expr_dependencies(join.p1)
+            p2_provides = dict.get(join.p2, "_vars") or set()
+            already_bound = set(ctx.bindings.keys()) if ctx.bindings else set()
+            if p1_needs & p2_provides - already_bound:
+                # p1 depends on a variable only p2 provides - rdflib's own
+                # default order (p1 first) would evaluate it unbound. Swap.
+                return _lazy_join(ctx, join.p2, join.p1)
+
+            return _lazy_join(ctx, join.p1, join.p2)
+
+        _patched_eval_join._starlight_lazy_join_patch = True  # type: ignore[attr-defined]
+        evaluate.evalJoin = _patched_eval_join
+        _lazy_join_patch_status = True
+    except Exception:
+        _lazy_join_patch_status = False
+
+    return _lazy_join_patch_status
+
+
 _construct_patch_status: bool | None = None
 
 
@@ -503,3 +633,134 @@ def patch_order_by_tt_hash_term_kind() -> bool:
         _order_by_patch_status = False
 
     return _order_by_patch_status
+
+
+# ---------------------------------------------------------------------------
+# BGP-level encoding-triple filtering - a general fix for the in-memory
+# backend leaking internal tt:HASH-encoding infrastructure triples through
+# an *unconstrained* BGP match specifically, not just CONSTRUCT (see
+# patch_construct_skips_encoding_solutions above, which only covers that one
+# case).
+# ---------------------------------------------------------------------------
+
+_bgp_patch_status: bool | None = None
+
+
+def patch_bgp_skips_encoding_triples() -> bool:
+    """Patch ``evalBGP`` (the core basic-graph-pattern matcher every SPARQL
+    query goes through) so it never yields a solution derived from an
+    *unconstrained* match against the in-memory backend's own internal
+    rdf:subject/predicate/object encoding triples for a tt:HASH URI - the
+    same class of leak ``patch_construct_skips_encoding_solutions`` already
+    fixes, but that patch only filters at the very end, in
+    ``evalConstructQuery`` - any *other* query shape that matches an
+    unconstrained ``?s ?p ?o`` (most naturally a nested ``SELECT``
+    subquery, but not exclusively) sees these fragments too, with no
+    equivalent filter.
+
+    A first version of this patch (filtering *every* BGP match against an
+    encoding triple, regardless of whether the pattern's own predicate
+    position was already constrained) was tried and reverted: it isn't
+    safely generalizable that way - the SPARQL 1.2 -> 1.1 rewriter's own
+    generated queries *legitimately* need to match these same triples to
+    decode a triple-term pattern containing a variable (e.g.
+    ``sparql12_to_11.py``'s own expansion of ``<<:a :b ?o>> ?q :z .`` into
+    ``?tt rdf:subject :a . ?tt rdf:predicate :b . ?tt rdf:object ?o . ...``),
+    and a filter keyed only on the *matched values* can't tell that apart
+    from an accidental wildcard leak - confirmed via a real regression
+    (``basic-5``) when first tried.
+
+    The fix: only filter a match where the *pattern's own* predicate
+    position was unconstrained (a variable, not yet bound - ``ctx[p] is
+    None`` before this triple is matched) - never one where the pattern
+    itself already specifies the predicate as a literal
+    rdf:subject/predicate/object IRI, which is exactly the shape every
+    rewriter-generated decode pattern always uses (a ground predicate,
+    never a variable there). This is the precise distinguishing signal the
+    first attempt was missing: "did the *query text* ask for this
+    predicate specifically" vs "did an unconstrained wildcard happen to
+    match it" - not visible from the matched triple's values alone, but
+    directly available from the pattern's own (pre-match) term for the
+    predicate position.
+
+    Confirmed via the W3C SPARQL 1.2 ``eval-triple-terms/order-1``/
+    ``order-2`` fixtures' own query shape (``{ SELECT ?v { ?s ?p ?v }
+    ORDER BY ?v OFFSET N LIMIT 1 }``, repeated across 20 ``UNION``
+    branches - predicate ``?p`` genuinely unconstrained there) - and,
+    separately, that this version does *not* regress ``basic-5`` (predicate
+    ``rdf:subject``/etc. always ground in the rewriter's own generated
+    pattern there) or any other currently-passing test.
+
+    Idempotent and defensive, matching the established
+    ``operator_patches.py``/``algebra_translator_patches.py`` idiom -
+    returns ``False`` without raising if rdflib's internals don't match
+    what this shim expects.
+    """
+    global _bgp_patch_status
+    if _bgp_patch_status is not None:
+        return _bgp_patch_status
+
+    try:
+        from rdflib import URIRef
+        from rdflib.plugins.sparql.sparql import AlreadyBound
+
+        from starlight.model.encoding import ENCODING_PREDS, TT_NS
+
+        original_eval_bgp = evaluate.evalBGP
+        if getattr(original_eval_bgp, "_starlight_bgp_patch", False):
+            _bgp_patch_status = True
+            return True
+
+        def _is_unconstrained_encoding_leak(pattern_p_was_bound: bool, sp, ss) -> bool:
+            if pattern_p_was_bound:
+                # The pattern itself already specified this predicate (a
+                # ground rdf:subject/predicate/object, or any other already-
+                # bound term) - a deliberate, constrained match, never a
+                # wildcard leak, regardless of what it matches.
+                return False
+            return sp in ENCODING_PREDS and isinstance(ss, URIRef) and str(ss).startswith(TT_NS)
+
+        def _patched_eval_bgp(ctx, bgp):
+            if not bgp:
+                yield ctx.solution()
+                return
+
+            s, p, o = bgp[0]
+            _s = ctx[s]
+            _p = ctx[p]
+            _o = ctx[o]
+            p_was_bound = _p is not None
+
+            for ss, sp, so in ctx.graph.triples((_s, _p, _o)):
+                if _is_unconstrained_encoding_leak(p_was_bound, sp, ss):
+                    continue
+
+                if None in (_s, _p, _o):
+                    c = ctx.push()
+                else:
+                    c = ctx
+
+                if _s is None:
+                    c[s] = ss
+
+                try:
+                    if _p is None:
+                        c[p] = sp
+                except AlreadyBound:
+                    continue
+
+                try:
+                    if _o is None:
+                        c[o] = so
+                except AlreadyBound:
+                    continue
+
+                yield from _patched_eval_bgp(c, bgp[1:])
+
+        _patched_eval_bgp._starlight_bgp_patch = True  # type: ignore[attr-defined]
+        evaluate.evalBGP = _patched_eval_bgp
+        _bgp_patch_status = True
+    except Exception:
+        _bgp_patch_status = False
+
+    return _bgp_patch_status

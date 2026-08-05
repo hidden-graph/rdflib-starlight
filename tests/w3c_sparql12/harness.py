@@ -205,6 +205,17 @@ def _canon_term(v) -> str:
     stays invisible to rdflib's own machinery), so it has no `.n3()` at all
     and would raise AttributeError falling through to the generic case.
     """
+    if v is None:
+        # An UNDEF/unbound value in a row that survived bindings_match's/
+        # canon_bindings' own {k: v for ... if v is not None} filtering
+        # elsewhere (e.g. a VALUES row with an explicit UNDEF cell, rather
+        # than a variable simply never appearing in a solution at all) -
+        # confirmed a real, reproducible AttributeError ('NoneType' object
+        # has no attribute 'n3') via the W3C triple-on-undefs fixture
+        # before this branch existed. A fixed, distinct sentinel string:
+        # never collides with a real term's own canonical form (no valid
+        # term canonicalizes to a bare word with no delimiters/prefix).
+        return "UNDEF"
     if isinstance(v, TripleTerm):
         return f"<<( {_canon_term(v.subject)} {_canon_term(v.predicate)} {_canon_term(v.object)} )>>"
     if isinstance(v, DirLangString):
@@ -244,6 +255,8 @@ def _canon_term_bmap(v, bmap: dict) -> str:
     including one nested inside a TripleTerm's own subject/predicate/
     object) is rewritten through bmap first - see bindings_match for why
     this indirection exists."""
+    if v is None:
+        return "UNDEF"
     if isinstance(v, TripleTerm):
         return (
             f"<<( {_canon_term_bmap(v.subject, bmap)} "

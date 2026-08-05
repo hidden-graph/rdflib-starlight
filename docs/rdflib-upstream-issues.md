@@ -1,12 +1,12 @@
 # rdflib Upstream Issues
 
-*Last reviewed: 2026-08-04*
+*Last reviewed: 2026-08-05*
 
 Bugs found in plain `rdflib` (https://github.com/RDFLib/rdflib) while building this repo's own SPARQL 1.2 support on top of it. Every reproduction below uses only plain `rdflib`, no `starlight`/`rdflib-starlight` code at all, so each is reproducible standalone against a stock `rdflib` install. All confirmed against `rdflib` 7.6.0 (the version this project currently pins).
 
 ## Status Summary
 
-All seven issues are planned to be reported upstream - each a clean, unambiguous, spec-mapping or self-consistency bug with a minimal plain-`rdflib` reproduction. None has been filed yet (no existing GitHub issue/PR search performed yet - do that before actually opening any). All seven now have a real fix applied *in this repo* (not just an avoidance workaround) - see the table below for which module each lives in. This repo's own SPARQL query pipeline is intended to route every query through this project's SPARQL 1.2 → algebra → `translateAlgebra`-based regeneration path, not just a downstream test suite, so all seven are patched here directly rather than left as point-avoidances in one consumer's own code.
+All eight issues are planned to be reported upstream - each a clean, unambiguous, spec-mapping or self-consistency bug with a minimal plain-`rdflib` reproduction. None has been filed yet (no existing GitHub issue/PR search performed yet - do that before actually opening any). All eight now have a real fix applied *in this repo* (not just an avoidance workaround) - see the table below for which module each lives in. This repo's own SPARQL query pipeline is intended to route every query through this project's SPARQL 1.2 → algebra → `translateAlgebra`-based regeneration path, not just a downstream test suite, so all eight are patched here directly rather than left as point-avoidances in one consumer's own code.
 
 | # | Issue | Reporting upstream? | Fix in this repo |
 | --- | --- | --- | --- |
@@ -17,6 +17,7 @@ All seven issues are planned to be reported upstream - each a clean, unambiguous
 | 5 | Evaluator bug: a `BIND` referencing an earlier hoisted `BIND`'s variable, inside a `UNION` branch, followed by a join, gives duplicated/wrong results | **Yes** (not yet filed) | `starlight/query/evaluate_patches.py::patch_evalextend_forgotten_bind_vars` (real fix, not just the avoidance `_inline_ground_triple_terms` used before this) |
 | 6 | `RelationalExpression`'s list-handling guard is inverted (`isinstance(list, type(node.other))`), so multi-value `IN`/`NOT IN` always crashes `translateAlgebra` | **Yes** (not yet filed) | `starlight/query/algebra_translator_patches.py::patch_algebra_translator_bugs` (also independently fixed in the downstream `sparql1.2_to_rdf` project's own serializer, which doesn't fall through to this repo's patched method for this branch) |
 | 7 | `translateAlgebra`'s `"Project"` branch renders `SELECT * WHERE { <fully-ground pattern> }` (zero variables anywhere) as invalid `SELECT {...}`, missing the `*` | **Yes** (not yet filed) | `starlight/query/algebra_translator_patches.py::patch_algebra_translator_bugs` |
+| 8 | Evaluator bug: `evalLazyJoin` always evaluates its left branch first, silently emptying results when the left branch's own `BIND` expression depends on a variable only the right branch provides | **Yes** (not yet filed) | `starlight/query/evaluate_patches.py::patch_lazy_join_expr_dependency_order` |
 
 Issues 1-2 were found while triaging the W3C SHACL 1.2 test suite's remaining failures in the downstream `starShacl`/`pyshacl-starlight` project (that suite's own `node-expr/shnex-sparql/{multiply,divide,ceil,floor,round}.ttl` and `sparql/rules/rectangle-*.ttl` fixtures) - see that repo's `docs/starlight-upstream-change-log.md` 2026-08-01 entries for the full downstream-impact writeup.
 
@@ -51,6 +52,7 @@ Each entry uses this structure - the `##` heading plus `###` subheadings - so it
 | 5 | A `BIND` referencing an earlier hoisted `BIND`'s variable, inside a `UNION` branch, followed by a join, gives duplicated/wrong results | 2026-08-03 |
 | 6 | `RelationalExpression`'s list-handling guard is inverted, so multi-value `IN`/`NOT IN` always crashes `translateAlgebra` | 2026-08-03 |
 | 7 | `translateAlgebra`'s `"Project"` branch drops the `*` for `SELECT * WHERE { <fully-ground pattern> }` | 2026-08-04 |
+| 8 | `evalLazyJoin` always evaluates its left branch first, silently emptying results when it depends on the right branch's own `BIND` | 2026-08-05 |
 
 ## Issue 1 - `MultiplicativeExpression` doesn't apply SPARQL 1.1's numeric type-promotion rules for `*` (found 2026-08-01)
 
@@ -615,3 +617,71 @@ Patched directly in this repo (`starlight/query/algebra_translator_patches.py::p
 ### Status
 
 Found 2026-08-04 during the downstream `sparql1.2_to_rdf` project's adversarial round-trip test battery, alongside this file's Issue 4 addendum (a second finding from the same run). Root-caused and fixed the same day. Reporting upstream planned, not yet filed. Verified: the minimal reproduction above now regenerates as valid, re-parseable `SELECT *` text that executes to identical results as the original against a real `rdflib.Graph`; zero regressions across this repo's own suite (881 passed, 3 xfailed) or the downstream `sparql1.2_to_rdf` project's suite (same pre-existing, unrelated failures with or without this fix); the downstream project's adversarial battery gained 2 passes (the zero-variable-`SELECT *` case, single- and double-round-trip) with no new failures.
+
+## Issue 8 - `evalLazyJoin` always evaluates its left branch first, silently emptying results when it depends on the right branch's own `BIND` (found 2026-08-05)
+
+**rdflib version:** 7.6.0 (`rdflib/plugins/sparql/evaluate.py::evalJoin`/`evalLazyJoin`)
+
+### Description
+
+`evalLazyJoin` is a join-evaluation optimization: instead of evaluating both branches of a `Join` independently and hash-joining the results, it evaluates the left branch (`join.p1`) first, then pushes each of its solutions into evaluating the right branch (`join.p2`) - "essentially doing the join implicitly," per its own docstring. This assumes `p1` never depends on a variable only `p2` provides. That assumption is not checked anywhere, and can be wrong: a `BIND` inside `p1` whose own expression references a variable only bound inside `p2` evaluates with that variable unbound (since `p1` runs before `p2` has bound anything). `evalExtend`'s own exception handling swallows the resulting `SPARQLError` and yields a solution with `p1`'s `BIND` target left unbound instead of erroring - so the mistake propagates silently through the join (and any `FILTER` referencing that variable) all the way to an empty or wrong result set, with no error or warning anywhere.
+
+The same underlying gap that causes Issue 5 (`_addVars`'s `"Extend"` case deliberately excludes a `BIND`'s expression-only variables from `_vars`, by design, for computing what a node's result rows actually contain) is what hides this dependency from the join-evaluation code too - but it's a different rdflib function (`evalJoin`/`evalLazyJoin`, not `evalExtend`), and Issue 5's own fix (`patch_evalextend_forgotten_bind_vars`) does not cover it.
+
+### Reproduction
+
+```python
+from rdflib import Graph
+
+g = Graph()
+q = "SELECT ?t{FILTER(?a0 = 1) { BIND(?t + 0 AS ?a0) { BIND(1 AS ?t) } }}"
+print(list(g.query(q)))
+```
+
+No triple terms, no RDF 1.2 syntax, no `starlight`/downstream-project code involved at all - a plain SPARQL 1.1 query with an ordinary `BIND` inside a nested group.
+
+### Expected behavior
+
+`[(rdflib.term.Literal('1', datatype=XSD.integer),)]` - `?t` is bound to `1` by the inner `BIND`, so `?a0 = ?t + 0 = 1`, and the outer `FILTER(?a0 = 1)` should hold.
+
+### Actual behavior
+
+```
+[]
+```
+
+Empty - no error, no warning, just silently wrong.
+
+### Suspected root cause
+
+```python
+def evalLazyJoin(ctx, join):
+    """
+    A lazy join will push the variables bound
+    in the first part to the second part, ...
+    """
+    for a in evalPart(ctx, join.p1):
+        c = ctx.thaw(a)
+        for b in evalPart(c, join.p2):
+            yield b.merge(a)
+```
+
+For the reproduction's algebra, `join.p1` is `Extend(BGP[], ?t + 0, ?a0)` and `join.p2` is `Extend(BGP[], 1, ?t)` - `p1` is evaluated first, with `?t` unbound, so `?t + 0` raises `SPARQLError` (unbound variable), which `evalExtend` swallows, yielding a solution with `?a0` still unbound. `p2` then runs (irrelevantly, since nothing from `a` affects it) and binds `?t = 1`. The merged solution has `?t = 1` but `?a0` unbound; the outer `FILTER(?a0 = 1)` then references an unbound variable, which SPARQL's own semantics treat as "exclude this solution" - hence empty results.
+
+`Join.lazy` itself comes from `analyse()`, which (confirmed by reading its source) doesn't check variable dependencies at all - it's `True` whenever neither child subtree contains a `Slice`/`Distinct`, so it offers no protection against this case either.
+
+### Impact
+
+Any query where a `BIND`'s own expression, inside one branch of an (implicit or explicit) join, depends on a variable only bound by a *different, later-evaluated* branch, silently produces wrong (often empty) results with no error at all - the same dangerous "wrong but silent" failure mode as Issue 5, just triggered by different query shapes (nested nested groups rather than `UNION` branches specifically). Confirmed to affect real, non-contrived SPARQL 1.2 content: found via the W3C SPARQL 1.2 `eval-triple-terms/expr-2` fixture (`FILTER(isTriple(?t) && SUBJECT(?t) = :s && ...) { VALUES ?t {...} }`), whose downstream-project algebra-regenerated form rearranges the query into exactly this shape even though the original, hand-written query text does not trigger it - i.e. this bug is latent in any query whose *algebra* has this join/dependency shape, regardless of what the original surface syntax looked like.
+
+### Suggested fix
+
+Before choosing evaluation order for a lazy join, check whether `p1` actually depends (via each branch's own free-variable set, correctly computed - not `_vars`, which excludes exactly this) on a variable only `p2` provides and isn't already bound in the incoming context; if so, evaluate `p2` first and push its bindings into `p1` instead, mirroring the existing logic with the two sides reversed.
+
+### Possible workaround / fix applied
+
+Patched directly in this repo (`starlight/query/evaluate_patches.py::patch_lazy_join_expr_dependency_order`): a new `_bind_expr_dependencies()` helper walks a subtree collecting every `Extend` node's own expression's free variables (via the same `_expr_free_vars` helper Issue 5's fix already introduced) - unlike `_vars`, this does see expression-only variables. The patched `evalJoin` checks whether `join.p1`'s dependencies intersect `join.p2`'s (correctly-computed) `_vars` minus what's already bound in the context; if so, it evaluates the two branches in the opposite order (`p2` first, pushing into `p1`) instead of rdflib's own hardcoded left-first default. The ordinary, overwhelmingly common case (no such cross-branch dependency) is unaffected.
+
+### Status
+
+Found 2026-08-05 while isolating the downstream `sparql1.2_to_rdf` project's `expr-2` W3C fixture failure into a standalone test case inside this repo (`tests/w3c_sparql12/test_algebra_regenerated_queries.py`), after first ruling out the algebra round-trip itself as the cause (original and regenerated query text were already confirmed to agree against two independent real engines, Oxigraph and Fuseki - see that project's own `tests/test_w3c_sparql12_oxigraph_roundtrip.py`). Root-caused down to `evalLazyJoin`'s hardcoded evaluation order the same day via a minimal, plain-rdflib reproduction. Reporting upstream planned, not yet filed. Verified: the minimal reproduction above now returns the correct single row; zero regressions across this repo's own suite (894 passed) or the downstream `sparql1.2_to_rdf` project's suite (failure count dropped, no new failures).
