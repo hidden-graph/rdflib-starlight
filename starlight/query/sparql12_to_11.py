@@ -146,7 +146,25 @@ def _register_tt_accessor_functions() -> None:
             remembered = lookup_tt_hash(uri)
             if remembered is not None:
                 return remembered[index]
-            value = ctx.graph.value(uri, pred)
+            # ctx.graph, not always a plain QueryContext: evalFilter (unlike
+            # evalExtend) always calls .eval() with a FrozenBindings
+            # (ctx.forget(...)), which has no .graph of its own - only its
+            # own .ctx attribute (FrozenBindings.__init__ stashes the real
+            # QueryContext there) does. Confirmed as a real, reproducible
+            # bug via a W3C test (expr-2): SUBJECT()/PREDICATE()/OBJECT()
+            # called directly inside FILTER (as opposed to BIND, which
+            # always passes a real QueryContext through unchanged) raised
+            # AttributeError - masked by rdflib's own Result.bindings
+            # property swallowing it and misreporting "no attribute
+            # 'bindings'" instead, since an AttributeError escaping a
+            # property getter makes Python fall back to __getattr__.
+            # Same fallback pattern already established by this module's
+            # sibling patch, evaluate_patches.py's
+            # _patched_relational_expression, for the identical reason.
+            graph = getattr(ctx, "graph", None) or getattr(getattr(ctx, "ctx", None), "graph", None)
+            if graph is None:
+                raise SPARQLError(f"{label}(): no graph available in this evaluation context")
+            value = graph.value(uri, pred)
             if value is None:
                 raise SPARQLError(f"{label}(): {uri!r} is not a known triple term")
             return value
