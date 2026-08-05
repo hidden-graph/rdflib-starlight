@@ -61,10 +61,32 @@ from starlight.query.evaluate_patches import (
     patch_construct_skips_encoding_solutions as _patch_construct_skips_encoding_solutions,
 )
 
+# Fix for a starlight-side (not rdflib) gap: the in-memory backend's
+# tt:HASH encoding is opaque to stock rdflib's `=`/`!=`, which can only ever
+# agree with `sameTerm` for two different encoded URIRefs - never true for
+# two triple terms differing only in a component's lexical form, which
+# SPARQL's own value-equality rules require. See
+# starlight/query/evaluate_patches.py::patch_relational_expression_tt_hash_equality.
+from starlight.query.evaluate_patches import (
+    patch_relational_expression_tt_hash_equality as _patch_relational_expression_tt_hash_equality,
+)
+
+# Fix for a starlight-side (not rdflib) gap: the in-memory backend's
+# tt:HASH encoding is opaque to stock rdflib's ORDER BY comparator, which
+# has no term-kind bucket for triple terms at all (rdflib predates RDF 1.2)
+# and so sorts one as an ordinary IRI instead of in its own, RDF-1.2-
+# mandated bucket after literals. See
+# starlight/query/evaluate_patches.py::patch_order_by_tt_hash_term_kind.
+from starlight.query.evaluate_patches import (
+    patch_order_by_tt_hash_term_kind as _patch_order_by_tt_hash_term_kind,
+)
+
 _apply_all_operator_patches()
 _patch_algebra_translator_bugs()
 _patch_evalextend_forgotten_bind_vars()
 _patch_construct_skips_encoding_solutions()
+_patch_relational_expression_tt_hash_equality()
+_patch_order_by_tt_hash_term_kind()
 
 __all__ = [
     # rdflib primitives

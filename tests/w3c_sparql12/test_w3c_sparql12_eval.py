@@ -134,15 +134,15 @@ EVAL_CONSTRUCT = [
 # which still skolemizes and still needs to (a blank node reused across
 # separate add() calls, or across StarlightDataset named-graph contexts,
 # still only has request-scoped identity without it).
-_OXIGRAPH_KNOWN_DIVERGENCES = {
-    "op-2": (
-        "Oxigraph does not preserve the canonical xsd:decimal lexical form on "
-        "round-trip (e.g. \"123.0\" comes back as \"123\") - same underlying "
-        "gap as test_cross_backend_parity.py's numeric-lexical-form xfail, "
-        "here surfacing through a triple-term-valued FILTER(sameTerm/=) "
-        "comparison instead of CEIL/FLOOR/division."
-    ),
-}
+#
+# op-2 used to be here too - Oxigraph didn't preserve the canonical
+# xsd:decimal lexical form on round-trip ("123.0" came back as "123"), same
+# underlying gap as test_cross_backend_parity.py's numeric-lexical-form
+# case. Fixed 2026-08-05 the same way as that one: client-side
+# canonicalization in starlight/backends/native.py::_parse_json_term.
+# Empty for now - kept (rather than removed) since this is a real, likely
+# to recur, category of cross-engine divergence.
+_OXIGRAPH_KNOWN_DIVERGENCES: dict = {}
 
 
 def _mark_known_divergences(entries, known: dict):
@@ -166,81 +166,88 @@ EVAL_SELECT_OXIGRAPH = _mark_known_divergences(EVAL_SELECT, _OXIGRAPH_KNOWN_DIVE
 # specifically - confirmed NOT limitations of RDF 1.2/SPARQL 1.2 support
 # itself: the native backend (Oxigraph - see EVAL_SELECT_OXIGRAPH above,
 # and EVAL_CONSTRUCT used directly, unwrapped, by
-# test_eval_construct_original_query_oxigraph below) already passes op-2
-# (modulo its own, separately-documented xsd:decimal lexical-form quirk
-# above), order-1, order-2, and construct-5 cleanly, with zero query
-# rewriting - proof this is specific to the in-memory backend's own
-# representation choice, not a gap in this project's RDF 1.2 support.
+# test_eval_construct_original_query_oxigraph below) already passes all
+# three cleanly, with zero query rewriting - proof this is specific to the
+# in-memory backend's own representation choice, not a gap in this
+# project's RDF 1.2 support. (op-2 used to be here too - see the "fixed
+# 2026-08-05" note below, and its own separate Oxigraph-side quirk in
+# _OXIGRAPH_KNOWN_DIVERGENCES above.)
 #
-# Root cause for op-2/order-1/order-2, confirmed by direct inspection (not
-# assumed): a triple term is stored in-memory as an opaque, content-
-# addressed tt:HASH URIRef (sha256 of the *lexical* n3 form of each
-# component - see starlight/model/encoding.py::tt_hash), and queries are
-# text-rewritten from SPARQL 1.2 to plain SPARQL 1.1 before being handed to
-# stock rdflib. Once both triple terms are opaque hash URIs, stock rdflib
-# has no way to apply RDF 1.2's own term semantics to them:
-#   - op-2: TRIPLE(:a,:b,123) and TRIPLE(:a,:b,123.0) are meant to be `=`
-#     (value-equal, since 123 = 123.0 numerically) despite not being
-#     sameTerm (different lexical form/datatype) - but two different
-#     lexical forms hash to two different, unrelated URIs, and stock `=`
-#     on two different URIs is simply false. Fixing this would mean
-#     overriding rdflib's `=`/sameTerm operators to recognize tt:HASH URIs
-#     specifically, decode them, and recursively re-apply RDF 1.2 value
-#     equality component-by-component.
-#   - order-1/order-2: RDF 1.2 requires triple terms to sort in their own
-#     term-kind bucket for ORDER BY (blank node < IRI < literal < triple
-#     term), but a tt:HASH URI is indistinguishable from an ordinary IRI to
-#     rdflib's stock ORDER BY comparator, so it sorts intermixed with real
-#     IRIs instead of after literals. Fixing this would mean overriding
-#     rdflib's ORDER BY sort-key function the same way.
-# Both would require patching rdflib's comparison/sort internals used
-# throughout the evaluator (not just these two tests), a nontrivial,
-# regression-prone undertaking - and this whole rewrite-to-1.1 pipeline is
-# the thing docs/rdflib-upstream-issues.md already documents as intended to
-# be superseded by the SPARQL 1.2 -> algebra -> regenerate pipeline (see
-# that file's own framing), which routes to a native backend rather than
-# this encoding, so investing in a fix here specifically isn't worthwhile.
+# op-2 - fixed 2026-08-05, two real fixes, not a workaround:
+#   1. starlight/query/evaluate_patches.py::patch_relational_expression_tt_hash_equality
+#      patches `=`/`!=` to decode a tt:HASH URIRef's rdf:subject/predicate/
+#      object encoding triples on the fly and recursively re-apply RDF 1.2
+#      value-equality, instead of stock rdflib's plain URIRef string
+#      equality (which can only ever agree with sameTerm).
+#   2. starlight/model/encoding.py::canonicalize_query_result_value
+#      canonicalizes a numeric-XSD-typed literal's lexical form specifically
+#      for SPARQL SELECT *results* (not for parsing/storage, which
+#      deliberately preserves exact lexical form as written - see
+#      parsers/syntax.py::coerce_object's own docstring/tests - a query
+#      result is expected to match a real engine's own results instead,
+#      e.g. "123e0" canonicalizing to "123.0").
 #
-# construct-5 is a separate, narrower issue: `CONSTRUCT WHERE { :a :b ?c
-# {| ?q ?z |} . }`'s annotation-shorthand reifier is meant to behave like
-# any other anonymous-blank-node-shaped part of a CONSTRUCT template -
-# fresh per solution, independent of whatever (irrelevant) reifier identity
-# was used purely for WHERE-clause pattern *matching* - confirmed via direct
-# inspection: the official expected output has *two* distinct reifiers for
-# the same underlying triple (one from matching, one freshly constructed for
-# the template's own `{| |}` re-assertion), while this backend's rewriter
-# collapses them into one shared node. A real, if narrower, semantics gap in
-# how the SPARQL 1.2 -> 1.1 rewriter threads annotation-derived reifier
-# variables through CONSTRUCT WHERE specifically - not attempted here for
-# the same reason as above (this rewrite pipeline's own planned
-# obsolescence), but unlike op-2/order-1/order-2 it isn't an inherent
-# limitation of the tt:HASH encoding itself, just of this one rewrite rule.
+# order-1/order-2 - the term-kind-ordering part is genuinely fixed
+# (starlight/query/evaluate_patches.py::patch_order_by_tt_hash_term_kind
+# gives a tt:HASH URIRef its own ORDER BY term-kind bucket, after literal
+# per RDF 1.2, instead of stock rdflib's `_val`, which has no bucket for
+# triple terms at all and sorts one as an ordinary IRI) - but both remain
+# xfail'd, blocked by a separate, deeper, pre-existing bug the fix exposed
+# rather than caused: this fixture's own query shape (`{ SELECT ?v { ?s ?p
+# ?v } ORDER BY ?v OFFSET N LIMIT 1 }`, an unconstrained BGP) can
+# incidentally match the in-memory backend's own internal tt:HASH
+# rdf:subject/predicate/object encoding triples - confirmed to reproduce
+# identically with *stock, unpatched* ORDER BY too (the old, wrong sort
+# order just coincidentally kept the leaked rows outside the OFFSET/LIMIT
+# window most of the time, masking it). A general fix (filtering encoding
+# triples out of every BGP match, the way
+# patch_construct_skips_encoding_solutions already does for CONSTRUCT
+# specifically) was attempted and reverted: it isn't safely generalizable
+# at the BGP level - the SPARQL 1.2 -> 1.1 rewriter's own generated queries
+# *legitimately* need to match these same rdf:subject/predicate/object
+# triples to decode a triple-term pattern containing a variable (confirmed
+# via basic-5's `<<:a :b ?o>> ?q :z .`, which regressed hard - actual
+# results went from correct to empty - when a blanket BGP-level filter was
+# tried), so a filter can't distinguish "accidental wildcard leak" from
+# "the rewriter's own deliberate, required access" using only the local
+# per-triple information available inside evalBGP. Not attempted further,
+# since (as with construct-5 below) this whole rewrite-to-1.1 pipeline is
+# already documented as intended to be superseded.
+#
+# construct-5: `CONSTRUCT WHERE { :a :b ?c {| ?q ?z |} . }`'s annotation-
+# shorthand reifier is meant to behave like any other anonymous-blank-node-
+# shaped part of a CONSTRUCT template - fresh per solution, independent of
+# whatever (irrelevant) reifier identity was used purely for WHERE-clause
+# pattern *matching* - confirmed via direct inspection: the official
+# expected output has *two* distinct reifiers for the same underlying
+# triple (one from matching, one freshly constructed for the template's
+# own `{| |}` re-assertion), while this backend's rewriter collapses them
+# into one shared node. A real, if narrower, semantics gap in how the
+# SPARQL 1.2 -> 1.1 rewriter threads annotation-derived reifier variables
+# through CONSTRUCT WHERE specifically - not attempted, since this whole
+# rewrite-to-1.1 pipeline is the thing docs/rdflib-upstream-issues.md
+# already documents as intended to be superseded by the SPARQL 1.2 ->
+# algebra -> regenerate pipeline (see that file's own framing), which
+# routes to a native backend rather than this encoding.
 _IN_MEMORY_KNOWN_DIVERGENCES = {
-    "op-2": (
-        "In-memory backend: triple terms are stored as opaque tt:HASH URIs "
-        "(hashed from lexical form), so stock rdflib's `=`/sameTerm operators "
-        "can't apply RDF 1.2 value-equality semantics across two triple terms "
-        "differing only in a component's lexical form (e.g. 123 vs 123.0) - "
-        "would need a custom `=`/sameTerm override that decodes and recurses. "
-        "The native (Oxigraph) backend passes this query correctly (module a "
-        "separate, unrelated decimal-lexical-form quirk of its own, see "
-        "_OXIGRAPH_KNOWN_DIVERGENCES above), proving this is specific to the "
-        "in-memory encoding, not a gap in RDF 1.2 support."
-    ),
     "order-1": (
-        "In-memory backend: a triple term's opaque tt:HASH URI is "
-        "indistinguishable from an ordinary IRI to stock rdflib's ORDER BY "
-        "comparator, so it sorts intermixed with real IRIs instead of in its "
-        "own required term-kind bucket (RDF 1.2: blank node < IRI < literal "
-        "< triple term) - would need a custom ORDER BY sort-key override. "
-        "The native (Oxigraph) backend passes this query correctly with zero "
-        "rewriting, proving this is specific to the in-memory encoding."
+        "In-memory backend: term-kind ordering itself is fixed "
+        "(patch_order_by_tt_hash_term_kind), but this query's own shape "
+        "(unconstrained ?s ?p ?v inside a nested SELECT subquery) can "
+        "incidentally match the backend's own internal tt:HASH encoding "
+        "triples - a separate, pre-existing bug (reproduces with stock, "
+        "unpatched ORDER BY too) that a general BGP-level fix was tried "
+        "and reverted for (unsafely broke basic-5's legitimate use of the "
+        "same encoding triples - see the comment above this table). The "
+        "native (Oxigraph) backend passes this query correctly with zero "
+        "rewriting."
     ),
     "order-2": (
-        "Same root cause as order-1 (opaque tt:HASH URIs sort as ordinary "
-        "IRIs instead of their own RDF 1.2 term-kind bucket) - a longer "
-        "ORDER BY case exercising more term kinds. The native (Oxigraph) "
-        "backend passes this query correctly with zero rewriting."
+        "Same as order-1 (a longer ORDER BY case exercising more term "
+        "kinds) - term-kind ordering fixed, blocked by the same separate, "
+        "pre-existing BGP-level encoding-triple-leak bug. The native "
+        "(Oxigraph) backend passes this query correctly with zero "
+        "rewriting."
     ),
     "construct-5": (
         "In-memory backend: the SPARQL 1.2 -> 1.1 rewriter's expansion of "

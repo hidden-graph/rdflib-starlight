@@ -291,9 +291,9 @@ def test_oxigraph_matches_internal(name, fn):
 # CEIL(3.2) -> "4" instead of "4.0"; that module now patches rdflib's own
 # Python SPARQL evaluator to fix it). Deliberately NOT folded into the
 # shared SCENARIOS table above: parity does *not* hold uniformly across both
-# native backends for this family, so adding it there would either mask a
-# real divergence or force a misleading blanket xfail on a backend that's
-# actually fine.
+# native backends for this family without the fix below, so adding it there
+# would either mask a real divergence or force a misleading blanket xfail on
+# a backend that's actually fine.
 #
 # Ground truth checked against the actual downstream consumer's W3C SHACL
 # 1.2 test suite fixtures (they expect e.g. `84 / 2` -> "42.0"^^xsd:decimal
@@ -302,16 +302,16 @@ def test_oxigraph_matches_internal(name, fn):
 # engines:
 #   - Internal (patched rdflib):     "42.0" / "4.0" - matches the fixtures
 #   - Fuseki (Apache Jena ARQ 5.5+): "42.0" / "4.0" - matches fixtures AND internal
-#   - Oxigraph (native, 0.5.x):      "42"   / "4"   - matches neither
+#   - Oxigraph (native, 0.5.x):      "42"   / "4"   - matched neither, on its own
 # Two independent, mature engines (patched rdflib, Jena/ARQ) agree with each
-# other and with the actual downstream test suite; only Oxigraph diverges.
-# This is a real, currently-unreconciled gap: a native-backend
-# StarlightGraph query against Oxigraph gives a different (though
-# value-equal) lexical form than the in-memory backend or Fuseki for the
-# same query - not yet patched on the Oxigraph side. Tracked here as an
-# `xfail(strict=True)` rather than silently passing or hard-failing, so it
-# breaks loudly (XPASS) if Oxigraph's own behavior ever changes, and stays
-# visible to anyone reading the test suite in the meantime.
+# other and with the actual downstream test suite; only Oxigraph's own
+# SPARQL engine computes a non-canonical lexical form. Fixed 2026-08-05, not
+# on the Oxigraph side (out of this project's control) but client-side:
+# starlight/backends/native.py::_parse_json_term now re-canonicalizes any
+# xsd:decimal literal coming back from a native backend's query results
+# (reusing operator_patches.py's own _canonicalize_decimal_lexical_form
+# helper - a no-op for any lexical form that already has a "."), so this now
+# passes for real rather than needing an xfail.
 
 def _scenario_ceil_whole_number_decimal(g):
     r = g.query('SELECT (CEIL(3.2) AS ?r) WHERE {}')
@@ -346,14 +346,6 @@ def test_fuseki_matches_internal_for_numeric_lexical_form(name, fn):
 
 
 @oxigraph
-@pytest.mark.xfail(
-    strict=True,
-    reason="Known, unreconciled gap (see comment above): Oxigraph's native SPARQL engine "
-    "returns non-canonical decimal lexical forms ('4' not '4.0') for CEIL/FLOOR/ROUND/division "
-    "whole-number results, unlike the in-memory backend (patched to match the downstream "
-    "consumer's W3C SHACL 1.2 test suite) and Fuseki/Jena-ARQ, both of which agree on the "
-    "canonical form.",
-)
 @pytest.mark.parametrize(
     'name,fn', NUMERIC_LEXICAL_FORM_SCENARIOS, ids=[s[0] for s in NUMERIC_LEXICAL_FORM_SCENARIOS]
 )

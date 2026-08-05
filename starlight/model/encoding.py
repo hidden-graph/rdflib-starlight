@@ -12,8 +12,8 @@ DirLangString   → a Literal whose datatype URI under DIRLANG_NS packs the real
 import hashlib
 from collections import OrderedDict
 
-from rdflib import URIRef
-from rdflib.namespace import RDF
+from rdflib import Literal, URIRef
+from rdflib.namespace import RDF, XSD
 
 TT_NS      = 'https://github.com/hidden-graph/rdflib-starlight/ns/tt#'       # triple-term content-addressed URIs
 RR_NS      = 'https://github.com/hidden-graph/rdflib-starlight/ns/rr#'       # anonymous reifier URIs
@@ -152,11 +152,97 @@ def decode_dirlang_datatype(datatype) -> tuple[str, str] | None:
     return language, direction
 
 
+_CANONICALIZABLE_NUMERIC_DATATYPES = frozenset({XSD.decimal, XSD.double, XSD.float})
+
+
+def _canonicalize_numeric_literal(literal: Literal) -> Literal:
+    """Reformat a decimal/double/float-typed Literal's lexical form to its
+    XSD canonical form. A no-op for anything already canonical, or for any
+    other datatype.
+
+    decimal: canonical form requires a decimal point with at least one
+    digit on each side (e.g. "42.0", not "42").
+    double/float: reformats through Python's own float parsing/repr, which
+    - for the ordinary (non-extreme-magnitude) range this is actually used
+    for in practice - already produces XSD's own "at least one digit each
+    side of a required decimal point" convention (e.g. "123e0" -> "123.0",
+    "1.5E2" -> "150.0"); not a full implementation of XSD 1.1's exact
+    canonical-form algorithm for every possible magnitude (e.g. very
+    large/small values render with Python's "1e+30"-style exponent rather
+    than XSD's "1.0E30"), which is a level of fidelity nothing in this
+    codebase currently needs.
+    """
+    dt = literal.datatype
+    lex = str(literal)
+    if dt == XSD.decimal:
+        if "." not in lex:
+            return Literal(f"{lex}.0", datatype=dt)
+        return literal
+    if dt in (XSD.double, XSD.float):
+        try:
+            val = float(lex)
+        except ValueError:
+            return literal
+        canonical = repr(val)
+        if "e" in canonical:
+            canonical = canonical.replace("e", "E").replace("E+", "E")
+        elif "." not in canonical:
+            canonical += ".0"
+        if canonical == lex:
+            return literal
+        return Literal(canonical, datatype=dt)
+    return literal
+
+
+def canonicalize_query_result_value(node):
+    """Canonicalize a numeric-XSD-typed Literal's lexical form for a SPARQL
+    query *result* value specifically - recurses into a TripleTerm's own
+    subject/object components. Deliberately applied only here, at the
+    SELECT-result boundary (see restore_select_bindings below) - not
+    anywhere data is read verbatim (plain .triples()/_restore() on their
+    own): Turtle/N-Triples parsing (parsers.syntax.coerce_object()/
+    turtle_parser._to_node()) deliberately preserves a literal's exact
+    lexical form as written, since RDF 1.2's own term-equality rules
+    require it - see coerce_object()'s own docstring and
+    tests/unit/test_syntax.py::TestCoerceObject, both explicit about this
+    for the same "123e0" value that motivates this function. A query
+    *result*, though, is expected to match what a real conformant engine's
+    own query results look like - confirmed via the W3C SPARQL 1.2
+    eval-triple-terms/op-2 fixture, whose own expected result canonicalizes
+    "123e0" to "123.0" - the same convention already applied to the native
+    (Oxigraph) backend's own results (see
+    starlight/backends/native.py::_parse_json_term), extended here to the
+    in-memory backend's query results specifically.
+    """
+    from starlight.model.triple import TripleTerm
+
+    if isinstance(node, TripleTerm):
+        new_subject = canonicalize_query_result_value(node.subject)
+        new_object = canonicalize_query_result_value(node.object)
+        if new_subject is node.subject and new_object is node.object:
+            # Nothing actually needed canonicalizing - return the original
+            # object unchanged rather than an equal-but-fresh one, so its
+            # _namespace_manager (set by StarlightGraph._restore(), used
+            # for prefixed-name rendering in .n3()/__str__()) survives.
+            # Confirmed a real regression when first tried: rebuilding
+            # unconditionally dropped it even when no literal inside needed
+            # reformatting, breaking TestQ6::test_tt_str_uses_prefixed_names.
+            return node
+        result = TripleTerm(new_subject, node.predicate, new_object)
+        result._namespace_manager = node._namespace_manager
+        return result
+    if isinstance(node, Literal) and node.datatype in _CANONICALIZABLE_NUMERIC_DATATYPES:
+        return _canonicalize_numeric_literal(node)
+    return node
+
+
 def restore_select_bindings(r, restore_fn) -> None:
     """Post-process a SPARQL SELECT rdflib.query.Result in place: drop rows
     that are purely internal encoding infrastructure, and restore any
     tt:HASH URIRef/dirlang: Literal in the surviving rows to its public
-    TripleTerm/DirLangString form via restore_fn.
+    TripleTerm/DirLangString form via restore_fn - then canonicalize any
+    numeric literal's lexical form (see canonicalize_query_result_value)
+    now that it's a real value rather than an opaque tt:HASH URI.
 
     Shared by StarlightGraph.query() (restore_fn=self._restore, which looks
     up a single graph's own registry) and StarlightDataset.query()
@@ -172,7 +258,7 @@ def restore_select_bindings(r, restore_fn) -> None:
     user asked about them.
     """
     r.bindings = [
-        {var: restore_fn(row.get(var)) if row.get(var) is not None else None
+        {var: canonicalize_query_result_value(restore_fn(row.get(var))) if row.get(var) is not None else None
          for var in r.vars}
         for row in r.bindings
         if not (any(isinstance(v, URIRef) and str(v).startswith(TT_NS)

@@ -41,6 +41,7 @@ import re
 
 import requests
 from rdflib import URIRef, Literal, BNode
+from rdflib.namespace import XSD
 from rdflib.query import Result
 from rdflib.term import Variable
 
@@ -163,7 +164,30 @@ def _parse_json_term(term_dict: dict):
         if lang:
             return Literal(term_dict['value'], lang=lang)
         if dtype:
-            return Literal(term_dict['value'], datatype=URIRef(dtype))
+            literal = Literal(term_dict['value'], datatype=URIRef(dtype))
+            if dtype == str(XSD.decimal):
+                # Confirmed against live Oxigraph 0.5.x specifically (not
+                # Fuseki/Jena-ARQ, which already returns the canonical form):
+                # a whole-number xsd:decimal computed by Oxigraph's own
+                # SPARQL engine (CEIL/FLOOR/ROUND/division, or simply stored
+                # and read back) comes back lexically as e.g. "4"/"123"
+                # rather than XSD 1.1's mandatory canonical "4.0"/"123.0"
+                # (a decimal point with at least one digit each side) - see
+                # docs/rdflib-upstream-issues.md Issue 2, the same defect
+                # this project's own operator_patches.py already works
+                # around for rdflib's *internal* evaluator. Reuses that same
+                # helper here for the native backend's *results* specifically
+                # - this corrects Oxigraph's own output formatting on the
+                # way into a Python Literal, not the query or stored data
+                # sent to it, so it doesn't conflict with this module's
+                # otherwise-zero-rewriting design (see module docstring).
+                # A no-op for any lexical form that already has a "." (every
+                # other engine, and Oxigraph itself for non-whole-number
+                # results).
+                from starlight.query.operator_patches import _canonicalize_decimal_lexical_form
+
+                literal = _canonicalize_decimal_lexical_form(literal)
+            return literal
         return Literal(term_dict['value'])
     if t == 'triple':
         v = term_dict['value']
