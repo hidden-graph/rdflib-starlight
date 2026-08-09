@@ -378,6 +378,75 @@ def patch_evalmodify_default_graph_selection() -> bool:
     return _evalmodify_patch_status
 
 
+_evalinsertdata_patch_status: bool | None = None
+
+
+def patch_evalinsertdata_quad_unpacking() -> bool:
+    """Fix a confirmed bug in plain rdflib's own ``evalInsertData``
+    (``rdflib.plugins.sparql.update``): ``g = ctx.graph; g += u.triples``
+    assumes ``+=`` accepts a plain iterable of triples, which is true for a
+    bare ``rdflib.graph.Graph`` (``Graph.__iadd__`` wraps each ``(s, p, o)``
+    with ``self`` itself before calling ``addN``) but not for a genuine
+    ``Dataset``/``ConjunctiveGraph`` (``ctx.graph`` for a
+    ``StarlightDataset``'s default-graph ``INSERT DATA``, with no `WITH`/
+    `GRAPH` clause) - its own ``__iadd__`` override expects ``other`` to
+    already *be* quads (4-tuples), so unpacking each plain 3-tuple triple
+    from ``u.triples`` as ``s, p, o, g`` raises ``ValueError: not enough
+    values to unpack (expected 4, got 3)``.
+
+    Confirmed via direct, minimal reproduction (no ``sparql1_2_to_rdf`` code
+    involved): ``StarlightDataset().update("INSERT DATA { ... }")`` with
+    zero triple terms anywhere raises this exact error - not specific to
+    RDF 1.2 at all, a plain SPARQL 1.1 `INSERT DATA` against any
+    ``Dataset``-shaped default graph.
+
+    Asymmetric with `DELETE DATA`, confirmed by reading both:
+    ``evalDeleteData``'s ``g -= u.triples`` hits ``Graph.__isub__``, which
+    loops and calls ``self.remove(triple)`` per plain triple regardless of
+    graph type (no quad-only override exists for ``-=`` the way there is
+    for ``+=``) - so only ``evalInsertData`` needs this fix, confirmed by
+    reproduction that ``DELETE DATA`` already works correctly against a
+    ``StarlightDataset`` without it.
+
+    Fix: explicit per-triple ``.add()`` calls instead of ``+=`` - the exact
+    same fix ``patch_evalmodify_default_graph_selection`` above already
+    established for `evalModify`'s own identical `.insert`/`.delete`
+    quad-vs-triple mismatch, applied here to `INSERT DATA`'s simpler,
+    unconditional-default-graph case. Functionally identical to what
+    ``Graph.__iadd__`` already does internally for a plain ``Graph``, and
+    correct (rather than crashing) for a ``Dataset``/``StarlightDataset``.
+
+    Same idempotent apply-once pattern as the other patches in this module.
+    """
+    global _evalinsertdata_patch_status
+    if _evalinsertdata_patch_status is not None:
+        return _evalinsertdata_patch_status
+
+    try:
+        from rdflib.plugins.sparql import update as update_module
+
+        original_eval_insert_data = update_module.evalInsertData
+        if getattr(original_eval_insert_data, "_starlight_evalinsertdata_patch", False):
+            _evalinsertdata_patch_status = True
+            return True
+
+        def _patched_eval_insert_data(ctx, u):
+            g = ctx.graph
+            for triple in u.triples:
+                g.add(triple)
+            for graph_id in u.quads:
+                cg = ctx.dataset.get_context(graph_id)
+                cg += u.quads[graph_id]
+
+        _patched_eval_insert_data._starlight_evalinsertdata_patch = True  # type: ignore[attr-defined]
+        update_module.evalInsertData = _patched_eval_insert_data
+        _evalinsertdata_patch_status = True
+    except Exception:
+        _evalinsertdata_patch_status = False
+
+    return _evalinsertdata_patch_status
+
+
 # ---------------------------------------------------------------------------
 # Lazy-join evaluation order - a second, distinct manifestation of the same
 # root cause as issue 5 (`_addVars`'s "Extend" case deliberately excluding

@@ -1090,6 +1090,91 @@ def _split_top_level_args(text: str) -> list[str]:
     return [part for part in parts if part]
 
 
+_DATA_KEYWORD_RE = _re.compile(r'\b(INSERT|DELETE)\s+DATA\b', _re.IGNORECASE)
+
+
+def _rewrite_insert_delete_data_blocks(query: str) -> str:
+    """Find every ``INSERT DATA { ... }`` / ``DELETE DATA { ... }`` block in
+    ``query`` whose ``QuadData`` content contains a ground ``<<( )>>`` triple
+    term, and rewrite it to the equivalent ordinary Update form -
+    ``INSERT { ... } WHERE { }`` / ``DELETE { ... } WHERE { }`` - so the rest
+    of this module's pipeline can treat the triple term exactly as it would
+    inside any other template/WHERE-shaped Update, rather than inside
+    ``QuadData``.
+
+    This matters because ``QuadData`` grammatically forbids *any* expression
+    - including the ``BIND(...)`` that this module's generic ground-triple-
+    term handling (``_rewrite_construct_query``) would otherwise inject -
+    permitting only ground terms. A query like
+    ``INSERT DATA { :s :p <<( :a :b :c )>> . }`` is valid RDF 1.2/SPARQL 1.2
+    (the triple term is ground - no variables), but naively applying this
+    module's usual "hoist to a BIND, match the triple's components in the
+    WHERE clause" strategy would produce a `BIND` sitting directly inside
+    ``QuadData``, which the SPARQL 1.1 grammar underlying the rewritten query
+    rejects outright.
+
+    Sidesteps the restriction entirely by rewriting the *syntax* first:
+    turning the block into an ordinary Modify operation with an empty WHERE
+    clause reuses ``_rewrite_construct_query`` unchanged, confirmed
+    empirically to already correctly hoist a ground triple term in an
+    INSERT/DELETE template to a BIND inside the WHERE clause - it isn't
+    CONSTRUCT-specific despite its name, so this needs no new hoisting logic
+    of its own.
+
+    Blocks with no ``<<(`` anywhere inside are left completely untouched
+    (byte-for-byte, including the ``DATA`` keyword) - the overwhelming
+    majority of ``INSERT DATA``/``DELETE DATA`` usage, which has nothing to
+    do with RDF 1.2 triple terms and must not be perturbed.
+
+    Uses ``_consume_balanced`` (the same brace-matching helper
+    ``_consume_values_clause`` uses) to find the block's closing ``}``,
+    rather than a naive first-``}``-wins scan, since the block can itself
+    contain nested ``{}`` via ``GRAPH <uri> { ... }``.
+
+    Runs first, before every other pass in ``_rewrite_sparql12_to_11_tracked``
+    - once this pass has run, no other pass in this module ever needs to know
+    ``QuadData`` was involved at all; a triple term surviving past this point
+    is always in an ordinary graph-pattern-shaped position.
+    """
+    buffer: list[str] = []
+    i = 0
+    n = len(query)
+    while i < n:
+        if query.startswith('#', i):
+            end = query.find('\n', i)
+            end = n if end == -1 else end + 1
+            buffer.append(query[i:end])
+            i = end
+            continue
+        if query.startswith('"""', i) or query.startswith("'''", i):
+            literal, i = _consume_string(query, i, query[i:i + 3])
+            buffer.append(literal)
+            continue
+        if query[i] in {'"', "'"}:
+            literal, i = _consume_string(query, i, query[i])
+            buffer.append(literal)
+            continue
+        if query[i] == '<' and not query.startswith("<<(", i):
+            iri, i = _consume_iri(query, i)
+            buffer.append(iri)
+            continue
+        m = _DATA_KEYWORD_RE.match(query, i)
+        if m is not None:
+            j = m.end()
+            while j < n and query[j].isspace():
+                j += 1
+            if j < n and query[j] == '{':
+                block_text, end = _consume_balanced(query, j, '{', '}')
+                if '<<(' in block_text:
+                    verb = m.group(1).upper()
+                    buffer.append(f'{verb} {block_text} WHERE {{ }}')
+                    i = end
+                    continue
+        buffer.append(query[i])
+        i += 1
+    return ''.join(buffer)
+
+
 def _rewrite_sparql12_to_11_tracked(query: str) -> tuple[str, frozenset]:
     """Internal rewriter that also returns the set of generated variable names.
 
@@ -1106,6 +1191,14 @@ def _rewrite_sparql12_to_11_tracked(query: str) -> tuple[str, frozenset]:
     # variable that might hold any kind of literal).
     uses_dirlangstring = '--' in query
     query = _rewrite_dirlang_literals(query)
+
+    if '<<(' in query and _DATA_KEYWORD_RE.search(query):
+        # Must run before every other pass below - see
+        # _rewrite_insert_delete_data_blocks's own docstring for why
+        # QuadData (INSERT DATA/DELETE DATA) needs this syntactic rewrite
+        # before any triple term inside it can be safely handled by the
+        # generic passes that follow.
+        query = _rewrite_insert_delete_data_blocks(query)
 
     if _TRIPLE_CALL_RE.search(query):
         query = _rewrite_triple_calls(query)

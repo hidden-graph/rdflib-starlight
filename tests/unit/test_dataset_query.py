@@ -428,3 +428,70 @@ class TestUpdateWithTripleTerm:
         ds.update(q)
         g1 = ds.get_context(G1)
         assert g1.has_triple_term(ex('alice'), ex('knows'), ex('bob'))
+
+
+# ---------------------------------------------------------------------------
+# UPDATE — ground triple term directly inside INSERT DATA / DELETE DATA
+#
+# QuadData (the { ... } block in INSERT DATA/DELETE DATA) forbids all
+# expressions, permitting only ground terms - so a ground <<( s p o )>>
+# triple term here can't be handled the way one inside an ordinary WHERE
+# clause is (hoisting to a BIND). See
+# starlight.query.sparql12_to_11._rewrite_insert_delete_data_blocks.
+# ---------------------------------------------------------------------------
+
+class TestUpdateDataWithGroundTripleTerm:
+    def test_insert_data_with_ground_triple_term(self, ds):
+        q = f"""
+        PREFIX ex: <{EX}>
+        INSERT DATA {{
+            ex:who ex:verifiedBy <<( ex:alice ex:knows ex:bob )>> .
+        }}
+        """
+        ds.update(q)
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        matches = list(ds.triples((ex('who'), ex('verifiedBy'), None)))
+        assert matches == [(ex('who'), ex('verifiedBy'), tt)]
+
+    def test_delete_data_with_ground_triple_term(self, ds):
+        insert_q = f"""
+        PREFIX ex: <{EX}>
+        INSERT DATA {{
+            ex:who ex:verifiedBy <<( ex:alice ex:knows ex:bob )>> .
+        }}
+        """
+        ds.update(insert_q)
+        delete_q = f"""
+        PREFIX ex: <{EX}>
+        DELETE DATA {{
+            ex:who ex:verifiedBy <<( ex:alice ex:knows ex:bob )>> .
+        }}
+        """
+        ds.update(delete_q)
+        matches = list(ds.triples((ex('who'), ex('verifiedBy'), None)))
+        assert matches == []
+
+    def test_insert_data_with_ground_triple_term_in_named_graph(self, ds):
+        q = f"""
+        PREFIX ex: <{EX}>
+        INSERT DATA {{
+            GRAPH <{EX}graph1> {{
+                ex:who ex:verifiedBy <<( ex:alice ex:knows ex:bob )>> .
+            }}
+        }}
+        """
+        ds.update(q)
+        g1 = ds.get_context(G1)
+        tt = TripleTerm(ex('alice'), ex('knows'), ex('bob'))
+        assert (ex('who'), ex('verifiedBy'), tt) in g1
+
+    def test_insert_data_without_triple_term_still_works(self, ds):
+        """Plain INSERT DATA (no triple term at all) must be unaffected by
+        this rewrite pass - it should never even fire."""
+        q = f"""
+        PREFIX ex: <{EX}>
+        INSERT DATA {{ ex:dave ex:age "40" . }}
+        """
+        ds.update(q)
+        matches = list(ds.triples((ex('dave'), ex('age'), None)))
+        assert matches == [(ex('dave'), ex('age'), Literal('40'))]

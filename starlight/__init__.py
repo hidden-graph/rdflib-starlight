@@ -72,6 +72,20 @@ from starlight.query.evaluate_patches import (
     patch_evalmodify_default_graph_selection as _patch_evalmodify_default_graph_selection,
 )
 
+# Fix for a confirmed bug in plain rdflib's own evalInsertData (same
+# rdflib.plugins.sparql.update module as evalModify above, a distinct
+# function): `g = ctx.graph; g += u.triples` assumes `+=` accepts a plain
+# iterable of triples, which isn't true once ctx.graph is a genuine
+# Dataset/ConjunctiveGraph (StarlightDataset's default graph) - its own
+# `__iadd__` override expects already-quad tuples, so a plain `INSERT DATA`
+# with no triple terms involved raises `ValueError: not enough values to
+# unpack`. Not symmetric with DELETE DATA (`evalDeleteData`'s `-=` doesn't
+# have the same quad-only override and already works correctly) - see
+# starlight/query/evaluate_patches.py::patch_evalinsertdata_quad_unpacking.
+from starlight.query.evaluate_patches import (
+    patch_evalinsertdata_quad_unpacking as _patch_evalinsertdata_quad_unpacking,
+)
+
 # Compatibility shim for a second, distinct confirmed bug in plain rdflib's
 # own SPARQL evaluator (evalJoin/evalLazyJoin) - same root cause as the
 # evalExtend patch above (a BIND's own expression-only variables aren't
@@ -127,6 +141,7 @@ _patch_algebra_translator_bugs()
 _patch_evalextend_forgotten_bind_vars()
 _patch_evalfilter_forgotten_vars()
 _patch_evalmodify_default_graph_selection()
+_patch_evalinsertdata_quad_unpacking()
 _patch_lazy_join_expr_dependency_order()
 _patch_construct_skips_encoding_solutions()
 _patch_relational_expression_tt_hash_equality()
