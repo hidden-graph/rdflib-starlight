@@ -51,6 +51,27 @@ from starlight.query.evaluate_patches import (
     patch_evalextend_forgotten_bind_vars as _patch_evalextend_forgotten_bind_vars,
 )
 
+# Same confirmed rdflib bug as the evalExtend patch immediately above,
+# reached through FILTER instead of BIND (evalFilter's own
+# `c.forget(ctx, _except=part._vars)`) - not covered by that patch, since
+# it only touches evalExtend. See
+# starlight/query/evaluate_patches.py::patch_evalfilter_forgotten_vars.
+from starlight.query.evaluate_patches import (
+    patch_evalfilter_forgotten_vars as _patch_evalfilter_forgotten_vars,
+)
+
+# Fix for a confirmed bug in plain rdflib's own evalModify (a different
+# module, rdflib.plugins.sparql.update, from the evalExtend/evalFilter
+# patches above): it writes DELETE/INSERT changes through
+# ctx.dataset.default_context instead of ctx.graph whenever ctx.graph isn't
+# exactly a bare Graph instance - silently failing to remove/insert a
+# triple-term-valued triple against this library's own in-memory backend,
+# even though the WHERE clause matches correctly. See
+# starlight/query/evaluate_patches.py::patch_evalmodify_default_graph_selection.
+from starlight.query.evaluate_patches import (
+    patch_evalmodify_default_graph_selection as _patch_evalmodify_default_graph_selection,
+)
+
 # Compatibility shim for a second, distinct confirmed bug in plain rdflib's
 # own SPARQL evaluator (evalJoin/evalLazyJoin) - same root cause as the
 # evalExtend patch above (a BIND's own expression-only variables aren't
@@ -104,6 +125,8 @@ from starlight.query.evaluate_patches import (
 _apply_all_operator_patches()
 _patch_algebra_translator_bugs()
 _patch_evalextend_forgotten_bind_vars()
+_patch_evalfilter_forgotten_vars()
+_patch_evalmodify_default_graph_selection()
 _patch_lazy_join_expr_dependency_order()
 _patch_construct_skips_encoding_solutions()
 _patch_relational_expression_tt_hash_equality()

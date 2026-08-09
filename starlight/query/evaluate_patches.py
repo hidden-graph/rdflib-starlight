@@ -41,33 +41,62 @@ _evaluate_patch_status: bool | None = None
 
 
 def _expr_free_vars(expr) -> set:
-    """The set of variables ``expr`` itself references, read from the
-    ``_vars`` bookkeeping rdflib's own ``_addVars`` pass already computes
-    for every node in the algebra tree (``algebra.py``, run once during
-    ``translateQuery`` - *not* ``translateUpdate``, which never runs this
-    pass at all, so this is frequently empty/missing in an Update context)
-    - except for a bare ``Variable``, which has no such attribute (it
-    isn't a ``CompValue``) but whose own free-variable set is trivially
-    itself.
+    """The set of variables ``expr`` itself references - a genuine
+    recursive structural walk, *not* a lookup into the ``_vars``
+    bookkeeping rdflib's own ``_addVars`` pass computes.
 
-    Deliberately not ``expr.get("_vars", set())`` - ``CompValue.get`` is
-    *not* ``dict.get``: its actual signature is
-    ``get(self, a, variables=False, errors=False)``, so a second
-    positional argument is interpreted as the ``variables`` flag, not a
-    default value, and a missing key falls back to returning the key
-    string itself (``OrderedDict.get(self, a, a)``) - confirmed a real,
-    reproducible ``TypeError: unsupported operand type(s) for |: 'set'
-    and 'str'`` when first tried, from unioning a ``set`` with the literal
-    string ``"_vars"``. Plain ``in``/``[]`` access (via the underlying
-    ``dict`` interface ``CompValue`` inherits, unaffected by its own
-    ``get`` override) avoids this entirely.
+    An earlier version of this function *did* just read ``expr``'s own
+    ``_vars`` (rdflib's ``algebra.py``, run once during ``translateQuery``)
+    as a shortcut, on the assumption that it already reflects exactly this
+    set. That assumption is confirmed wrong for a ``RelationalExpression``
+    specifically (``FILTER(?x = ?o)``'s own algebra shape): reproduced
+    directly against plain, unpatched rdflib -
+    ``prepareQuery("SELECT * WHERE { ?s ?p ?x FILTER(?x = ?o) }")`` (``?o``
+    appearing *only* in the filter, never in the wrapped pattern) - the
+    resulting ``RelationalExpression`` node's own ``_vars`` is an empty
+    ``set()`` regardless of which side (``expr`` or ``other``) ``?o`` sits
+    on, even though ``?o`` is plainly a free variable of the expression by
+    any reasonable definition. ``_addVars``'s handling of comparison
+    expressions apparently never populates ``_vars`` for them at all (not
+    a one-sided ``other``-only gap, as first suspected - ``expr``-side
+    ``?x`` is *also* absent from ``_vars`` here, it just doesn't matter for
+    callers of this function since ``?x`` is already visible through the
+    wrapped pattern's own ``_vars`` in every real case tested). Confirmed
+    via ``sparql1_2_to_rdf``'s own W3C-suite-driven testing (fixture
+    ``graphs-1``): a ``Filter`` built with a ``RelationalExpression``
+    comparing an extracted value against a variable bound only by a
+    lazy-joined *sibling* pattern (not this ``Filter``'s own wrapped ``p``)
+    got that variable silently forgotten by ``evalFilter``'s
+    ``c.forget(ctx, _except=part._vars)`` before the comparison ever ran -
+    same failure shape as the ``evalExtend`` bug this function was
+    originally written for (see ``patch_evalextend_forgotten_bind_vars``),
+    just reached through ``FILTER`` instead of ``BIND``, and not covered by
+    that patch alone since it only touches ``evalExtend``.
+
+    A structural walk sidesteps needing to know which rdflib expression
+    types ``_addVars`` does or doesn't populate correctly - it finds every
+    bare ``Variable`` in the tree regardless of which key it's stored
+    under, recursing through every ``CompValue``/``list``/``tuple``
+    (mirroring ``_traverseAgg``'s own generic traversal shape). Strictly
+    more complete than the old ``_vars``-based version for every existing
+    caller (``patch_evalextend_forgotten_bind_vars``,
+    ``_bind_expr_dependencies``) - no behavior it relied on is lost, only
+    gaps like this one are closed.
     """
-    if isinstance(expr, Variable):
-        return {expr}
-    if isinstance(expr, CompValue):
-        vars_ = dict.get(expr, "_vars")
-        return vars_ if isinstance(vars_, set) else set()
-    return set()
+    found: set = set()
+
+    def walk(node) -> None:
+        if isinstance(node, Variable):
+            found.add(node)
+        elif isinstance(node, CompValue):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+
+    walk(expr)
+    return found
 
 
 def patch_evalextend_forgotten_bind_vars() -> bool:
@@ -144,6 +173,209 @@ def patch_evalextend_forgotten_bind_vars() -> bool:
         _evaluate_patch_status = False
 
     return _evaluate_patch_status
+
+
+_evalfilter_patch_status: bool | None = None
+
+
+def patch_evalfilter_forgotten_vars() -> bool:
+    """Fix a confirmed rdflib bug: ``evalFilter`` forgets a variable its own
+    ``expr`` depends on before evaluating that ``expr``, whenever that
+    variable isn't *also* a pattern variable of the ``Filter`` node's own
+    local ``p`` - the same root cause and shape as
+    ``patch_evalextend_forgotten_bind_vars`` above (``_addVars`` failing to
+    populate ``_vars`` for the relevant expression node), reached through
+    ``FILTER`` instead of ``BIND``, and *not* covered by that patch since it
+    only touches ``evalExtend``.
+
+    Confirmed via a minimal, standalone plain-rdflib reproduction (no
+    starlight/sparql1_2_to_rdf code involved) - see ``_expr_free_vars``'s
+    own docstring for the exact repro: a ``RelationalExpression`` comparing
+    a variable that's free in the filter but not in the wrapped pattern
+    (``FILTER(?x = ?o)`` where ``?o`` never appears in ``p``) gets its own
+    ``_vars`` computed as an empty ``set()`` by ``_addVars`` regardless of
+    which side of the comparison ``?o`` is on. ``evalFilter``'s
+    ``c.forget(ctx, _except=part._vars)`` then drops ``?o`` before ``_ebv``
+    ever evaluates the expression, making the comparison see an unbound
+    variable - which ``_ebv``/the underlying relational-expression operator
+    treats as an error, so the filter evaluates false for *every* row
+    regardless of ``?o``'s real (outer) value, silently emptying the
+    result with no error at all. Found via ``sparql1_2_to_rdf``'s own W3C
+    test suite (fixture ``graphs-1``): a value extracted from a
+    lazily-joined ``GRAPH`` pattern, compared against a variable bound only
+    by the *other* (sibling) branch of that join, needs exactly this shape
+    to work correctly - see that project's ``lower_rdf11.py``
+    ``_add_single_constraint`` for the query-construction side of the same
+    finding.
+
+    Fix: identical strategy to the ``Extend`` patch - union in ``expr``'s
+    own free variables (the corrected, structural ``_expr_free_vars``, not
+    a re-trust of ``_vars``) before forgetting. Unchanged in every other
+    respect from rdflib's own ``evalFilter``.
+
+    Same idempotent apply-once pattern as the other patches in this module.
+    """
+    global _evalfilter_patch_status
+    if _evalfilter_patch_status is not None:
+        return _evalfilter_patch_status
+
+    try:
+        original_eval_filter = evaluate.evalFilter
+        if getattr(original_eval_filter, "_starlight_evalfilter_patch", False):
+            _evalfilter_patch_status = True
+            return True
+
+        _ebv = evaluate._ebv
+        evalPart = evaluate.evalPart
+
+        def _patched_eval_filter(ctx, part):
+            except_vars = (part._vars or set()) | _expr_free_vars(part.expr)
+            for c in evalPart(ctx, part.p):
+                if _ebv(
+                    part.expr,
+                    c.forget(ctx, _except=except_vars) if not part.no_isolated_scope else c,
+                ):
+                    yield c
+
+        _patched_eval_filter._starlight_evalfilter_patch = True  # type: ignore[attr-defined]
+        evaluate.evalFilter = _patched_eval_filter
+        _evalfilter_patch_status = True
+    except Exception:
+        _evalfilter_patch_status = False
+
+    return _evalfilter_patch_status
+
+
+_evalmodify_patch_status: bool | None = None
+
+
+def patch_evalmodify_default_graph_selection() -> bool:
+    """Fix a confirmed bug in plain rdflib's own ``evalModify``
+    (``rdflib.plugins.sparql.update``, a different module from
+    ``evaluate`` - not covered by anything above): it writes DELETE/INSERT
+    changes to ``ctx.dataset.default_context`` whenever ``ctx.graph``
+    isn't *exactly* a bare ``rdflib.graph.Graph`` instance (its own source
+    comment even flags this as fragile: "weird type checking logic ... once
+    ConjunctiveGraph is removed and Dataset no longer inherits from
+    Graph") - rather than ``ctx.graph`` itself, which is what its sibling
+    function ``evalDeleteWhere`` uses unconditionally, and what turns out
+    to be the only one of the two that works correctly against this
+    library's own in-memory backend.
+
+    Confirmed via direct, minimal reproduction (no ``sparql1_2_to_rdf``
+    code involved): ``ctx.dataset.default_context`` and ``ctx.graph`` are
+    two *different* Python objects for a ``StarlightDataset`` (the former
+    a plain ``rdflib.graph.Graph`` wrapper, the latter the real
+    ``StarlightDataset``/``StarlightGraph`` instance with its own
+    triple-term-aware ``add``/``remove``/``triples`` overrides) - for an
+    *ordinary* triple this doesn't matter (both wrappers share the same
+    underlying ``Store``, so removal reaches it either way), but for a
+    triple whose subject/object is a native ``TripleTerm`` value, only the
+    real ``StarlightDataset``/``StarlightGraph`` object correctly
+    translates it to/from this library's internal encoding - going through
+    the generic ``default_context`` wrapper silently fails to remove or
+    insert the triple at all, with no error. Found via
+    ``sparql1_2_to_rdf``'s own `DeleteWhere`->`Modify` rewrite for a
+    non-ground triple-term pattern (`DELETE WHERE { ?r rdf:reifies
+    <<( ?s :b :c )>> }`): the WHERE clause matched the correct rows, but
+    nothing was actually deleted - traced down to this exact line, not a
+    bug in that project's own lowering.
+
+    Fix: use ``ctx.graph`` unconditionally, dropping the
+    ``type(ctx.graph) is Graph`` check and the ``default_context``
+    fallback entirely - safe for the `WITH`/`USING` cases too, since
+    ``evalModify`` already reassigns ``ctx`` (via ``ctx.pushGraph(...)``)
+    to reflect either clause *before* this line runs, so ``ctx.graph`` is
+    already correct in every case, exactly mirroring what
+    ``evalDeleteWhere``'s own simpler `g = ctx.graph` already does
+    unconditionally.
+
+    Same idempotent apply-once pattern as the other patches in this
+    module.
+    """
+    global _evalmodify_patch_status
+    if _evalmodify_patch_status is not None:
+        return _evalmodify_patch_status
+
+    try:
+        from rdflib.plugins.sparql import update as update_module
+
+        original_eval_modify = update_module.evalModify
+        if getattr(original_eval_modify, "_starlight_evalmodify_patch", False):
+            _evalmodify_patch_status = True
+            return True
+
+        evalPart = evaluate.evalPart
+        _fillTemplate = update_module._fillTemplate
+
+        def _patched_eval_modify(ctx, u):
+            originalctx = ctx
+
+            if u.using:
+                otherDefault = False
+                for d in u.using:
+                    if d.default:
+                        if not otherDefault:
+                            from rdflib import Graph
+
+                            ctx = ctx.pushGraph(Graph())
+                            otherDefault = True
+                        ctx.load(d.default, default=True)
+                    elif d.named:
+                        ctx.load(d.named, default=False)
+
+            if not u.using and u.withClause:
+                g = ctx.dataset.get_context(u.withClause)
+                ctx = ctx.pushGraph(g)
+
+            res = evalPart(ctx, u.where)
+
+            if u.using:
+                if otherDefault:
+                    ctx = originalctx
+                if u.withClause:
+                    g = ctx.dataset.get_context(u.withClause)
+                    ctx = ctx.pushGraph(g)
+
+            for c in list(res):
+                dg = ctx.graph
+                if u.delete:
+                    # Explicit per-triple .remove() calls, not `dg -=
+                    # _fillTemplate(...)`: ConjunctiveGraph.__isub__ (which
+                    # `dg` resolves to whenever it's a genuine
+                    # Dataset/StarlightDataset, not a plain Graph -
+                    # confirmed by reading its source) expects `other` to
+                    # already be *quads* (4-tuples), unlike
+                    # Graph.__isub__'s own triple-based (3-tuple) contract
+                    # - `_fillTemplate` always yields plain triples, so `-=`
+                    # here would try to unpack each as 4 values.
+                    # `.remove()` has no such divergence between the two
+                    # graph types, and is what Graph.__isub__ itself calls
+                    # in a loop internally anyway - functionally identical
+                    # for a plain Graph, and correct (rather than crashing)
+                    # for a Dataset too.
+                    for triple in _fillTemplate(u.delete.triples, c):
+                        dg.remove(triple)
+                    for g, q in u.delete.quads.items():
+                        cg = ctx.dataset.get_context(c.get(g))
+                        cg -= _fillTemplate(q, c)
+
+                if u.insert:
+                    # Same reasoning as the delete branch above, mirrored
+                    # for Graph.__iadd__/.add().
+                    for triple in _fillTemplate(u.insert.triples, c):
+                        dg.add(triple)
+                    for g, q in u.insert.quads.items():
+                        cg = ctx.dataset.get_context(c.get(g))
+                        cg += _fillTemplate(q, c)
+
+        _patched_eval_modify._starlight_evalmodify_patch = True  # type: ignore[attr-defined]
+        update_module.evalModify = _patched_eval_modify
+        _evalmodify_patch_status = True
+    except Exception:
+        _evalmodify_patch_status = False
+
+    return _evalmodify_patch_status
 
 
 # ---------------------------------------------------------------------------

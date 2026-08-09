@@ -135,12 +135,25 @@ def _register_tt_accessor_functions() -> None:
     from rdflib.plugins.sparql.sparql import SPARQLError
 
     from starlight.model.encoding import TT_NS, lookup_tt_hash
+    from starlight.model.triple import TripleTerm
 
     def _make_accessor(label: str, index: int, pred):
         def _accessor(e, ctx):
             if len(e.expr) != 1:
                 raise SPARQLError(f"{label}() requires exactly 1 argument")
             uri = e.expr[0]
+            # A triple term bound via an ordinary graph-pattern match (e.g.
+            # `?r rdf:reifies ?tt .`) arrives here as a native TripleTerm
+            # object, not a tt: URIRef - StarlightGraph.triples() always
+            # restores tt: URIs to TripleTerm objects as part of its own
+            # ordinary result iteration (see StarlightGraph._restore()), not
+            # only at final query-result time, so this is the common case
+            # for a pattern-matched (as opposed to freshly-constructed or
+            # dereferenced-by-URI) triple term. Its own subject/predicate/
+            # object attributes are already the answer - no lookup or graph
+            # dereference needed at all.
+            if isinstance(uri, TripleTerm):
+                return (uri.subject, uri.predicate, uri.object)[index]
             if not (isinstance(uri, URIRef) and str(uri).startswith(TT_NS)):
                 raise SPARQLError(f"{label}(): argument is not a triple term")
             remembered = lookup_tt_hash(uri)

@@ -183,6 +183,64 @@ class StarlightDataset(Dataset):
             yield from default_graph.triples(triple)
 
     # ------------------------------------------------------------------
+    # Add/remove with TripleTerm-aware encoding
+    #
+    # rdflib's own Dataset has no override for any of these three at all -
+    # confirmed a real, previously-undiscovered gap (not just an
+    # asymmetry with triples()/quads() for its own sake): calling
+    # .add()/.remove()/`+=`/`-=` directly on a bare StarlightDataset (no
+    # WITH/USING clause naming a specific graph, so SPARQL Update's own
+    # Modify operation reads/writes through ctx.graph = the Dataset itself
+    # - confirmed via tracing a real evalModify call) previously fell
+    # through to plain rdflib Dataset.add/remove/addN, which write a raw
+    # TripleTerm Python object directly into the underlying store with no
+    # translation to this library's own tt:HASH encoding - silently
+    # failing to match anything on a later read or a subsequent remove()
+    # of the exact same value, with no error at all. triples()/quads()
+    # above already delegate to a real per-context StarlightGraph for
+    # reads; these three do the same for writes.
+    # ------------------------------------------------------------------
+
+    def add(self, triple) -> 'StarlightDataset':
+        """Add a triple to the default graph, with TripleTerm-aware
+        encoding - see this section's own module-level comment for why
+        this override exists at all."""
+        default_graph = self.get_context(self.default_graph.identifier)
+        default_graph.add(triple)
+        return self
+
+    def remove(self, triple) -> 'StarlightDataset':
+        """Remove a triple from the default graph, with TripleTerm-aware
+        encoding - see this section's own module-level comment for why
+        this override exists at all. Found via a real SPARQL Update
+        (Modify DELETE of a non-ground triple-term pattern): the WHERE
+        clause matched correctly, but nothing was actually removed -
+        traced down to this exact gap, not a bug in the query/update
+        translation that produced the Modify operation."""
+        default_graph = self.get_context(self.default_graph.identifier)
+        default_graph.remove(triple)
+        return self
+
+    def addN(self, quads) -> None:
+        """Add multiple quads, each routed to its own target graph's real
+        StarlightGraph context for TripleTerm-aware encoding - see this
+        section's own module-level comment. rdflib's own ``Graph.__iadd__``
+        (``+=``) calls this with every quad's graph element set to the
+        same graph object being added to (confirmed by reading its
+        source) - grouped by identifier here regardless, matching
+        ``StarlightGraph.addN``'s own general handling of a heterogeneous
+        quads iterable, so this is correct for a direct multi-graph
+        ``addN`` call too, not just the ``+=`` case.
+        """
+        by_graph: dict = {}
+        for s, p, o, c in quads:
+            identifier = c.identifier if isinstance(c, Graph) else c
+            by_graph.setdefault(identifier, []).append((s, p, o))
+        for identifier, triples in by_graph.items():
+            sg = self.get_context(identifier)
+            sg.addN((s, p, o, sg) for s, p, o in triples)
+
+    # ------------------------------------------------------------------
     # Internal parse helpers
     # ------------------------------------------------------------------
 
