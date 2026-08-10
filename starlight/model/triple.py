@@ -4,6 +4,8 @@ starlight.model.triple
 Core RDF 1.2 types: TripleTerm.
 """
 
+from rdflib import BNode, URIRef
+
 
 class TripleTerm:
     """An RDF 1.2 triple term — a triple used as a resource.
@@ -22,10 +24,29 @@ class TripleTerm:
     _IMMUTABLE = frozenset({'subject', 'predicate', 'object'})
 
     def __init__(self, subject, predicate, obj):
-        if isinstance(subject, TripleTerm):
+        # RDF 1.2 (17.4.6, TRIPLE()): a triple term's subject must be an IRI
+        # or blank node, its predicate an IRI - never a Literal in either
+        # position, and never itself a triple term (triple terms are only
+        # ever legal in object position). Mirrors the identical validation
+        # the in-memory backend's own TRIPLE() implementation already
+        # enforces (starlight/query/sparql12_to_11.py::_tt_hash_fn) - this
+        # constructor is the other place a TripleTerm comes into being, e.g.
+        # decoding a native-backend query result back into a real Python
+        # object, so it needs the same check independently. Confirmed via a
+        # live Fuseki 5.5.0 bug (docs/fuseki-upstream-issues.md, Issue 1)
+        # that a native backend can return an invalid triple term (a
+        # Literal-valued subject) with no error of its own - this
+        # constructor must not then silently accept it and construct an
+        # equally-invalid TripleTerm object.
+        if not isinstance(subject, (URIRef, BNode)):
             raise ValueError(
                 "RDF 1.2: the subject of a triple term must be an IRI or blank node, "
-                "not a triple term. Triple terms are only permitted in object position."
+                f"not {type(subject).__name__} ({subject!r})."
+            )
+        if not isinstance(predicate, URIRef):
+            raise ValueError(
+                "RDF 1.2: the predicate of a triple term must be an IRI, "
+                f"not {type(predicate).__name__} ({predicate!r})."
             )
         self.subject = subject
         self.predicate = predicate

@@ -21,10 +21,7 @@ Queries tested:
 Scales: 50K, 250K, 500K TTs (10% reification rate throughout).
 
 Fuseki requirements:
-  docker run -d --name fuseki-bench -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest
-  curl -s -X POST http://localhost:3030/$/datasets -u admin:admin \\
-       -H "Content-Type: application/x-www-form-urlencoded" \\
-       --data "dbName=bench&dbType=mem"
+  docker run -d --name fuseki-bench -p 3030:3030 atomgraph/fuseki:latest --update --mem --ping /bench
 
 Oxigraph requirements:
   docker run -d --name oxigraph-bench -p 7878:7878 \\

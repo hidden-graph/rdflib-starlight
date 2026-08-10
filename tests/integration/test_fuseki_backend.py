@@ -4,13 +4,11 @@ tests/integration/test_fuseki_backend.py
 Integration tests for StarlightGraph backed by Apache Jena Fuseki via
 rdflib's SPARQLUpdateStore.
 
-Requires a running Fuseki instance:
-    docker run -d --name fuseki-test -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest
-
-Create an in-memory dataset before running:
-    curl -X POST http://localhost:3030/$/datasets -u admin:admin \\
-         -H "Content-Type: application/x-www-form-urlencoded" \\
-         --data "dbName=starlight&dbType=mem"
+Requires a running Fuseki instance, with the dataset created at startup
+(test against the latest release - secoresearch/fuseki tops out at 5.5.0
+and is no longer updated; atomgraph/fuseki tracks current Jena releases):
+    docker run -d --name fuseki-test -p 3030:3030 atomgraph/fuseki:latest \\
+        --update --mem --ping /starlight
 
 Run:
     .venv/bin/pytest tests/integration/ -v
@@ -60,8 +58,10 @@ def _fuseki_available() -> bool:
 
 fuseki = pytest.mark.skipif(
     not _fuseki_available(),
-    reason='Fuseki not running — start with: docker run -d --name fuseki-test -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest '
-           '(needs Fuseki 5.5+ for the native RDF 1.2 tests below; stain/jena-fuseki only reaches 5.1.0)',
+    reason='Fuseki not running — start with: docker run -d --name fuseki-test -p 3030:3030 '
+           'atomgraph/fuseki:latest --update --mem --ping /starlight '
+           '(needs Fuseki 5.5+ for the native RDF 1.2 tests below; stain/jena-fuseki only reaches 5.1.0, '
+           'secoresearch/fuseki tops out at 5.5.0 and is no longer updated)',
 )
 
 

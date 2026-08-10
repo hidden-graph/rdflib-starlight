@@ -79,8 +79,11 @@ def _oxigraph_available() -> bool:
 
 fuseki = pytest.mark.skipif(
     not _fuseki_available(),
-    reason='Fuseki not running — start with: docker run -d --name fuseki-test -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest '
-           '(then create the "starlight" dataset - see test_fuseki_backend.py); needs Fuseki 5.5+ for native RDF 1.2 <<( )>> syntax, not stain/jena-fuseki (which only reaches 5.1.0).',
+    reason='Fuseki not running — start with: docker run -d --name fuseki-test -p 3030:3030 '
+           'atomgraph/fuseki:latest --update --mem --ping /starlight '
+           '(see test_fuseki_backend.py); needs Fuseki 5.5+ for native RDF 1.2 <<( )>> syntax - '
+           'not stain/jena-fuseki (only reaches 5.1.0), and not secoresearch/fuseki (tops out at '
+           '5.5.0, no longer updated).',
 )
 oxigraph = pytest.mark.skipif(
     not _oxigraph_available(),

@@ -136,6 +136,17 @@ from starlight.query.evaluate_patches import (
     patch_bgp_skips_encoding_triples as _patch_bgp_skips_encoding_triples,
 )
 
+# Fix for a confirmed rdflib bug (a different phase from every patch above -
+# parse-tree-to-algebra *translation*, not evaluation): a parenthesized,
+# un-aliased computed GROUP BY key (`GROUP BY (?o+1)`, no `AS ?var`) - legal
+# per SPARQL 1.1's own grammar - produces an algebra shape that crashes
+# evalAggregateJoin outright, with zero RDF 1.2/starlight involvement. See
+# docs/rdflib-upstream-issues.md Issue 9 and
+# starlight/query/evaluate_patches.py::patch_group_by_unaliased_expression_key.
+from starlight.query.evaluate_patches import (
+    patch_group_by_unaliased_expression_key as _patch_group_by_unaliased_expression_key,
+)
+
 _apply_all_operator_patches()
 _patch_algebra_translator_bugs()
 _patch_evalextend_forgotten_bind_vars()
@@ -147,6 +158,7 @@ _patch_construct_skips_encoding_solutions()
 _patch_relational_expression_tt_hash_equality()
 _patch_order_by_tt_hash_term_kind()
 _patch_bgp_skips_encoding_triples()
+_patch_group_by_unaliased_expression_key()
 
 __all__ = [
     # rdflib primitives

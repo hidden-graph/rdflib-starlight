@@ -1,79 +1,84 @@
-# Apache Jena / Fuseki Upstream Issues
+# Apache Jena (ARQ) Upstream Issues
 
-*Last reviewed: 2026-08-04*
+*Last reviewed: 2026-08-10*
 
-Bugs found in [Apache Jena](https://github.com/apache/jena) (via Fuseki, the native `rdf-1.2` backend's second real SPARQL-star HTTP engine option - see `starlight/backends/native.py`'s own module docstring: this repo does zero query/data rewriting for either native-backend engine, so what the engine accepts and returns is exactly what a client sees) while cross-checking a finding from the downstream `sparql1.2_to_rdf` project's adversarial round-trip test battery against a second engine. Confirmed against Fuseki `5.5.0`. Reproduction uses the official W3C SPARQL 1.2 test suite's own fixture data/expected results as ground truth, not a hand-picked adversarial case.
+Bugs found in [Apache Jena](https://github.com/apache/jena)'s ARQ SPARQL engine (`jena-arq` - the module that parses and evaluates SPARQL, shared by every Jena-based tool), accessed via a Fuseki HTTP endpoint, the native `rdf-1.2` backend's second SPARQL-star option alongside Oxigraph. Confirmed via [apache/jena#3658](https://github.com/apache/jena/pull/3658)'s own file list that the closely related fix discussed below lives entirely under `jena-arq` - the separate `jena-fuseki2` module (the actual HTTP server) isn't touched at all. So this is an ARQ defect, not a Fuseki-specific one: it would reproduce in any Jena-based application that calls into `jena-arq` directly, not just through a running Fuseki server. Tested against the latest available release rather than a pinned old version - currently `jena-6.1.0` (via `atomgraph/fuseki:latest`, confirmed 2026-08-10; `secoresearch/fuseki`, used earlier, tops out at `jena-5.5.0` and is no longer updated by its maintainer).
 
-Same entry structure/conventions as `docs/rdflib-upstream-issues.md` (see that file's "How To Use" section) - `##`/`###` headings pastable directly into a GitHub issue.
+## Issue 1 - ARQ rejects an invalid triple-term predicate, but not an invalid triple-term subject
 
-## Status Summary
+ARQ generally rejects inserting an invalid triple into the graph. Per RDF 1.2 (`ttSubject ::= iri | BlankNode`, `verb ::= iri`), a triple term's `subject` must be an IRI or blank node and its `predicate` must be an IRI - never a Literal in either position. ARQ correctly enforces this for `predicate` - inserting a triple term with a Literal predicate is rejected outright, at parse time, with an HTTP 400 syntax error (from Fuseki, the HTTP surface used to reach it here). It does **not** enforce the identical rule for `subject` - the same shape with a Literal subject is accepted and written to the graph.
 
-| # | Issue | Reporting upstream? |
-| --- | --- | --- |
-| 1 | `TRIPLE(subject, predicate, object)` fails to reject a triple-term-valued `subject` argument (constructs an invalid nested-subject triple term instead), while correctly rejecting the identical case for the `predicate` argument | **Yes** (not yet filed) |
+**Reproduction** (pure Python standard library, no dependencies beyond a running Fuseki endpoint at `localhost:3030` with an in-memory dataset named `repro` - create with: `docker run -d --name fuseki-repro -p 3030:3030 atomgraph/fuseki:latest --update --mem --ping /repro`):
 
-## Entries
+```python
+import json
+import urllib.parse
+import urllib.request
+import urllib.error
 
-| # | Title | Found |
-| --- | --- | --- |
-| 1 | `TRIPLE()` doesn't validate its `subject` argument the way it already validates `predicate` | 2026-08-04 |
+BASE = "http://localhost:3030/repro"
 
-## Issue 1 - `TRIPLE()` doesn't validate its `subject` argument the way it already validates `predicate` (found 2026-08-04)
+def sparql_update(update):
+    req = urllib.request.Request(
+        f"{BASE}/update",
+        data=urllib.parse.urlencode({"update": update}).encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    urllib.request.urlopen(req).read()
 
-**Fuseki version:** 5.5.0 (SPARQL query evaluation, `TRIPLE(...)` builtin function)
+def sparql_query(query):
+    url = f"{BASE}/query?" + urllib.parse.urlencode({"query": query})
+    req = urllib.request.Request(url, headers={"Accept": "application/sparql-results+json"})
+    return json.load(urllib.request.urlopen(req))
 
-### Description
+sparql_update("CLEAR ALL")
 
-Per RDF 1.2's own term model (confirmed via the [RDF 1.2 Turtle grammar](https://www.w3.org/TR/rdf12-turtle/#grammar-production-tripleTerm): `ttSubject ::= iri | BlankNode`, no `tripleTerm` alternative - nesting is only legal in *object* position), a triple term's own subject can never itself be a triple term. The official W3C SPARQL 1.2 test suite's `expression/triple-on-triple-terms` fixture tests exactly this: it evaluates `TRIPLE(?subject, ?predicate, ?object)` across `VALUES` rows where each of `?subject`/`?predicate`/`?object` in turn is bound to a triple term, and its own expected results (`triple-on-triple-terms.srj`) show `?triple` correctly left **unbound** when `?subject` or `?predicate` is a triple term, and correctly **bound** (nesting permitted) when only `?object` is. Fuseki gets the `?predicate` case right - `?triple` is correctly left unbound - but gets the `?subject` case wrong: it constructs and returns `?triple` bound to an actual nested-subject triple term, which is not a valid RDF 1.2 term at all.
+# Invalid Literal in PREDICATE position of a triple term
+try:
+    sparql_update('PREFIX : <http://example/> INSERT DATA { :claim :about <<( :s "bad predicate" :o )>> . }')
+    print("predicate case: accepted (unexpected)")
+except urllib.error.HTTPError as e:
+    print(f"predicate case: rejected, HTTP {e.code}")
 
-### Reproduction
+# Invalid Literal in SUBJECT position of a triple term
+try:
+    sparql_update('PREFIX : <http://example/> INSERT DATA { :claim :about <<( "bad subject" :p :o )>> . }')
+    print("subject case: accepted (unexpected bug)")
+except urllib.error.HTTPError as e:
+    print(f"subject case: rejected, HTTP {e.code}")
 
-```bash
-curl -G http://localhost:3030/starlight/query --data-urlencode 'query=
-PREFIX : <http://example/>
-SELECT ?subject ?triple {
-  VALUES ?subject { (<<(:x :y :z)>>) }
-  BIND(TRIPLE(?subject, :b, :c) AS ?triple)
-}'
+# Query out everything actually stored
+result = sparql_query("SELECT * { ?s ?p ?o }")
+print("stored triples:")
+for row in result["results"]["bindings"]:
+    print(" ", row)
 ```
 
-(Any dataset works - the store can be empty; `?subject` is bound directly by `VALUES`, not looked up.)
+Output:
 
-### Expected behavior
-
-Per the official W3C fixture's own expected results (`tests/w3c_sparql12/data/expression/triple-on-triple-terms.srj` in the downstream `sparql1.2_to_rdf` project, or directly at `https://w3c.github.io/rdf-tests/sparql/sparql12/expression/triple-on-triple-terms.srj`): `?triple` unbound (no `"triple"` key in that row's JSON binding) - `TRIPLE()`'s own evaluation should fail when its `subject` argument isn't a valid triple-term subject (`iri`/`BlankNode`), the same way it already correctly fails for an invalid `predicate` argument.
-
-### Actual behavior
-
-```json
-{
-  "subject": {"type": "triple", "value": {"subject": {"type":"uri","value":"http://example/x"}, "predicate": {"type":"uri","value":"http://example/y"}, "object": {"type":"uri","value":"http://example/z"}}},
-  "triple":  {"type": "triple", "value": {
-      "subject": {"type": "triple", "value": {"subject": {"type":"uri","value":"http://example/x"}, "predicate": {"type":"uri","value":"http://example/y"}, "object": {"type":"uri","value":"http://example/z"}}},
-      "predicate": {"type": "uri", "value": "http://example/b"},
-      "object":    {"type": "uri", "value": "http://example/c"}
-  }}
-}
+```
+predicate case: rejected, HTTP 400
+subject case: accepted (unexpected bug)
+stored triples:
+  {'s': {'type': 'uri', 'value': 'http://example/claim'}, 'p': {'type': 'uri', 'value': 'http://example/about'}, 'o': {'type': 'triple', 'value': {'subject': {'type': 'literal', 'value': 'bad subject'}, 'predicate': {'type': 'uri', 'value': 'http://example/p'}, 'object': {'type': 'uri', 'value': 'http://example/o'}}}}
 ```
 
-`?triple` is bound to a triple term whose own `subject` is itself a triple term - not a valid RDF 1.2 term under any reading of the spec.
+The predicate case is rejected before the triple ever reaches storage - ARQ's own SPARQL parser has no grammar production for a Literal there at all (`Encountered "bad predicate" ... Was expecting <IRIref> ...`). The subject case is accepted, and the stored triple's object (`o`) is `<<( "bad subject" :p :o )>>` - a triple term with a Literal subject, not a valid RDF 1.2 term under any reading of the grammar. This is real, persisted data corruption, not a query-time artifact: any later read of this graph, by any client, gets this invalid term back.
 
-### Suspected root cause
+Oxigraph, a second independent RDF 1.2 engine, correctly rejects both cases (HTTP 400 either way, nothing written) on the identical update text - confirming this is a genuine ARQ bug, not an ambiguous spec reading.
 
-Not confirmed against Jena's own source (not inspected directly). The clean contrast between the correctly-rejected `predicate` case and the incorrectly-accepted `subject` case suggests `TRIPLE()`'s implementation validates its second argument's type but is simply missing the equivalent check on its first argument - i.e. a one-sided validation gap, not a deeper structural issue (object position is, correctly, unrestricted for either).
-
-### Impact
-
-Any query using `TRIPLE()` where the `subject` argument might be (or might evaluate to) a triple term-valued expression silently constructs invalid RDF 1.2 data as a query result, rather than the spec-mandated unbound/error outcome. Concretely hit by a downstream consumer (`starlight`'s own native-backend result parser, `starlight/backends/native.py`) - decoding this result required a `TripleTerm` object whose own constructor already validates the *same* RDF 1.2 rule Jena's `TRIPLE()` should have enforced during evaluation, and raised - see this repo's own fix for making that failure mode graceful instead of an unhandled crash (`CHANGELOG.md`, "native-backend result parsing" entry, same date).
-
-### Suggested fix
-
-Add the same subject-position validation `TRIPLE()`'s implementation already applies to its `predicate` argument, applied to `subject` as well: if the evaluated `subject` argument is a triple term (rather than an IRI or blank node), the function should raise an expression-evaluation error (causing the containing `BIND`/projection to leave its target variable unbound, per ordinary SPARQL expression-error semantics) rather than constructing the invalid term.
-
-### Possible workaround
-
-Avoid passing a triple-term-valued expression as `TRIPLE()`'s first argument. If a query might do so unpredictably (e.g. a generic, round-tripped query where the shape isn't known ahead of time), validate/filter `TRIPLE()`'s result client-side rather than trusting Fuseki's response to already be valid RDF 1.2 - which is what this repo now does (see the `native.py` fix referenced above).
+Also confirmed via `TRIPLE()` (the SPARQL function, as opposed to inserting the literal `<<( )>>` syntax directly): `TRIPLE(:s, "bad predicate", :o)` correctly leaves its result unbound, while `TRIPLE("bad subject", :p, :o)` wrongly binds one - so this isn't specific to the `INSERT DATA` parser path, the same asymmetry holds for `TRIPLE()`'s own evaluation-time validation too.
 
 ### Status
 
-Found 2026-08-04 while cross-checking a downstream `sparql1.2_to_rdf` project finding against Fuseki as a second engine (see this repo's own `docs/rdflib-upstream-issues.md`/git history around 2026-08-04 for the Oxigraph-side investigation that prompted this cross-check - that specific Oxigraph finding turned out to be a failure-mode/status-code question on a query that can never match real data either way, not worth reporting on its own, but running the same adversarial+W3C-conformance test battery against Fuseki as a second data point surfaced this separate, genuine correctness bug via the official W3C fixture's own expected-results file). Not yet filed upstream.
+**Reported upstream: [apache/jena#4141](https://github.com/apache/jena/issues/4141), filed 2026-08-10. Open, unresolved.**
+
+Confirmed still present in `jena-6.1.0`, the latest release at time of filing - not just an old-container artifact.
+
+- A closely related bug was already reported and fixed: [apache/jena#3659](https://github.com/apache/jena/issues/3659) ("Restrict triple terms to have only IRI as a constant subject in VALUES and expressions"), fixed by [apache/jena#3658](https://github.com/apache/jena/pull/3658) (merged 2025-12-20, first released in `jena-6.0.0`/2026-01-27). Both are scoped to `jena-arq`, not Fuseki - the fix is narrower than its title suggests, too: it covers exactly what the title says, literal `<<( )>>` syntax written directly in a `VALUES` row or `BIND`, and nothing else. Confirmed directly against a live `jena-6.1.0` endpoint:
+  - `VALUES ?x { <<( "bad" :p :o )>> }` - fixed by #3658, HTTP 400.
+  - `BIND(<<( "bad" :p :o )>> AS ?x)` - fixed by #3658, HTTP 400.
+  - `TRIPLE("bad", :p, :o)` (the function - what this repo's own failing W3C fixtures actually use) - **still broken**, silently accepts it.
+  - `INSERT DATA { :s :q <<( "bad" :p :o )>> . }` (a ground triple term written directly - the reproduction above) - **still broken**, still persists it.
+  - Re-ran `expression/triple-on-triple-terms.rq` (the actual W3C fixture behind 3 `xfail`'d tests in this repo's own suite) straight through `StarlightGraph` against `jena-6.1.0`: identical failure to the older `jena-5.5.0`.
+- Filed as [#4141](https://github.com/apache/jena/issues/4141) rather than reopening #3659, since #3658's own fix was real and correctly scoped to what its title said - this is a distinct gap the fix didn't cover (`TripleTermOps.java`/`E_TripleFn.java`, the `TRIPLE()` function's own implementation, was touched by #3658 but apparently not for the subject-argument case), not a regression or an incomplete revert of it.

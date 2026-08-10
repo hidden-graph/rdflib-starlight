@@ -1065,3 +1065,113 @@ def patch_bgp_skips_encoding_triples() -> bool:
         _bgp_patch_status = False
 
     return _bgp_patch_status
+
+
+# ---------------------------------------------------------------------------
+# GROUP BY with an un-aliased, expression-valued grouping key - a genuine
+# bug in plain rdflib's own *parse-tree-to-algebra translation*
+# (`rdflib.plugins.sparql.algebra.translate`), not its evaluator - patched
+# here anyway (not in `algebra_translator_patches.py`, which is about the
+# opposite direction, algebra-to-*text*) since this module already hosts
+# the other GROUP BY/aggregate-adjacent fixes (issues 5/8) and the
+# observable symptom is a query that fails to evaluate. See
+# docs/rdflib-upstream-issues.md Issue 9 for the full writeup.
+# ---------------------------------------------------------------------------
+
+_group_by_unaliased_key_patch_status: bool | None = None
+_group_by_synthetic_var_counter = 0
+
+
+def patch_group_by_unaliased_expression_key() -> bool:
+    """Fix a confirmed bug in plain rdflib's own ``algebra.translate``: a
+    parenthesized, *un-aliased* computed ``GROUP BY`` key (``GROUP BY
+    (?o+1)``, no ``AS ?var``) - legal per SPARQL 1.1's own grammar
+    (``GroupCondition ::= ... | '(' Expression ( 'AS' Var )? ')' | ...``,
+    the ``AS Var`` part explicitly optional) - produces an algebra shape
+    that later crashes ``evaluate.evalAggregateJoin`` outright
+    (``Exception: Cannot eval thing: None``), with **no** RDF 1.2/triple-
+    term/``sparql1_2_to_rdf`` involvement at all. See
+    ``docs/rdflib-upstream-issues.md`` Issue 9 for the full root-cause
+    trace and a minimal, plain-rdflib reproduction.
+
+    Root cause, confirmed by reading ``algebra.py::translate`` directly:
+    for *every* parenthesized-expression ``GROUP BY`` condition (aliased
+    or not), the parser produces a ``GroupAs`` node with an ``.expr``, and
+    (only for the aliased form) a real ``.var``. ``translate``'s own loop
+    (``if isinstance(c, CompValue) and c.name == "GroupAs": M =
+    Extend(M, c.expr, c.var); c = c.var``) uses ``c.var`` for *both* the
+    ``Extend``'s own bind target *and* the value appended to the
+    ``Group.expr`` list that identifies this grouping key later - for the
+    un-aliased form, ``c.var`` is ``None`` (the key is genuinely absent
+    from the ``GroupAs`` node, not just falsy), so both end up
+    ``Extend(var=None)`` and ``Group.expr=[None, ...]``, and neither
+    ``evalExtend`` nor ``evalAggregateJoin`` has any handling for a bare
+    ``None`` in these positions.
+
+    Fix: rather than trying to patch the two evaluator functions to
+    special-case ``None`` after the fact (which would need to correctly
+    re-pair each ``None`` in ``Group.expr`` with its corresponding
+    ``Extend(var=None)`` - genuinely ambiguous once other, unrelated
+    grouping conditions are mixed in, since only some conditions produce
+    an ``Extend`` at all), this pre-processes the *parse tree* immediately
+    before ``translate`` runs: for any ``GroupAs`` condition missing its
+    own ``var``, mint a fresh synthetic ``Variable`` and assign it
+    directly onto the parse-tree node (``cond["var"] = synthetic``) -
+    confirmed via direct reproduction that ``translate``'s own,
+    completely unmodified logic then naturally uses this same synthetic
+    variable for *both* the ``Extend`` and the ``Group.expr`` entry, with
+    no further changes needed anywhere: the pairing was never actually
+    ambiguous at the *parse-tree* level, only after the ``None`` erased
+    the connection between the two positions. Mirrors rdflib's own
+    ``__agg_N__`` naming convention (used elsewhere in the same function
+    for `SAMPLE`'s own synthetic result variables) for the same reason:
+    a name unlikely to collide with any real, user-written variable, and
+    never projected out (this grouping key was never given a name by the
+    query's own author, so it correctly stays invisible in the result set
+    either way - confirmed via execution, not just algebra inspection).
+
+    Applies to ``algebra.translate`` (rebinding the module attribute, so
+    ``translateQuery``'s own internal call - a same-module global lookup,
+    resolved at call time - picks up the wrapped version automatically,
+    the same mechanism every other patch in this file already relies on).
+
+    Same idempotent apply-once pattern as the other patches in this module.
+    """
+    global _group_by_unaliased_key_patch_status
+    if _group_by_unaliased_key_patch_status is not None:
+        return _group_by_unaliased_key_patch_status
+
+    try:
+        from rdflib.plugins.sparql import algebra as algebra_module
+
+        original_translate = algebra_module.translate
+        if getattr(original_translate, "_starlight_groupby_patch", False):
+            _group_by_unaliased_key_patch_status = True
+            return True
+
+        def _fill_in_missing_group_condition_vars(q) -> None:
+            groupby = dict.get(q, "groupby")
+            if not groupby:
+                return
+            for cond in dict.get(groupby, "condition") or []:
+                if not (isinstance(cond, CompValue) and cond.name == "GroupAs"):
+                    continue
+                if dict.get(cond, "var") is not None:
+                    continue
+                global _group_by_synthetic_var_counter
+                _group_by_synthetic_var_counter += 1
+                cond["var"] = Variable(
+                    f"__starlight_groupkey_{_group_by_synthetic_var_counter}__"
+                )
+
+        def _patched_translate(q):
+            _fill_in_missing_group_condition_vars(q)
+            return original_translate(q)
+
+        _patched_translate._starlight_groupby_patch = True  # type: ignore[attr-defined]
+        algebra_module.translate = _patched_translate
+        _group_by_unaliased_key_patch_status = True
+    except Exception:
+        _group_by_unaliased_key_patch_status = False
+
+    return _group_by_unaliased_key_patch_status

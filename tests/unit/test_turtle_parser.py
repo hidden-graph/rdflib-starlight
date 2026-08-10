@@ -135,6 +135,63 @@ class TestBlankNodes:
         assert firsts == [URIRef(EX+'a')]
 
 
+class TestBracketedSubject:
+    """A non-empty bracketed property list (Turtle's blankNodePropertyList
+    production) used as a statement's own subject - `[ :p :o ] .` or
+    `[ :p :o ] :b :c .` - not just nested as an object (already covered by
+    TestBlankNodes above). Previously silently produced zero triples with
+    no error at all: extract_fields() (starlight/parsers/syntax.py) only
+    special-cased the empty-bracket case (`[]`) for a subject-position
+    blank node, never a non-empty one - unlike object position, which
+    expand_triple_set() already handled correctly. Found via a live Fuseki
+    CONSTRUCT response using exactly this shape (Fuseki serializes its
+    anonymous blank node with bracket syntax; Oxigraph uses a labeled
+    `_:id`, which is why this only ever surfaced through Fuseki testing)."""
+
+    def test_bare_bracket_single_predicate(self, parser):
+        g = parser.parse('PREFIX : <http://example.org/>\n[ :q :z ] .\n')
+        assert len(g) == 1
+        s, p, o = next(iter(g))
+        assert isinstance(s, BNode)
+        assert (p, o) == (URIRef(EX+'q'), URIRef(EX+'z'))
+
+    def test_bare_bracket_multiple_predicates(self, parser):
+        g = parser.parse('PREFIX : <http://example.org/>\n[ :q :z ; :p :o ] .\n')
+        assert len(g) == 2
+        subjects = {s for s, _, _ in g}
+        assert len(subjects) == 1
+        bnode = next(iter(subjects))
+        assert isinstance(bnode, BNode)
+        assert set(g.predicate_objects(bnode)) == {
+            (URIRef(EX+'q'), URIRef(EX+'z')),
+            (URIRef(EX+'p'), URIRef(EX+'o')),
+        }
+
+    def test_bracket_with_trailing_outer_predicate(self, parser):
+        # The exact W3C Turtle 1.2 fixture shape (turtle12-syntax-inside-01.ttl):
+        # the bracketed blank node is itself also the subject of an outer
+        # triple following the closing bracket.
+        g = parser.parse('PREFIX : <http://example.org/>\n[ :q :z ] :b :c .\n')
+        assert len(g) == 2
+        bnode_subjects = {s for s, p, o in g if p == URIRef(EX+'q')}
+        assert len(bnode_subjects) == 1
+        bnode = next(iter(bnode_subjects))
+        assert isinstance(bnode, BNode)
+        assert (bnode, URIRef(EX+'b'), URIRef(EX+'c')) in g
+
+    def test_bracket_with_triple_term_inside(self, parser):
+        g = parser.parse(
+            'PREFIX : <http://example.org/>\n'
+            '[ rdf:reifies <<( :a :b :c )>> ; :q :z ] .\n'
+        )
+        bnode_subjects = {s for s, p, o in g if p == URIRef(EX+'q')}
+        assert len(bnode_subjects) == 1
+        bnode = next(iter(bnode_subjects))
+        assert (bnode, URIRef(EX+'q'), URIRef(EX+'z')) in g
+        reified = list(g.objects(bnode, RDF_REIFIES))
+        assert len(reified) == 1
+
+
 # ---------------------------------------------------------------------------
 # RDF 1.2 features
 # ---------------------------------------------------------------------------

@@ -1,12 +1,12 @@
 # rdflib Upstream Issues
 
-*Last reviewed: 2026-08-05*
+*Last reviewed: 2026-08-09*
 
 Bugs found in plain `rdflib` (https://github.com/RDFLib/rdflib) while building this repo's own SPARQL 1.2 support on top of it. Every reproduction below uses only plain `rdflib`, no `starlight`/`rdflib-starlight` code at all, so each is reproducible standalone against a stock `rdflib` install. All confirmed against `rdflib` 7.6.0 (the version this project currently pins).
 
 ## Status Summary
 
-All eight issues are planned to be reported upstream - each a clean, unambiguous, spec-mapping or self-consistency bug with a minimal plain-`rdflib` reproduction. None has been filed yet (no existing GitHub issue/PR search performed yet - do that before actually opening any). All eight now have a real fix applied *in this repo* (not just an avoidance workaround) - see the table below for which module each lives in. This repo's own SPARQL query pipeline is intended to route every query through this project's SPARQL 1.2 → algebra → `translateAlgebra`-based regeneration path, not just a downstream test suite, so all eight are patched here directly rather than left as point-avoidances in one consumer's own code.
+All nine issues are planned to be reported upstream - each a clean, unambiguous, spec-mapping or self-consistency bug with a minimal plain-`rdflib` reproduction. None has been filed yet (no existing GitHub issue/PR search performed yet - do that before actually opening any). All nine now have a real fix applied *in this repo* (not just an avoidance workaround) - see the table below for which module each lives in. This repo's own SPARQL query pipeline is intended to route every query through this project's SPARQL 1.2 → algebra → `translateAlgebra`-based regeneration path, not just a downstream test suite, so all nine are patched here directly rather than left as point-avoidances in one consumer's own code. Issue 9 is a *parser/translator*-level bug (`algebra.translate`, not the evaluator) - initially thought to have no viable patch point (an unusable algebra shape gets constructed before evaluation ever runs, so no evaluator-side interception could recover it), but a real fix was found one layer earlier: pre-processing the *parse tree* immediately before `translate()` consumes it, filling in the one piece of information (`GroupAs.var`) the parser leaves missing for this construct - see its own entry for the full design and why this is more robust than trying to reconstruct the same information from the broken algebra output after the fact.
 
 | # | Issue | Reporting upstream? | Fix in this repo |
 | --- | --- | --- | --- |
@@ -18,6 +18,7 @@ All eight issues are planned to be reported upstream - each a clean, unambiguous
 | 6 | `RelationalExpression`'s list-handling guard is inverted (`isinstance(list, type(node.other))`), so multi-value `IN`/`NOT IN` always crashes `translateAlgebra` | **Yes** (not yet filed) | `starlight/query/algebra_translator_patches.py::patch_algebra_translator_bugs` (also independently fixed in the downstream `sparql1.2_to_rdf` project's own serializer, which doesn't fall through to this repo's patched method for this branch) |
 | 7 | `translateAlgebra`'s `"Project"` branch renders `SELECT * WHERE { <fully-ground pattern> }` (zero variables anywhere) as invalid `SELECT {...}`, missing the `*` | **Yes** (not yet filed) | `starlight/query/algebra_translator_patches.py::patch_algebra_translator_bugs` |
 | 8 | Evaluator bug: `evalLazyJoin` always evaluates its left branch first, silently emptying results when the left branch's own `BIND` expression depends on a variable only the right branch provides | **Yes** (not yet filed) | `starlight/query/evaluate_patches.py::patch_lazy_join_expr_dependency_order` |
+| 9 | `GROUP BY (expr)` with no `AS ?var` alias constructs an `Extend(var=None)`/`Group.expr=[None]` algebra shape that crashes `evalAggregateJoin` outright | **Yes** (not yet filed) | `starlight/query/evaluate_patches.py::patch_group_by_unaliased_expression_key` (a real functional fix, not a downstream workaround - patches `algebra.translate` itself, since the defect is in parse-tree-to-algebra construction, not evaluation) |
 
 Issues 1-2 were found while triaging the W3C SHACL 1.2 test suite's remaining failures in the downstream `starShacl`/`pyshacl-starlight` project (that suite's own `node-expr/shnex-sparql/{multiply,divide,ceil,floor,round}.ttl` and `sparql/rules/rectangle-*.ttl` fixtures) - see that repo's `docs/starlight-upstream-change-log.md` 2026-08-01 entries for the full downstream-impact writeup.
 
@@ -53,6 +54,7 @@ Each entry uses this structure - the `##` heading plus `###` subheadings - so it
 | 6 | `RelationalExpression`'s list-handling guard is inverted, so multi-value `IN`/`NOT IN` always crashes `translateAlgebra` | 2026-08-03 |
 | 7 | `translateAlgebra`'s `"Project"` branch drops the `*` for `SELECT * WHERE { <fully-ground pattern> }` | 2026-08-04 |
 | 8 | `evalLazyJoin` always evaluates its left branch first, silently emptying results when it depends on the right branch's own `BIND` | 2026-08-05 |
+| 9 | `GROUP BY (expr)` with no `AS ?var` alias crashes `evalAggregateJoin` (`Cannot eval thing: None`) | 2026-08-09 |
 
 ## Issue 1 - `MultiplicativeExpression` doesn't apply SPARQL 1.1's numeric type-promotion rules for `*` (found 2026-08-01)
 
@@ -685,3 +687,80 @@ Patched directly in this repo (`starlight/query/evaluate_patches.py::patch_lazy_
 ### Status
 
 Found 2026-08-05 while isolating the downstream `sparql1.2_to_rdf` project's `expr-2` W3C fixture failure into a standalone test case inside this repo (`tests/w3c_sparql12/test_algebra_regenerated_queries.py`), after first ruling out the algebra round-trip itself as the cause (original and regenerated query text were already confirmed to agree against two independent real engines, Oxigraph and Fuseki - see that project's own `tests/test_w3c_sparql12_oxigraph_roundtrip.py`). Root-caused down to `evalLazyJoin`'s hardcoded evaluation order the same day via a minimal, plain-rdflib reproduction. Reporting upstream planned, not yet filed. Verified: the minimal reproduction above now returns the correct single row; zero regressions across this repo's own suite (894 passed) or the downstream `sparql1.2_to_rdf` project's suite (failure count dropped, no new failures).
+
+## Issue 9 - `GROUP BY (expr)` with no `AS ?var` alias crashes `evalAggregateJoin` (found 2026-08-09)
+
+**rdflib version:** 7.6.0 (`rdflib/plugins/sparql/algebra.py::translate`, and `rdflib/plugins/sparql/evaluate.py::evalAggregateJoin`)
+
+### Description
+
+SPARQL 1.1's own grammar (`GroupCondition ::= BuiltInCall | FunctionCall | '(' Expression ( 'AS' Var )? ')' | Var`) explicitly permits a parenthesized, computed `GROUP BY` key with **no** `AS ?var` alias - `GROUP BY (?o+1)` is legal syntax, distinct from both a bare-variable key (`GROUP BY ?o`) and an *aliased* computed key (`GROUP BY (?o+1 AS ?k)`). rdflib's own `algebra.py::translate` special-cases only the aliased form (`GroupAs`, with a real `.var`) - for the un-aliased form, it still builds the same `Extend(M, expr, var)` wrapper, but with `var=None`, and the corresponding `Group.expr` list entry is also `None` rather than a real `Variable`. Neither `evalExtend` nor `evalAggregateJoin` (the two evaluator functions that actually consume these) has any handling for a `None` in this position - `evalAggregateJoin` calls `_eval(e, row, False)` for every entry in its own grouping-key list, and `_eval` has no case for a bare `None`, raising unconditionally.
+
+### Reproduction
+
+```python
+from rdflib import Graph, Namespace, Literal
+
+g = Graph()
+ex = Namespace("http://ex/")
+g.add((ex.s, ex.p, Literal(1)))
+g.add((ex.s, ex.p, Literal(2)))
+g.add((ex.s2, ex.p, Literal(1)))
+
+res = g.query("PREFIX : <http://ex/> SELECT (COUNT(?o) as ?c) WHERE { ?s :p ?o } GROUP BY (?o+1)")
+for row in res:
+    print(row)
+```
+
+No triple terms, no RDF 1.2 syntax, no `starlight`/downstream-project code involved at all - a plain SPARQL 1.1 query using a syntactically legal, spec-permitted `GROUP BY` form.
+
+### Expected behavior
+
+Two grouped rows (one per distinct value of `?o+1`: `2` and `3`), each with its own `COUNT(?o)` - the grouping key itself has no user-visible name (correct, since no `AS ?var` was given), but the query should still execute and group correctly, the same way it does with an explicit alias (see below).
+
+### Actual behavior
+
+```
+Traceback (most recent call last):
+  ...
+  File ".../rdflib/plugins/sparql/evaluate.py", line 483, in evalAggregateJoin
+    k = tuple(_eval(e, row, False) for e in group_expr)
+  File ".../rdflib/plugins/sparql/evalutils.py", line 138, in _eval
+    raise Exception("Cannot eval thing: %s (%s)" % (expr, type(expr)))
+Exception: Cannot eval thing: None (<class 'NoneType'>)
+```
+
+Confirmed the boundary precisely: `GROUP BY ?o` (bare variable) and `GROUP BY (?o+1 AS ?k)` (aliased computed expression) both execute correctly and produce the expected grouped results - only the un-aliased computed-expression form triggers this.
+
+### Suspected root cause
+
+```python
+if q.groupby:
+    conditions = []
+    # convert "GROUP BY (?expr as ?var)" to an Extend
+    for c in q.groupby.condition:
+        if isinstance(c, CompValue) and c.name == "GroupAs":
+            M = Extend(M, c.expr, c.var)
+            c = c.var
+        conditions.append(c)
+
+    M = Group(p=M, expr=conditions)
+```
+
+(`rdflib/plugins/sparql/algebra.py::translate`) The parser apparently produces a `GroupAs`-shaped condition for *both* the aliased and un-aliased forms of a parenthesized expression - but with `.var = None` for the un-aliased one (not yet independently confirmed at the parser-production level, only at this consumption point - the grammar/parser code itself wasn't traced further, since the algebra-level shape alone was sufficient to explain the crash). This produces `Extend(M, expr, None)` and appends the bare `None` (`c.var`, now `None`) to `conditions`, which becomes `Group.expr`. Neither `evalExtend` (asked to bind a computed value to variable `None`) nor `evalAggregateJoin` (asked to evaluate `None` as if it were a grouping-key expression) has any handling for this - `_eval`'s own fallback (`evalutils.py`) has no case for a bare `None` and raises unconditionally.
+
+### Impact
+
+Any SPARQL query using a parenthesized, un-aliased computed `GROUP BY` key - legal per the grammar, and a reasonable thing to write when the grouping key itself doesn't need to be separately selected/referenced - fails outright at query-execution time, not just at some edge of an unusual feature. Confirmed to also break the downstream `sparql1.2_to_rdf` project's own RDF encoding of the algebra tree (`to_rdf.py::_encode_list`, trying to build an `rdf:List` containing a bare Python `None` item) - but that's a *downstream* symptom of the same upstream defect, not a separate bug: the query cannot be executed by rdflib either way, so there is nothing for the downstream encoder to meaningfully preserve.
+
+### Suggested fix
+
+Either (a) the parser/`translate()` should not produce a `GroupAs`-shaped condition missing its own `var` for the un-aliased case at all - mint a synthetic variable for it right there (the fix applied in this repo, one layer earlier than `translate()` itself - see below), or (b) `evalAggregateJoin`/`evalExtend` could instead be made to treat a `None` variable/grouping-key entry as "compute but don't expose as a named result." (a) is confirmed simpler and fully sufficient: it doesn't require re-deriving which `Extend(var=None)` corresponds to which `None` entry in `Group.expr` after the fact (genuinely ambiguous once other, unrelated grouping conditions are mixed into the same query - only some conditions produce an `Extend` at all), since minting the variable *before* `translate()` runs means its own existing, unmodified pairing logic just naturally uses the same synthetic variable in both places.
+
+### Possible workaround / fix applied
+
+**Real fix applied**, not just a workaround: `starlight/query/evaluate_patches.py::patch_group_by_unaliased_expression_key` wraps `algebra.translate` itself (rebinding the module attribute, which `translateQuery`'s own internal call to `translate` picks up automatically via ordinary Python global-name lookup at call time - the same mechanism every other patch in this file already relies on). Before delegating to the original, unmodified `translate`, it walks `q.groupby.condition` (the *parse tree*, not yet-translated algebra) and, for any `GroupAs` condition missing its own `var` (confirmed via `dict.get(cond, "var")` returning `None` - the key is genuinely absent, not just falsy), assigns a freshly-minted synthetic `Variable` (`__starlight_groupkey_N__`, mirroring rdflib's own `__agg_N__` convention for `SAMPLE`'s synthetic result variables) directly onto that parse-tree node. Confirmed via direct reproduction that rdflib's own, completely unmodified `translate()` logic then naturally produces a correctly-paired `Extend(var=__starlight_groupkey_N__)`/`Group.expr=[Variable('__starlight_groupkey_N__'), ...]` - no other change needed anywhere, and the synthetic variable is confirmed (via real query execution, not just algebra inspection) to never leak into the projected result set, exactly as if the query's own author had never named it (which they hadn't). Verified: the original minimal reproduction now returns the correct two grouped rows; the two previously-working forms (bare-variable `GROUP BY`, and an *aliased* expression `GROUP BY (?o+1 AS ?k)`) are confirmed unaffected; the downstream `sparql1.2_to_rdf` project's own round-trip (`query_to_rdf`/`rdf_to_query`, which had been hitting this via `to_rdf.py::_encode_list`'s own defensive `None`-item check) now succeeds transparently once `starlight` is imported, with zero code changes needed in that project's own encoder/decoder beyond the diagnostic `_encode_list` already had for the case where `starlight` *isn't* imported.
+
+### Status
+
+Found 2026-08-09 while building `sparql1.2_to_rdf`'s own SHACL shapes for `GROUP BY`/aggregates (`shapes.py`'s `GroupShape`), which needed to first confirm `Group.expr`'s real algebra shape empirically. Root-caused the same day by reproducing the identical crash against plain, unmodified rdflib with zero downstream-project code involved. Initially believed to have no viable in-repo patch point (only a downstream diagnostic was added, in `sparql1.2_to_rdf/to_rdf.py::_encode_list`) - reconsidered per direct instruction that a diagnostic alone isn't a real solution, and a genuine fix was found and applied the same day (see Possible workaround/fix applied above). Reporting upstream planned, not yet filed. Verified: zero regressions across this repo's own suite (1001 passed) or the downstream `sparql1.2_to_rdf` project's suite (204 local + 323 W3C-marked, same 4 pre-existing deliberate divergences); the downstream project gained one new passing regression test (`test_phase2_aggregates.py::test_unaliased_expression_group_by_key_roundtrips`) confirming the full round-trip (encode → decode → execute, not just direct execution) works correctly once `starlight` is imported.

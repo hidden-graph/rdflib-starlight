@@ -131,6 +131,35 @@ def clear_oxigraph() -> None:
     resp.raise_for_status()
 
 
+# Same shape as the Oxigraph helpers above, for the second native rdf-1.2
+# engine. Endpoint/dataset-name convention matches
+# tests/integration/test_fuseki_backend.py exactly (a pre-created "starlight"
+# dataset, checked via Fuseki's own /$/ping admin endpoint rather than the
+# dataset URL itself - a missing dataset would otherwise look identical to
+# "Fuseki isn't running at all", which /$/ping disambiguates).
+FUSEKI_BASE = "http://localhost:3030/starlight"
+FUSEKI_QUERY_URL = f"{FUSEKI_BASE}/query"
+FUSEKI_UPDATE_URL = f"{FUSEKI_BASE}/update"
+
+
+def fuseki_available() -> bool:
+    try:
+        return requests.get("http://localhost:3030/$/ping", timeout=2).status_code == 200
+    except Exception:
+        return False
+
+
+def clear_fuseki() -> None:
+    """Same as clear_oxigraph(), against the Fuseki endpoint instead."""
+    resp = requests.post(
+        FUSEKI_UPDATE_URL,
+        data="CLEAR ALL",
+        headers={"Content-Type": "application/sparql-update"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+
 def _parse_json_term(term: dict):
     kind = term["type"]
     if kind == "uri":

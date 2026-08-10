@@ -369,9 +369,44 @@ def extract_fields(stmt, typ, blank_counter=None):
     elif typ == 'triple':
         body = s.rstrip('.')
         subj, rest = next_token(body.strip())
+        inner_triples = []
         if subj == '[]' and blank_counter is not None:
             subj = f'_:sl_{blank_counter[0]}'
             blank_counter[0] += 1
+        elif (
+            blank_counter is not None
+            and isinstance(subj, str)
+            and subj.startswith('[') and subj.endswith(']')
+        ):
+            # A non-empty bracketed property list used as the statement's
+            # own subject - Turtle's blankNodePropertyList production,
+            # legal in subject position exactly like object position
+            # (`[ :q :z ] .` or `[ :q :z ] :b :c .`, vs. the already-handled
+            # `:s :p [ :q :z ] .`). Mirrors expand_triple_set()'s own
+            # object-position expansion below - mint a fresh blank node,
+            # recursively parse the bracket's inner content as if it were
+            # `{bnode} inner .`, and use the blank node as this statement's
+            # real subject. Must happen here, not in expand_triple_set():
+            # when nothing follows the closing bracket (`rest` empty, the
+            # `if subj and rest:` guard below never fires), extract_fields()
+            # is the only place that ever sees the whole statement, and
+            # previously just silently returned an empty triple_set instead
+            # of raising or expanding - confirmed via a real Fuseki CONSTRUCT
+            # response (`[ rdf:reifies <<( ... )>>; :q :z ] .`) round-tripped
+            # through this parser, which produced zero triples with no
+            # error at all. The one existing W3C Turtle 1.2 fixture using
+            # this shape (turtle12-syntax-inside-01.ttl) is a
+            # TestTurtlePositiveSyntax case, which only checks "parses
+            # without raising" - never the resulting triples - so this gap
+            # had zero test coverage that could have caught it.
+            bnode = f'_:sl_{blank_counter[0]}'
+            blank_counter[0] += 1
+            inner = subj[1:-1].strip()
+            if inner:
+                inner_fields = extract_fields(f'{bnode} {inner} .', 'triple', blank_counter)
+                if inner_fields and 'triple_set' in inner_fields:
+                    inner_triples = inner_fields['triple_set']
+            subj = bnode
         if subj and rest:
             triple_set = []
             for group in _split_on_delimiter(rest, ';'):
@@ -389,7 +424,9 @@ def extract_fields(stmt, typ, blank_counter=None):
                         entry['annotations'] = annotations
                         entry['object_str'] = obj_tok
                     triple_set.append(entry)
-            return {'triple_set': triple_set}
+            return {'triple_set': inner_triples + triple_set}
+        if inner_triples:
+            return {'triple_set': inner_triples}
     return {}
 
 

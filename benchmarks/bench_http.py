@@ -7,10 +7,7 @@ Compares rdf-1.1 and rdf-1.2 (Fuseki 5.5+ and Oxigraph) modes at
 the same scale points used in bench_inmemory.py.
 
 Requirements:
-  Fuseki:   docker run -d --name fuseki-bench -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest
-            curl -s -X POST http://localhost:3030/$/datasets -u admin:admin \\
-                 -H "Content-Type: application/x-www-form-urlencoded" \\
-                 --data "dbName=bench&dbType=mem"
+  Fuseki:   docker run -d --name fuseki-bench -p 3030:3030 atomgraph/fuseki:latest --update --mem --ping /bench
 
   Oxigraph: docker run -d --name oxigraph-bench -p 7878:7878 \\
               ghcr.io/oxigraph/oxigraph serve --location /data --bind 0.0.0.0:7878

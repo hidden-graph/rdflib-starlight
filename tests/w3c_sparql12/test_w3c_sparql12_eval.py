@@ -52,10 +52,14 @@ from starlight.model.triple import TripleTerm
 
 from .harness import (
     bindings_match,
+    clear_fuseki,
     clear_oxigraph,
     data_format,
     load_index,
+    fuseki_available,
     oxigraph_available,
+    FUSEKI_QUERY_URL,
+    FUSEKI_UPDATE_URL,
     OXIGRAPH_QUERY_URL,
     OXIGRAPH_UPDATE_URL,
     parse_srj,
@@ -96,6 +100,16 @@ def _new_oxigraph_graph(entry) -> StarlightGraph | StarlightDataset:
     published, see the module docstring).
     """
     store = SPARQLUpdateStore(query_endpoint=OXIGRAPH_QUERY_URL, update_endpoint=OXIGRAPH_UPDATE_URL)
+    if entry.data_file and data_format(entry) in _DATASET_FORMATS:
+        return StarlightDataset(store=store, backend="rdf-1.2")
+    return StarlightGraph(store=store, identifier=DATASET_DEFAULT_GRAPH_ID, backend="rdf-1.2")
+
+
+def _new_fuseki_graph(entry) -> StarlightGraph | StarlightDataset:
+    """Same as _new_oxigraph_graph(), against a live Fuseki endpoint instead
+    - see that function's own docstring for why DATASET_DEFAULT_GRAPH_ID
+    matters here."""
+    store = SPARQLUpdateStore(query_endpoint=FUSEKI_QUERY_URL, update_endpoint=FUSEKI_UPDATE_URL)
     if entry.data_file and data_format(entry) in _DATASET_FORMATS:
         return StarlightDataset(store=store, backend="rdf-1.2")
     return StarlightGraph(store=store, identifier=DATASET_DEFAULT_GRAPH_ID, backend="rdf-1.2")
@@ -160,6 +174,42 @@ def _mark_known_divergences(entries, known: dict):
 
 
 EVAL_SELECT_OXIGRAPH = _mark_known_divergences(EVAL_SELECT, _OXIGRAPH_KNOWN_DIVERGENCES)
+
+# Same mechanism as _OXIGRAPH_KNOWN_DIVERGENCES above, for Fuseki. A first
+# full run (2026-08-10) against a live Fuseki 5.5.0 endpoint found 8
+# failures - 5 turned out to be a real starlight bug (extract_fields()
+# silently dropped a non-empty bracketed property list used as a
+# statement's own subject, e.g. `[ :q :z ] .` - see
+# starlight/parsers/syntax.py's own comment there), now fixed, not listed
+# here. These 3 are a genuine Fuseki-only conformance bug: TRIPLE()
+# validates its `predicate` argument but not its `subject` argument
+# (confirmed against a second engine, Oxigraph, which correctly rejects the
+# identical case) - see docs/fuseki-upstream-issues.md Issue 1.
+#
+# NOT fixed by upgrading the container - confirmed directly (2026-08-10)
+# against a live jena-6.1.0 endpoint (the latest release at the time):
+# apache/jena#3658 (merged 2025-12-20, first released in jena-6.0.0) only
+# restricts a triple term's subject in `VALUES`/`BIND`-wrapped *literal*
+# `<<( )>>` syntax - it never touched TRIPLE()'s own function
+# implementation, which every fixture below actually uses
+# (`BIND(TRIPLE(?subject, ?predicate, ?object) AS ?triple)`). Re-ran
+# expression/triple-on-triple-terms.rq itself through StarlightGraph
+# against jena-6.1.0: identical failure to jena-5.5.0. Reported upstream as
+# apache/jena#4141 (2026-08-10, open) - see docs/fuseki-upstream-issues.md
+# Issue 1's "Status" section for the full investigation.
+_FUSEKI_KNOWN_DIVERGENCES: dict = {
+    "triple-on-literals": "Fuseki: TRIPLE() doesn't validate its subject argument - "
+    "confirmed still present in jena-6.1.0 (latest), not just jena-5.5.0 - see "
+    "docs/fuseki-upstream-issues.md Issue 1",
+    "triple-on-str-literals": "Fuseki: TRIPLE() doesn't validate its subject argument - "
+    "confirmed still present in jena-6.1.0 (latest), not just jena-5.5.0 - see "
+    "docs/fuseki-upstream-issues.md Issue 1",
+    "triple-on-triple-terms": "Fuseki: TRIPLE() doesn't validate its subject argument - "
+    "confirmed still present in jena-6.1.0 (latest), not just jena-5.5.0 - see "
+    "docs/fuseki-upstream-issues.md Issue 1",
+}
+
+EVAL_SELECT_FUSEKI = _mark_known_divergences(EVAL_SELECT, _FUSEKI_KNOWN_DIVERGENCES)
 
 # Historical note: this table used to document 4 known, understood
 # limitations of the in-memory (rdf-1.1, tt:HASH content-addressed URI
@@ -248,6 +298,15 @@ _oxigraph = pytest.mark.skipif(
     reason="Oxigraph not running - start with: "
     "docker run -d --name oxigraph-test -p 7878:7878 "
     "ghcr.io/oxigraph/oxigraph serve --location /data --bind 0.0.0.0:7878",
+)
+
+_fuseki = pytest.mark.skipif(
+    not fuseki_available(),
+    reason="Fuseki not running - start with: "
+    "docker run -d --name fuseki-test -p 3030:3030 atomgraph/fuseki:latest --update --mem --ping /starlight "
+    "(see tests/integration/test_fuseki_backend.py); needs Fuseki 5.5+ for native RDF 1.2 <<( )>> syntax - "
+    "not stain/jena-fuseki (only reaches 5.1.0), and not secoresearch/fuseki (tops out at 5.5.0, no longer "
+    "updated).",
 )
 
 
@@ -381,6 +440,47 @@ def test_eval_construct_original_query_oxigraph(entry):
 
     clear_oxigraph()
     g = _new_oxigraph_graph(entry)
+    if entry.data_file:
+        g.parse(data=entry.read(entry.data_file), format=data_format(entry))
+
+    actual_graph = g.query(query_text).graph
+    assert to_isomorphic(_skolemize_graph(actual_graph)) == to_isomorphic(_skolemize_graph(expected_graph))
+
+
+# ---------------------------------------------------------------------------
+# Same two checks again, run against a live Fuseki endpoint - the second
+# native rdf-1.2 engine option (see starlight/backends/native.py's own
+# module docstring: this repo does zero query/data rewriting for either
+# native-backend engine, so what Fuseki accepts/returns is exactly what a
+# client sees, same as the Oxigraph tests above).
+# ---------------------------------------------------------------------------
+
+@_no_data
+@_fuseki
+@pytest.mark.parametrize("entry", EVAL_SELECT_FUSEKI, ids=lambda e: e.test_iri)
+def test_eval_select_original_query_fuseki(entry):
+    query_text = entry.read(entry.query_file)
+    expected = parse_srj(entry.read(entry.result_file))
+
+    clear_fuseki()
+    g = _new_fuseki_graph(entry)
+    if entry.data_file:
+        g.parse(data=entry.read(entry.data_file), format=data_format(entry))
+
+    actual = [{k: v for k, v in dict(row).items() if v is not None} for row in g.query(query_text).bindings]
+    assert bindings_match(actual, expected)
+
+
+@_no_data
+@_fuseki
+@pytest.mark.parametrize("entry", EVAL_CONSTRUCT, ids=lambda e: e.test_iri)
+def test_eval_construct_original_query_fuseki(entry):
+    query_text = entry.read(entry.query_file)
+    expected_graph = StarlightGraph()
+    expected_graph.parse(data=entry.read(entry.result_file), format="turtle12")
+
+    clear_fuseki()
+    g = _new_fuseki_graph(entry)
     if entry.data_file:
         g.parse(data=entry.read(entry.data_file), format=data_format(entry))
 

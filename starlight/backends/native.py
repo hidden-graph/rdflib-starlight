@@ -215,11 +215,18 @@ def _parse_json_term(term_dict: dict):
             # (pytest's own traceback formatting, notably) hits a *second*,
             # unrelated AttributeError on top of the first, obscuring what
             # actually went wrong.
+            #
+            # Not just the nested-triple-term case: TripleTerm.__init__ also
+            # rejects a Literal-valued subject/predicate (the fuller RDF 1.2
+            # rule, ttSubject ::= iri | BlankNode, verb ::= iri) - confirmed
+            # via the same live Fuseki bug that a Literal-valued `subject`
+            # argument to TRIPLE() is accepted just as wrongly as a
+            # triple-term-valued one.
             raise ValueError(
-                f'native backend returned a triple term with an invalid RDF 1.2 subject '
-                f'(subject={s!r}, predicate={p!r}, object={o!r}) - a triple term\'s own '
-                f'subject may never itself be a triple term. This indicates a spec-conformance '
-                f'bug in the native SPARQL engine, not in this library.'
+                f'native backend returned a triple term with an invalid RDF 1.2 subject or '
+                f'predicate (subject={s!r}, predicate={p!r}, object={o!r}) - {e}. This '
+                f'indicates a spec-conformance bug in the native SPARQL engine, not in this '
+                f'library.'
             ) from e
     raise ValueError(f'Unknown SPARQL JSON term type: {t!r}')
 

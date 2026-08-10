@@ -28,10 +28,7 @@ python benchmarks/bench_scaling.py
 ## Starting Fuseki
 
 ```bash
-docker run -d --name fuseki-bench -p 3030:3030 -e ADMIN_PASSWORD=admin secoresearch/fuseki:latest
-curl -s -X POST http://localhost:3030/\$/datasets -u admin:admin \
-     -H "Content-Type: application/x-www-form-urlencoded" \
-     --data "dbName=bench&dbType=mem"
+docker run -d --name fuseki-bench -p 3030:3030 atomgraph/fuseki:latest --update --mem --ping /bench
 ```
 
 ## Starting Oxigraph
