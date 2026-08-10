@@ -14,8 +14,10 @@ rdflib-starlight works by translating RDF 1.2 data and queries into RDF 1.1 form
 
 > **Scope note:** rdflib-starlight focuses on reification and base-direction literals — the two RDF 1.2 data-model additions. Base-direction support for language-tagged literals (`"text"@en--ltr`, `rdf:dirLangString`) is available as `DirLangString`; see [rdflib-starlight.md](docs/rdflib-starlight.md) for details.
 
+Not yet published to PyPI — install the checkout directly:
+
 ```
-pip install rdflib-starlight
+pip install -e /path/to/rdflib-starlight
 ```
 
 ## Key features

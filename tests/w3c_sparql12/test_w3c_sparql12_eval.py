@@ -198,15 +198,12 @@ EVAL_SELECT_OXIGRAPH = _mark_known_divergences(EVAL_SELECT, _OXIGRAPH_KNOWN_DIVE
 # apache/jena#4141 (2026-08-10, open) - see docs/fuseki-upstream-issues.md
 # Issue 1's "Status" section for the full investigation.
 _FUSEKI_KNOWN_DIVERGENCES: dict = {
-    "triple-on-literals": "Fuseki: TRIPLE() doesn't validate its subject argument - "
-    "confirmed still present in jena-6.1.0 (latest), not just jena-5.5.0 - see "
-    "docs/fuseki-upstream-issues.md Issue 1",
-    "triple-on-str-literals": "Fuseki: TRIPLE() doesn't validate its subject argument - "
-    "confirmed still present in jena-6.1.0 (latest), not just jena-5.5.0 - see "
-    "docs/fuseki-upstream-issues.md Issue 1",
-    "triple-on-triple-terms": "Fuseki: TRIPLE() doesn't validate its subject argument - "
-    "confirmed still present in jena-6.1.0 (latest), not just jena-5.5.0 - see "
-    "docs/fuseki-upstream-issues.md Issue 1",
+    "triple-on-literals": "Jena ARQ: TRIPLE() doesn't validate its subject argument - "
+    "reported upstream as apache/jena#4141 - see docs/fuseki-upstream-issues.md Issue 1",
+    "triple-on-str-literals": "Jena ARQ: TRIPLE() doesn't validate its subject argument - "
+    "reported upstream as apache/jena#4141 - see docs/fuseki-upstream-issues.md Issue 1",
+    "triple-on-triple-terms": "Jena ARQ: TRIPLE() doesn't validate its subject argument - "
+    "reported upstream as apache/jena#4141 - see docs/fuseki-upstream-issues.md Issue 1",
 }
 
 EVAL_SELECT_FUSEKI = _mark_known_divergences(EVAL_SELECT, _FUSEKI_KNOWN_DIVERGENCES)
