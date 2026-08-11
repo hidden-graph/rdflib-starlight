@@ -52,5 +52,5 @@ starlight = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: tests requiring a running Fuseki or Oxigraph server",
+    "integration: tests requiring a running Fuseki/Oxigraph server or a real backend store (e.g. SQLite via rdflib-sqlalchemy) - the 'full testing' tier",
 ]

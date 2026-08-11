@@ -1276,6 +1276,8 @@ class StarlightGraph(Graph):
         raw = Graph(store=self.store, identifier=self.identifier)
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
+        pending_recipes = None
+        pending_pv = None
         if isinstance(query_object, str):
             from starlight.query.query_cache import store_accepts_prepared_query
             if store_accepts_prepared_query(self.store):
@@ -1294,12 +1296,45 @@ class StarlightGraph(Graph):
                 # a remote server, so local rdflib-side re-parsing was never
                 # the bottleneck. Falls back to exactly the pre-caching
                 # behavior for these stores.
+                #
+                # TRIPLE()/isTRIPLE(TRIPLE(...))/STRLANGDIR() (and
+                # SUBJECT()/PREDICATE()/OBJECT() on a value that isn't
+                # already sitting in the store) rewrite to calls on
+                # starlight's own custom SPARQL functions - registered only
+                # in this local process, invisible to a genuinely remote
+                # engine. Sent as-is, those BINDs would silently come back
+                # unbound (SPARQL's own error semantics for an unknown
+                # extension function), not raise. decompose_for_remote()
+                # parses the rewritten text into a real algebra tree, strips
+                # every Extend that depends on one of those functions, and
+                # returns the recipes needed to compute them locally, per
+                # result row, once the simplified query's results are back -
+                # see starlight/query/remote_decompose.py's module docstring.
                 from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
                 query_object = rewrite_sparql12_to_11(query_object)
+                from rdflib.plugins.sparql import prepareQuery
+                effective_ns = initNs if initNs else dict(self.namespaces())
+                prepared = prepareQuery(query_object, initNs=effective_ns, base=kwargs.get('base'))
+                if prepared.algebra.name == 'SelectQuery':
+                    from starlight.query.remote_decompose import decompose_for_remote
+                    original_pv = list(prepared.algebra.p.PV)
+                    recipes = decompose_for_remote(prepared)
+                    if recipes:
+                        from rdflib.plugins.sparql.algebra import translateAlgebra
+                        query_object = translateAlgebra(prepared)
+                        pending_recipes = recipes
+                        pending_pv = original_pv
         init_bindings = self._encode_init_bindings(initBindings)
         r = raw.query(query_object, processor=processor, result=result,
                       initNs=initNs, initBindings=init_bindings,
                       use_store_provided=use_store_provided, **kwargs)
+        if pending_recipes is not None:
+            from starlight.query.remote_decompose import evaluate_recipes_locally
+            r.bindings = [
+                {var: evaluate_recipes_locally(pending_recipes, row, raw).get(var) for var in pending_pv}
+                for row in r.bindings
+            ]
+            r.vars = pending_pv
         if r.type == 'SELECT':
             restore_select_bindings(r, self._restore)
         elif r.type == 'CONSTRUCT':

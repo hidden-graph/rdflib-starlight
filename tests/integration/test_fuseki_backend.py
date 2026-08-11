@@ -393,3 +393,68 @@ class TestFusekiRdf12SparqlFunctions:
         assert row[r.vars[2]] == DirLangString('hi', 'en', 'ltr')
         assert row[r.vars[3]] == Literal('en')
         assert row[r.vars[4]] == Literal(True)
+
+
+# ---------------------------------------------------------------------------
+# Same four functions, but through the rdf-1.1 (default) backend against a
+# real remote store - a genuinely different code path from
+# TestFusekiRdf12SparqlFunctions above: rdf-1.2 mode sends the query text
+# straight through unmodified (Fuseki understands it natively), while
+# rdf-1.1 mode routes it through starlight's own SPARQL 1.2->1.1 text
+# rewriter (sparql12_to_11.py) first, then sends *that* rewritten text to
+# Fuseki. That rewritten text - and its interaction with a real remote
+# store specifically, not just the in-memory backend the unit suite already
+# covers this against - had no live coverage at all before this: every
+# TRIPLE()/isTRIPLE()/DirLangString/LANGDIR test in this file used
+# sg_rdf12, never the plain sg fixture "full testing" (SQLite/Fuseki/
+# Oxigraph plumbing, as opposed to purpose-2 cross-engine parity - see the
+# project's own testing-strategy notes) is meant to close this kind of gap.
+# ---------------------------------------------------------------------------
+
+@fuseki
+class TestFusekiRdf11SparqlFunctions:
+
+    def test_triple_constructor_function(self, sg):
+        r = sg.query(f"""
+            SELECT (TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>) AS ?t) WHERE {{}}
+        """)
+        assert r.bindings[0][r.vars[0]] == TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
+
+    def test_is_triple_spec_name(self, sg):
+        r = sg.query(f"""
+            SELECT (isTRIPLE(TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>)) AS ?v) WHERE {{}}
+        """)
+        assert r.bindings[0][r.vars[0]] == Literal(True)
+
+    def test_dirlangstring_write_read(self, sg):
+        from starlight.model.dirlangstring import DirLangString
+        d = DirLangString('hello', 'en', 'rtl')
+        sg.add((URIRef(EX+'s'), URIRef(EX+'p'), d))
+        results = list(sg.triples((URIRef(EX+'s'), URIRef(EX+'p'), None)))
+        assert results == [(URIRef(EX+'s'), URIRef(EX+'p'), d)]
+
+    def test_dirlangstring_sparql_literal(self, sg):
+        """A dirLangString literal written directly in query text (BIND),
+        not via .add() - the rewriter has to correctly encode/decode it,
+        and the value has to survive the round trip through a real remote
+        rdf-1.1 store, not just local Python memory."""
+        from starlight.model.dirlangstring import DirLangString
+        r = sg.query('SELECT (?x AS ?greeting) WHERE { BIND("hi"@en--ltr AS ?x) }')
+        assert r.bindings[0][r.vars[0]] == DirLangString('hi', 'en', 'ltr')
+
+    def test_langdir_hasLangdir_strlangdir(self, sg):
+        r = sg.query("""
+            SELECT (LANGDIR("hi"@en--rtl) AS ?dir)
+                   (hasLANGDIR("hi"@en--rtl) AS ?hd)
+                   (STRLANGDIR("hi", "en", "ltr") AS ?sld)
+                   (LANG("hi"@en--rtl) AS ?l)
+                   (hasLANG("hi"@en--rtl) AS ?hl)
+            WHERE {}
+        """)
+        from starlight.model.dirlangstring import DirLangString
+        row = r.bindings[0]
+        assert row[r.vars[0]] == Literal('rtl')
+        assert row[r.vars[1]] == Literal(True)
+        assert row[r.vars[2]] == DirLangString('hi', 'en', 'ltr')
+        assert row[r.vars[3]] == Literal('en')
+        assert row[r.vars[4]] == Literal(True)

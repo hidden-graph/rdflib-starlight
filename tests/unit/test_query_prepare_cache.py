@@ -208,9 +208,16 @@ def test_store_accepts_prepared_query_true_for_default_memory_store():
 def test_starlight_graph_over_sparql_update_store_falls_back_to_string(monkeypatch, counting_prepare_query):
     """A StarlightGraph backed directly by a SPARQLUpdateStore (the rdf-1.1
     encoding path, not the native rdf-1.2 backend, which bypasses this code
-    entirely) must not call prepare_query_cached at all - only the plain
-    rewrite - since the prepared Query object it would produce can't safely
-    reach this store's own query() method.
+    entirely) must never hand this store's own query() method a prepared
+    Query object - it can't safely accept one (confirmed via real Fuseki
+    testing). prepare_query_cached (the cross-call cache) is skipped
+    entirely for this store type. A local, uncached prepareQuery() call
+    still happens once per query() call, though - starlight/query/
+    remote_decompose.py needs a real algebra tree to find and strip any
+    Extend that depends on a custom SPARQL function starlight registers
+    only in this process (TRIPLE()/SUBJECT()/etc. - see that module's
+    docstring) - but its output is always translated back to a plain string
+    before reaching the store.
     """
     from rdflib.plugins.stores.sparqlstore import SPARQLUpdateStore
 
@@ -239,4 +246,4 @@ def test_starlight_graph_over_sparql_update_store_falls_back_to_string(monkeypat
         pass
 
     assert isinstance(captured.get("query_object"), str)
-    assert counting_prepare_query["n"] == 0
+    assert counting_prepare_query["n"] == 1
