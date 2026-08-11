@@ -124,6 +124,15 @@ g = StarlightGraph(store=store, backend='rdf-1.2')
 - [`examples/ttl12_roundtrip_demo.py`](examples/ttl12_roundtrip_demo.py) — parses Turtle 1.2, then prints three views of the same graph side by side: the input, the internal RDF 1.1 encoding (normally hidden), and the Turtle 1.2 output.
 - [`examples/sqlalchemy_store_demo.py`](examples/sqlalchemy_store_demo.py) — writes to a SQLite-backed `StarlightGraph`, reloads it in a fresh process, and runs a SPARQL 1.2 query against the reloaded data. Requires the `sqlalchemy` extra: `pip install -e ".[sqlalchemy]"`.
 
+## Testing
+
+```bash
+pytest tests/ -m "not integration" -v   # unit + W3C conformance — no server needed
+pytest tests/ -m "integration" -v       # + real backends (Fuseki/Oxigraph/SQLite)
+```
+
+See [docs/testing-strategy.md](docs/testing-strategy.md) for the full tier breakdown (including cross-backend parity and performance benchmarks) and what each one is actually checking.
+
 ## License
 
 MIT
