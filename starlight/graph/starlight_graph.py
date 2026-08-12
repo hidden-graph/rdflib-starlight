@@ -29,6 +29,19 @@ RDF_REIFIES     = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 # Valid backend mode identifiers
 VALID_BACKENDS = frozenset({'rdf-1.1', 'rdf-1.2'})
 
+# SPARQL 1.2 -> 1.1 translation mechanism for the rdf-1.1 backend.
+# 'legacy' (default): starlight.query.sparql12_to_11's hand-rolled,
+# regex/text-based rewriter - unchanged, still the default until a real
+# parity test suite (see the cross-repo migration plan) is complete.
+# 'algebra_ir': sparql1_2_to_rdf's grammar/algebra-based pipeline (parse via
+# a real grammar extension, encode/decode as RDF, lower 1.2 algebra to 1.1)
+# - opt-in only for now. Known current limitation: falls back to 'legacy'
+# for any call passing initNs/base, since sparql1_2_to_rdf.parse12.
+# prepare_query_12 has no equivalent parameter yet (prefixes must be
+# inline PREFIX declarations in the query text) - see query()'s own
+# comment at the call site.
+VALID_SPARQL_PIPELINES = frozenset({'legacy', 'algebra_ir'})
+
 # rdf:TripleTerm type URI — emitted by the JSON-LD 1.2 serializer; treated as
 # internal encoding so it is never surfaced through triples() / __len__ etc.
 _RDF_TRIPLE_TERM = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#TripleTerm'
@@ -162,11 +175,16 @@ class StarlightGraph(Graph):
     serialization, etc.) are inherited and work without modification.
     """
 
-    def __init__(self, *args, backend: str = 'rdf-1.1', **kwargs):
+    def __init__(self, *args, backend: str = 'rdf-1.1', sparql_pipeline: str = 'legacy', **kwargs):
         if backend not in VALID_BACKENDS:
             raise ValueError(f"backend must be one of {sorted(VALID_BACKENDS)}, got {backend!r}")
+        if sparql_pipeline not in VALID_SPARQL_PIPELINES:
+            raise ValueError(
+                f"sparql_pipeline must be one of {sorted(VALID_SPARQL_PIPELINES)}, got {sparql_pipeline!r}"
+            )
         super().__init__(*args, **kwargs)
         self._backend = backend
+        self._sparql_pipeline = sparql_pipeline
         self._tt_registry: dict = {}   # canonical (s_key, p, o_key) -> URIRef (rdf-1.1 only)
         self._tt_nodes: dict = {}      # URIRef -> TripleTerm (rdf-1.1 only)
         self._invalidate_callback = None  # set by StarlightDataset to clear raw query cache
@@ -1278,9 +1296,25 @@ class StarlightGraph(Graph):
             raw.bind(prefix, ns)
         pending_recipes = None
         pending_pv = None
+        from starlight.query.query_cache import store_accepts_prepared_query
+        remote_only_store = not store_accepts_prepared_query(self.store)
         if isinstance(query_object, str):
-            from starlight.query.query_cache import store_accepts_prepared_query
-            if store_accepts_prepared_query(self.store):
+            if self._sparql_pipeline == 'algebra_ir' and not initNs and not kwargs.get('base'):
+                # New pipeline (opt-in, see VALID_SPARQL_PIPELINES's own
+                # comment): sparql1_2_to_rdf's real grammar parses the
+                # query, encodes/decodes it as RDF, then lowers the 1.2
+                # algebra to a plain SPARQL 1.1 one and hands back an
+                # already-executable Query object directly - no
+                # text-rewrite step at all, replacing rewrite_sparql12_to_11
+                # for this call. Falls through to the generalized non-str
+                # handling below (shared with any other pre-built Query
+                # object) for the remote-store case.
+                from sparql1_2_to_rdf.parse12 import prepare_query_12
+                from sparql1_2_to_rdf.lower_rdf11 import query_to_rdf11, rdf11_to_query
+                prepared_12 = prepare_query_12(query_object)
+                rdf_graph, root = query_to_rdf11(prepared_12)
+                query_object = rdf11_to_query(rdf_graph, root)
+            elif not remote_only_store:
                 from starlight.query.query_cache import prepare_query_cached
                 effective_ns = initNs if initNs else dict(self.namespaces())
                 query_object = prepare_query_cached(
@@ -1324,6 +1358,70 @@ class StarlightGraph(Graph):
                         query_object = translateAlgebra(prepared)
                         pending_recipes = recipes
                         pending_pv = original_pv
+
+        # Generalized remote-store handling for a pre-built Query object -
+        # whether it came from the algebra_ir branch above, or was handed
+        # to this method directly by a caller (e.g. sparql1_2_to_rdf's own
+        # rdf11_to_query, or starlight.query.sparql_api.prepareQuery).
+        # Previously nothing here at all: a string-only store
+        # (SPARQLStore/SPARQLUpdateStore) would crash outright on a
+        # non-str query_object (confirmed via real Fuseki testing,
+        # AssertionError in sparqlstore.py) - not just miss the
+        # decompose-for-remote treatment covered above for the legacy
+        # text-rewrite path, an outright crash. decompose_for_remote()
+        # itself needs no changes to support this: it only inspects
+        # query_object.algebra by structure/known-IRI matching, indifferent
+        # to which pipeline produced the object (confirmed: the
+        # custom-function IRIs sparql1_2_to_rdf's own lower_rdf11.py
+        # produces - TT_HASH_FN etc. - are the literal same URIs
+        # starlight's own sparql12_to_11.py registers, both deriving from
+        # starlight.model.encoding.TT_NS/DIRLANG_NS). Only SELECT gets the
+        # decompose treatment (decompose_for_remote's own scope, see its
+        # docstring); CONSTRUCT/ASK/DESCRIBE still get turned into text so
+        # they at least reach the remote store, just without custom
+        # function support there yet - a known, narrower gap than before
+        # (nothing worked here at all previously), not a regression.
+        #
+        # Serializes via sparql1_2_to_rdf's own _AlgebraTranslator11, not
+        # plain rdflib's translateAlgebra - confirmed (sparql1_2_to_rdf's
+        # own CLAUDE.md, and reproduced directly via a real Fuseki HTTP 400)
+        # that plain translateAlgebra has *zero* ConstructQuery handling at
+        # all; _AlgebraTranslator11 is plain _AlgebraTranslator (already
+        # patched here via algebra_translator_patches.py) plus exactly that
+        # gap filled in, built for exactly this purpose - see its own
+        # module docstring in lower_rdf11.py.
+        if pending_recipes is None and not isinstance(query_object, str) and remote_only_store:
+            from sparql1_2_to_rdf.lower_rdf11 import _AlgebraTranslator11
+            recipes = []
+            if query_object.algebra.name == 'SelectQuery':
+                from starlight.query.remote_decompose import decompose_for_remote
+                original_pv = list(query_object.algebra.p.PV)
+                recipes = decompose_for_remote(query_object)
+            else:
+                # decompose_for_remote is SelectQuery-only (its own scope,
+                # see its docstring) - a ConstructQuery/AskQuery/
+                # DescribeQuery whose template or pattern still depends on
+                # a custom function (e.g. a CONSTRUCT template minting a
+                # fresh triple term - confirmed via a real Fuseki run: the
+                # BIND computing the term's hash silently leaves it
+                # unbound, and CONSTRUCT's own rule for a template triple
+                # with an unbound term drops it - no error, no data) has no
+                # decomposition support yet. Fail loudly instead of
+                # silently sending an unusable query and getting back
+                # incomplete/wrong results.
+                from starlight.query.remote_decompose import contains_custom_function_call
+                if contains_custom_function_call(query_object.algebra):
+                    raise NotImplementedError(
+                        f"{query_object.algebra.name} depends on a starlight custom SPARQL "
+                        "function (e.g. constructing a fresh triple term or dirLangString) "
+                        "and cannot run against this remote store yet - only SELECT is "
+                        "supported for this case so far. See remote_decompose.py."
+                    )
+            query_object = _AlgebraTranslator11(query_object).translateAlgebra()
+            if recipes:
+                pending_recipes = recipes
+                pending_pv = original_pv
+
         init_bindings = self._encode_init_bindings(initBindings)
         r = raw.query(query_object, processor=processor, result=result,
                       initNs=initNs, initBindings=init_bindings,

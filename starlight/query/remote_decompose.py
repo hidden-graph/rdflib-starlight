@@ -76,6 +76,26 @@ def _is_custom_function_call(expr: Any) -> bool:
     )
 
 
+def contains_custom_function_call(node: Any) -> bool:
+    """True iff a call to one of starlight's custom SPARQL functions
+    (``_CUSTOM_FUNCTION_IRIS``) appears anywhere in ``node``, recursively -
+    a generic tree walk, not scoped to any particular algebra shape (unlike
+    ``decompose_for_remote``, which only strips ``Extend`` nodes under a
+    ``SelectQuery``). Used to *detect* the problem in shapes
+    ``decompose_for_remote`` doesn't (yet) know how to *fix* - e.g. a
+    ``ConstructQuery`` template minting a fresh triple term - so a caller
+    can fail loudly instead of silently sending an unusable query to a
+    remote store.
+    """
+    if _is_custom_function_call(node):
+        return True
+    if isinstance(node, CompValue):
+        return any(contains_custom_function_call(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(contains_custom_function_call(item) for item in node)
+    return False
+
+
 def _strip_custom_extends(node: Any, local_vars: set, recipes: list) -> Any:
     """Recursively strip Extend nodes that (transitively) depend on a
     starlight custom function, appending (var, expr) recipes for each one
