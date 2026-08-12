@@ -147,6 +147,20 @@ from starlight.query.evaluate_patches import (
     patch_group_by_unaliased_expression_key as _patch_group_by_unaliased_expression_key,
 )
 
+# Fix for a confirmed rdflib bug (a different module/phase again - result
+# *materialization*, rdflib.query.Result, not parsing/algebra/evaluation): a
+# SELECT row with zero variable bindings (SELECT * over a pattern with no
+# variables at all - "does this fact exist?") is a real, correct solution,
+# but Result.__iter__ checks `if b:` before yielding it, and an empty dict is
+# falsy - so it's silently dropped, indistinguishable from "no more rows".
+# Result.bindings/len() are unaffected; only iterating the Result object
+# (list(result), for row in result) loses it. See
+# docs/rdflib-upstream-issues.md Issue 6 and
+# starlight/query/result_patches.py::patch_result_iter_empty_binding_row.
+from starlight.query.result_patches import (
+    patch_result_iter_empty_binding_row as _patch_result_iter_empty_binding_row,
+)
+
 _apply_all_operator_patches()
 _patch_algebra_translator_bugs()
 _patch_evalextend_forgotten_bind_vars()
@@ -159,6 +173,7 @@ _patch_relational_expression_tt_hash_equality()
 _patch_order_by_tt_hash_term_kind()
 _patch_bgp_skips_encoding_triples()
 _patch_group_by_unaliased_expression_key()
+_patch_result_iter_empty_binding_row()
 
 __all__ = [
     # rdflib primitives
