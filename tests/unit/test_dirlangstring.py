@@ -311,7 +311,15 @@ class TestSparqlFunctions:
         assert r.bindings[0][r.vars[0]] == DirLangString('hi', 'en', 'ltr')
 
     def test_strlangdir_wrong_arity_raises(self, g):
-        with pytest.raises(ValueError, match="exactly 3 arguments"):
+        # sparql1_2_to_rdf's grammar production for STRLANGDIR requires
+        # exactly 3 comma-separated arguments structurally (grammar12.py's
+        # _StrLangDirArgs) - a 2-arg call is simply not valid SPARQL 1.2
+        # syntax by this grammar's own rules, so it's rejected at parse
+        # time (pyparsing.ParseException), not accepted and validated
+        # afterward with a custom error message the way the legacy
+        # text-based rewriter used to.
+        from pyparsing.exceptions import ParseException
+        with pytest.raises(ParseException):
             g.query('SELECT (STRLANGDIR("hi", "en") AS ?x) WHERE {}')
 
     def test_is_triple_alias_unaffected_by_lang_rewrite(self, g):

@@ -95,17 +95,6 @@ def sg():
 
 
 @pytest.fixture
-def sg_algebra_ir():
-    """Fresh StarlightGraph backed by Fuseki, opted into the new
-    sparql1_2_to_rdf-based SPARQL 1.2 pipeline (see the cross-repo
-    migration plan) instead of the legacy sparql12_to_11.py rewriter."""
-    _clear_graph()
-    g = StarlightGraph(store=_make_store(), identifier=GRAPH_URI, sparql_pipeline='algebra_ir')
-    g.bind('ex', EX)
-    yield g
-
-
-@pytest.fixture
 def sg_rdf12():
     """Fresh StarlightGraph backed by Fuseki in rdf-1.2 native mode.
 
@@ -472,86 +461,54 @@ class TestFusekiRdf11SparqlFunctions:
 
 
 # ---------------------------------------------------------------------------
-# New sparql1_2_to_rdf-based pipeline (opt-in, sparql_pipeline='algebra_ir')
-# - same cases as TestFusekiRdf11SparqlFunctions above, run through the new
-# pipeline instead, against the same live store. Exercises the generalized
-# remote-store dispatch (starlight.query.remote_decompose.decompose_for_remote
-# handed a pre-built Query object, not freshly-parsed text) and confirms
-# the LANGDIR/hasLANGDIR/STRLANGDIR/hasLANG grammar added to sparql1_2_to_rdf
-# to close that pipeline's one confirmed gap works correctly end-to-end
-# against a real remote server, not just in-memory.
-#
-# Marked `algebra_ir` in addition to `integration` (see pyproject.toml) - run
-# as its own pytest invocation, not together with the legacy-pipeline classes
-# above. Confirmed: running this class alongside them in one pytest process
-# can corrupt sparql1_2_to_rdf's grammar installation via a pytest
-# assertion-rewrite interaction - not a bug in the pipeline itself (this
-# class passes cleanly every time run alone; see docs/testing-strategy.md).
+# Coverage not already exercised by TestFusekiRdf11SparqlFunctions above:
+# pattern-matching a stored triple term (not just constructing one) and the
+# isTRIPLE+SUBJECT() combination, plus the generalized remote-store
+# dispatch's own restrictions (starlight.query.remote_decompose.
+# decompose_for_remote is SELECT-only, so a CONSTRUCT template minting a
+# fresh triple term must fail loudly against a remote store rather than
+# silently dropping the triple).
 # ---------------------------------------------------------------------------
 
 @fuseki
-@pytest.mark.algebra_ir
-class TestFusekiAlgebraIrPipeline:
+class TestFusekiRemoteStoreSparqlCoverage:
 
-    def test_triple_term_pattern_match(self, sg_algebra_ir):
+    def test_triple_term_pattern_match(self, sg):
         tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
-        sg_algebra_ir.add((URIRef(EX+'stmt'), RDF_REIF, tt))
-        r = sg_algebra_ir.query(f"""
+        sg.add((URIRef(EX+'stmt'), RDF_REIF, tt))
+        r = sg.query(f"""
             PREFIX rdf: <{RDF_NS}>
             SELECT ?tt WHERE {{ ?stmt rdf:reifies ?tt }}
         """)
         assert r.bindings[0][r.vars[0]] == tt
 
-    def test_triple_constructor_function(self, sg_algebra_ir):
-        r = sg_algebra_ir.query(f"""
-            SELECT (TRIPLE(<{EX}a>, <{EX}b>, <{EX}c>) AS ?t) WHERE {{}}
-        """)
-        assert r.bindings[0][r.vars[0]] == TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
-
-    def test_is_triple_and_subject_accessor(self, sg_algebra_ir):
+    def test_is_triple_and_subject_accessor(self, sg):
         tt = TripleTerm(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))
-        sg_algebra_ir.add((URIRef(EX+'stmt'), RDF_REIF, tt))
-        r = sg_algebra_ir.query(f"""
+        sg.add((URIRef(EX+'stmt'), RDF_REIF, tt))
+        r = sg.query(f"""
             PREFIX rdf: <{RDF_NS}>
             SELECT ?s WHERE {{ ?stmt rdf:reifies ?tt .
                 FILTER(isTRIPLE(?tt)) BIND(SUBJECT(?tt) AS ?s) }}
         """)
         assert r.bindings[0][r.vars[0]] == URIRef(EX+'a')
 
-    def test_langdir_hasLangdir_strlangdir(self, sg_algebra_ir):
-        from starlight.model.dirlangstring import DirLangString
-        sg_algebra_ir.add((URIRef(EX+'s'), URIRef(EX+'p'), DirLangString('hi', 'en', 'rtl')))
-        r = sg_algebra_ir.query(f"""
-            PREFIX : <{EX}>
-            SELECT (LANGDIR(?o) AS ?dir) (hasLANGDIR(?o) AS ?hd)
-                   (LANG(?o) AS ?l) (hasLANG(?o) AS ?hl)
-                   (STRLANGDIR("hi", "en", "ltr") AS ?sld)
-            WHERE {{ :s :p ?o }}
-        """)
-        row = r.bindings[0]
-        assert row[r.vars[0]] == Literal('rtl')
-        assert row[r.vars[1]] == Literal(True)
-        assert row[r.vars[2]] == Literal('en')
-        assert row[r.vars[3]] == Literal(True)
-        assert row[r.vars[4]] == DirLangString('hi', 'en', 'ltr')
-
-    def test_construct_minting_triple_term_not_yet_supported(self, sg_algebra_ir):
+    def test_construct_minting_triple_term_not_yet_supported(self, sg):
         """decompose_for_remote is SELECT-only so far - a CONSTRUCT
         template minting a fresh triple term must fail loudly against a
         remote store, not silently drop the triple (confirmed as the
         actual pre-fix behavior: the BIND computing the term's hash left
         it unbound, and CONSTRUCT's own rule for an unbound template term
         silently dropped the whole triple)."""
-        sg_algebra_ir.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        sg.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
         with pytest.raises(NotImplementedError):
-            sg_algebra_ir.query(f"""
+            sg.query(f"""
                 PREFIX : <{EX}>
                 CONSTRUCT {{ :dave :claims <<( :a :b :c )>> }} WHERE {{ :a :b :c }}
             """)
 
-    def test_plain_construct_still_works(self, sg_algebra_ir):
-        sg_algebra_ir.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
-        r = sg_algebra_ir.query(f"""
+    def test_plain_construct_still_works(self, sg):
+        sg.add((URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c')))
+        r = sg.query(f"""
             PREFIX : <{EX}> CONSTRUCT {{ ?s ?p ?o }} WHERE {{ ?s ?p ?o }}
         """)
         assert list(r.graph) == [(URIRef(EX+'a'), URIRef(EX+'b'), URIRef(EX+'c'))]

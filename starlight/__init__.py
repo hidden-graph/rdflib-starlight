@@ -23,6 +23,16 @@ from starlight.graph.starlight_graph import StarlightGraph
 from starlight.graph.starlight_dataset import StarlightDataset
 from starlight.parsers.errors import TurtleSyntaxError
 
+# Registers starlight's own custom SPARQL extension functions (TRIPLE()'s
+# hash constructor, SUBJECT()/PREDICATE()/OBJECT() accessors, STRLANGDIR())
+# with rdflib's global function registry, as an import-time side effect -
+# every query going through sparql1_2_to_rdf's lowering compiles these down
+# to Function algebra nodes that need a real, registered implementation to
+# evaluate against. Imported explicitly (not relied on as a transitive side
+# effect of some other import) so registration always happens regardless of
+# what a caller imports first. See starlight/query/custom_functions.py.
+import starlight.query.custom_functions as _custom_functions  # noqa: F401
+
 # Compatibility shims for confirmed bugs in plain rdflib's own SPARQL
 # arithmetic evaluation - applied eagerly so every consumer gets
 # spec-correct results. See starlight/query/operator_patches.py.

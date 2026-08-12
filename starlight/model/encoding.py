@@ -79,7 +79,7 @@ def tt_hash(s_str: str, p_str: str, o_str: str) -> str:
 
 
 # Process-wide memo: tt:HASH URIRef -> (s, p, o) components, populated by the
-# registered TT_HASH_FN SPARQL function (starlight.query.sparql12_to_11)
+# registered TT_HASH_FN SPARQL function (starlight.query.custom_functions)
 # whenever it computes a hash for a fully-ground TRIPLE()/<<( )>> value used
 # as a plain expression (SELECT projection, BIND, FILTER) rather than a
 # graph-pattern term - a value that, like a literal IRI, is constructed on

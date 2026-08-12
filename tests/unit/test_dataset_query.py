@@ -5,7 +5,7 @@ Covers:
   - SELECT with ground triple-term pattern in a named graph
   - SELECT with variable triple-term pattern across multiple graphs
   - SELECT with SUBJECT/PREDICATE/OBJECT accessor functions inside GRAPH blocks
-  - SELECT with isTripleTerm() filter
+  - SELECT with isTRIPLE() filter
   - CONSTRUCT query
   - ASK query
   - UPDATE with WHERE clause containing triple-term pattern
@@ -242,14 +242,14 @@ class TestSelectFunctions:
         assert rows[0][1] == ex('knows')
         assert rows[0][2] == ex('bob')
 
-    def test_istripleTerm_filter(self, ds):
+    def test_istriple_filter(self, ds):
         q = f"""
         PREFIX ex: <{EX}>
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
         SELECT ?tt WHERE {{
             GRAPH <{EX}graph1> {{
                 ex:stmt1 rdf:reifies ?tt .
-                FILTER(isTripleTerm(?tt))
+                FILTER(isTRIPLE(?tt))
             }}
         }}
         """

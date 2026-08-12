@@ -27,8 +27,9 @@ natively - triple-term syntax (<<( s p o )>>), TRIPLE()/isTRIPLE(), and the
 base-direction functions (LANGDIR/hasLANGDIR/STRLANGDIR/LANG/hasLANG) are all
 sent straight through with no rewriting, confirmed 2026-07-16 against live
 Fuseki 5.5.0 and Oxigraph 0.5.9. This is a different code path from the
-default rdf-1.1 backend's rewrite_sparql12_to_11()
-(starlight/query/sparql12_to_11.py), which never runs for a native-backend
+default rdf-1.1 backend's SPARQL 1.2 handling (sparql1_2_to_rdf's
+parse_update_12/update_to_rdf11/rdf11_update_to_sparql11_text pipeline,
+see native_update() below), which never runs for a native-backend
 query/update - see native_query()/native_update() below, and
 StarlightGraph._native_add()/_native_triples() for the write/read-triples
 paths (those stay graph-scoped, using a specific GRAPH <identifier> clause,
@@ -359,10 +360,10 @@ def check_native_version_conformance(text: str) -> None:
     endpoint needs to see the directive itself, unlike rdflib's SPARQL 1.1
     parser.
     """
-    from starlight.query.sparql12_to_11 import _strip_version_directive
+    from starlight.query.version_directive import strip_version_directive
     from starlight.model.conformance import check_version_conformance
 
-    _, declared_version = _strip_version_directive(text)
+    _, declared_version = strip_version_directive(text)
     if declared_version is None:
         return
     check_version_conformance(
@@ -450,7 +451,23 @@ def native_update(store, backend: str, update_object) -> None:
         if isinstance(text, str):
             check_native_version_conformance(text)
     else:
-        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+        # A remote rdf-1.1 endpoint has no notion of SPARQL 1.2 triple-term
+        # syntax, so text containing it must become plain SPARQL 1.1 first.
+        # Goes through the same real grammar/algebra pipeline as everywhere
+        # else in this project (sparql1_2_to_rdf's prepare_update_12 ->
+        # update_to_rdf11), then all the way to genuine text via
+        # rdf11_update_to_sparql11_text - needed specifically here (unlike
+        # StarlightGraph/StarlightDataset's own local-store update path,
+        # which hands the lowered Update *object* straight to rdflib)
+        # because this function POSTs raw text directly over HTTP, bypassing
+        # rdflib's store dispatch entirely (see this function's own
+        # docstring for why). Text with no SPARQL 1.2 syntax at all still
+        # round-trips correctly through this - it's just a plain SPARQL 1.1
+        # update by the time it comes back out.
         if isinstance(text, str):
-            text = rewrite_sparql12_to_11(text)
+            from sparql1_2_to_rdf.parse12 import prepare_update_12
+            from sparql1_2_to_rdf.lower_rdf11 import update_to_rdf11, rdf11_update_to_sparql11_text
+            prepared_12 = prepare_update_12(text)
+            rdf_graph, root = update_to_rdf11(prepared_12)
+            text = rdf11_update_to_sparql11_text(rdf_graph, root)
     http_update(u_url, text, hdrs)

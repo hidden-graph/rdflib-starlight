@@ -29,19 +29,6 @@ RDF_REIFIES     = URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies')
 # Valid backend mode identifiers
 VALID_BACKENDS = frozenset({'rdf-1.1', 'rdf-1.2'})
 
-# SPARQL 1.2 -> 1.1 translation mechanism for the rdf-1.1 backend.
-# 'legacy' (default): starlight.query.sparql12_to_11's hand-rolled,
-# regex/text-based rewriter - unchanged, still the default until a real
-# parity test suite (see the cross-repo migration plan) is complete.
-# 'algebra_ir': sparql1_2_to_rdf's grammar/algebra-based pipeline (parse via
-# a real grammar extension, encode/decode as RDF, lower 1.2 algebra to 1.1)
-# - opt-in only for now. Known current limitation: falls back to 'legacy'
-# for any call passing initNs/base, since sparql1_2_to_rdf.parse12.
-# prepare_query_12 has no equivalent parameter yet (prefixes must be
-# inline PREFIX declarations in the query text) - see query()'s own
-# comment at the call site.
-VALID_SPARQL_PIPELINES = frozenset({'legacy', 'algebra_ir'})
-
 # rdf:TripleTerm type URI — emitted by the JSON-LD 1.2 serializer; treated as
 # internal encoding so it is never surfaced through triples() / __len__ etc.
 _RDF_TRIPLE_TERM = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#TripleTerm'
@@ -175,16 +162,11 @@ class StarlightGraph(Graph):
     serialization, etc.) are inherited and work without modification.
     """
 
-    def __init__(self, *args, backend: str = 'rdf-1.1', sparql_pipeline: str = 'legacy', **kwargs):
+    def __init__(self, *args, backend: str = 'rdf-1.1', **kwargs):
         if backend not in VALID_BACKENDS:
             raise ValueError(f"backend must be one of {sorted(VALID_BACKENDS)}, got {backend!r}")
-        if sparql_pipeline not in VALID_SPARQL_PIPELINES:
-            raise ValueError(
-                f"sparql_pipeline must be one of {sorted(VALID_SPARQL_PIPELINES)}, got {sparql_pipeline!r}"
-            )
         super().__init__(*args, **kwargs)
         self._backend = backend
-        self._sparql_pipeline = sparql_pipeline
         self._tt_registry: dict = {}   # canonical (s_key, p, o_key) -> URIRef (rdf-1.1 only)
         self._tt_nodes: dict = {}      # URIRef -> TripleTerm (rdf-1.1 only)
         self._invalidate_callback = None  # set by StarlightDataset to clear raw query cache
@@ -1295,87 +1277,46 @@ class StarlightGraph(Graph):
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
         pending_recipes = None
+        pending_filters = None
         pending_pv = None
         from starlight.query.query_cache import store_accepts_prepared_query
         remote_only_store = not store_accepts_prepared_query(self.store)
         if isinstance(query_object, str):
-            if self._sparql_pipeline == 'algebra_ir' and not initNs and not kwargs.get('base'):
-                # New pipeline (opt-in, see VALID_SPARQL_PIPELINES's own
-                # comment): sparql1_2_to_rdf's real grammar parses the
-                # query, encodes/decodes it as RDF, then lowers the 1.2
-                # algebra to a plain SPARQL 1.1 one and hands back an
-                # already-executable Query object directly - no
-                # text-rewrite step at all, replacing rewrite_sparql12_to_11
-                # for this call. Falls through to the generalized non-str
-                # handling below (shared with any other pre-built Query
-                # object) for the remote-store case.
-                from sparql1_2_to_rdf.parse12 import prepare_query_12
-                from sparql1_2_to_rdf.lower_rdf11 import query_to_rdf11, rdf11_to_query
-                prepared_12 = prepare_query_12(query_object)
-                rdf_graph, root = query_to_rdf11(prepared_12)
-                query_object = rdf11_to_query(rdf_graph, root)
-            elif not remote_only_store:
-                from starlight.query.query_cache import prepare_query_cached
-                effective_ns = initNs if initNs else dict(self.namespaces())
-                query_object = prepare_query_cached(
-                    self._prepared_query_cache, query_object, effective_ns, kwargs.get('base')
-                )
-            else:
-                # Some store implementations (rdflib's own SPARQLStore/
-                # SPARQLUpdateStore, used for remote endpoints like Fuseki)
-                # only accept a plain query string, not a pre-parsed Query
-                # object - confirmed via real Fuseki testing (AssertionError
-                # in sparqlstore.py). The prepared-object caching win doesn't
-                # apply here anyway: these stores forward the query text to
-                # a remote server, so local rdflib-side re-parsing was never
-                # the bottleneck. Falls back to exactly the pre-caching
-                # behavior for these stores.
-                #
-                # TRIPLE()/isTRIPLE(TRIPLE(...))/STRLANGDIR() (and
-                # SUBJECT()/PREDICATE()/OBJECT() on a value that isn't
-                # already sitting in the store) rewrite to calls on
-                # starlight's own custom SPARQL functions - registered only
-                # in this local process, invisible to a genuinely remote
-                # engine. Sent as-is, those BINDs would silently come back
-                # unbound (SPARQL's own error semantics for an unknown
-                # extension function), not raise. decompose_for_remote()
-                # parses the rewritten text into a real algebra tree, strips
-                # every Extend that depends on one of those functions, and
-                # returns the recipes needed to compute them locally, per
-                # result row, once the simplified query's results are back -
-                # see starlight/query/remote_decompose.py's module docstring.
-                from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
-                query_object = rewrite_sparql12_to_11(query_object)
-                from rdflib.plugins.sparql import prepareQuery
-                effective_ns = initNs if initNs else dict(self.namespaces())
-                prepared = prepareQuery(query_object, initNs=effective_ns, base=kwargs.get('base'))
-                if prepared.algebra.name == 'SelectQuery':
-                    from starlight.query.remote_decompose import decompose_for_remote
-                    original_pv = list(prepared.algebra.p.PV)
-                    recipes = decompose_for_remote(prepared)
-                    if recipes:
-                        from rdflib.plugins.sparql.algebra import translateAlgebra
-                        query_object = translateAlgebra(prepared)
-                        pending_recipes = recipes
-                        pending_pv = original_pv
+            # Parses via sparql1_2_to_rdf's real grammar (prepare_query_12),
+            # then lowers the 1.2 algebra to a plain SPARQL 1.1 one and
+            # hands back an already-executable Query object - cached on
+            # (query text, effective namespaces, base) so repeated calls
+            # with the same query text don't redo the parse+lower work (see
+            # query_cache.py's own module docstring for why that matters -
+            # the pySHACL per-focus-node evaluation pattern). Correct for
+            # a remote-only store too: falls through to the generalized
+            # handling below, which serializes the resulting Query object
+            # back to text (and strips any custom-function dependency the
+            # remote engine wouldn't understand) before it ever reaches
+            # that store.
+            from starlight.query.query_cache import prepare_query_cached
+            effective_ns = initNs if initNs else dict(self.namespaces())
+            query_object = prepare_query_cached(
+                self._prepared_query_cache, query_object, effective_ns, kwargs.get('base')
+            )
 
         # Generalized remote-store handling for a pre-built Query object -
-        # whether it came from the algebra_ir branch above, or was handed
-        # to this method directly by a caller (e.g. sparql1_2_to_rdf's own
-        # rdf11_to_query, or starlight.query.sparql_api.prepareQuery).
-        # Previously nothing here at all: a string-only store
-        # (SPARQLStore/SPARQLUpdateStore) would crash outright on a
-        # non-str query_object (confirmed via real Fuseki testing,
-        # AssertionError in sparqlstore.py) - not just miss the
-        # decompose-for-remote treatment covered above for the legacy
-        # text-rewrite path, an outright crash. decompose_for_remote()
+        # whether it came from the string-parsing branch above, or was
+        # handed to this method directly by a caller (e.g. sparql1_2_to_rdf's
+        # own rdf11_to_query, or starlight.query.sparql_api.prepareQuery).
+        # Some store implementations (rdflib's own SPARQLStore/
+        # SPARQLUpdateStore, used for remote endpoints like Fuseki) only
+        # accept a plain query string, not a pre-parsed Query object -
+        # confirmed via real Fuseki testing (AssertionError in
+        # sparqlstore.py) - so a string-only store would crash outright on
+        # a non-str query_object without this. decompose_for_remote()
         # itself needs no changes to support this: it only inspects
         # query_object.algebra by structure/known-IRI matching, indifferent
         # to which pipeline produced the object (confirmed: the
         # custom-function IRIs sparql1_2_to_rdf's own lower_rdf11.py
         # produces - TT_HASH_FN etc. - are the literal same URIs
-        # starlight's own sparql12_to_11.py registers, both deriving from
-        # starlight.model.encoding.TT_NS/DIRLANG_NS). Only SELECT gets the
+        # starlight's own query/custom_functions.py registers, both
+        # deriving from starlight.model.encoding.TT_NS/DIRLANG_NS). Only SELECT gets the
         # decompose treatment (decompose_for_remote's own scope, see its
         # docstring); CONSTRUCT/ASK/DESCRIBE still get turned into text so
         # they at least reach the remote store, just without custom
@@ -1392,11 +1333,11 @@ class StarlightGraph(Graph):
         # module docstring in lower_rdf11.py.
         if pending_recipes is None and not isinstance(query_object, str) and remote_only_store:
             from sparql1_2_to_rdf.lower_rdf11 import _AlgebraTranslator11
-            recipes = []
+            recipes, filters = [], []
             if query_object.algebra.name == 'SelectQuery':
                 from starlight.query.remote_decompose import decompose_for_remote
                 original_pv = list(query_object.algebra.p.PV)
-                recipes = decompose_for_remote(query_object)
+                recipes, filters = decompose_for_remote(query_object)
             else:
                 # decompose_for_remote is SelectQuery-only (its own scope,
                 # see its docstring) - a ConstructQuery/AskQuery/
@@ -1418,8 +1359,9 @@ class StarlightGraph(Graph):
                         "supported for this case so far. See remote_decompose.py."
                     )
             query_object = _AlgebraTranslator11(query_object).translateAlgebra()
-            if recipes:
+            if recipes or filters:
                 pending_recipes = recipes
+                pending_filters = filters
                 pending_pv = original_pv
 
         init_bindings = self._encode_init_bindings(initBindings)
@@ -1427,11 +1369,14 @@ class StarlightGraph(Graph):
                       initNs=initNs, initBindings=init_bindings,
                       use_store_provided=use_store_provided, **kwargs)
         if pending_recipes is not None:
-            from starlight.query.remote_decompose import evaluate_recipes_locally
-            r.bindings = [
-                {var: evaluate_recipes_locally(pending_recipes, row, raw).get(var) for var in pending_pv}
-                for row in r.bindings
-            ]
+            from starlight.query.remote_decompose import evaluate_recipes_locally, row_passes_filters
+            new_bindings = []
+            for row in r.bindings:
+                merged = evaluate_recipes_locally(pending_recipes, row, raw)
+                if not row_passes_filters(pending_filters, merged, raw):
+                    continue
+                new_bindings.append({var: merged.get(var) for var in pending_pv})
+            r.bindings = new_bindings
             r.vars = pending_pv
         if r.type == 'SELECT':
             restore_select_bindings(r, self._restore)
@@ -1443,276 +1388,36 @@ class StarlightGraph(Graph):
 
     def update(self, update_object, processor='sparql',
               initNs=None, initBindings=None, use_store_provided=True, **kwargs):
-        """Execute a SPARQL UPDATE. Triple-term patterns are rewritten to SPARQL 1.1.
+        """Execute a SPARQL UPDATE.
 
         For the native rdf-1.2 backend the update is forwarded to the endpoint
         via HTTP unchanged (see starlight.backends.native.native_update).
 
-        Supported (rdf-1.1 path):
-        - ``<<( )>>`` in WHERE clauses (DELETE/INSERT WHERE forms)
-        - Ground ``<<( )>>`` in INSERT DATA / DELETE DATA blocks
-        - ``<<( )>>`` in INSERT/DELETE templates (subject position): evaluated
-          via a post-processing SELECT pass against the same WHERE clause
+        Otherwise, SPARQL 1.2 text is parsed via sparql1_2_to_rdf's real
+        grammar (prepare_update_12), then lowered to a plain SPARQL 1.1
+        algebra (tt:HASH encoding) and handed to rdflib as an
+        already-executable Update object - every shape (triple-term WHERE
+        patterns, ground triple terms in INSERT/DELETE DATA, triple terms
+        in INSERT/DELETE templates) is handled natively by that lowering,
+        no post-processing needed here.
         """
         if self._is_native:
             from starlight.backends.native import native_update
             native_update(self.store, self._backend, update_object)
             return None
-        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
         if isinstance(update_object, str):
-            update_object = self._preprocess_data_updates(update_object)
-            tt_templates, where_str = self._extract_tt_template_info(update_object)
-            update_object = rewrite_sparql12_to_11(update_object)
-        else:
-            tt_templates, where_str = [], None
+            from sparql1_2_to_rdf.parse12 import prepare_update_12
+            from sparql1_2_to_rdf.lower_rdf11 import update_to_rdf11, rdf11_to_update
+            prepared_12 = prepare_update_12(update_object, base=kwargs.get('base'), initNs=initNs)
+            rdf_graph, root = update_to_rdf11(prepared_12)
+            update_object = rdf11_to_update(rdf_graph, root)
         raw = Graph(store=self.store, identifier=self.identifier)
         for prefix, ns in self.namespaces():
             raw.bind(prefix, ns)
         raw.update(update_object, processor=processor,
                    initNs=initNs, initBindings=initBindings,
-                   use_store_provided=use_store_provided, **kwargs)
+                   use_store_provided=use_store_provided)
         self._build_registry_from_store()
-        if tt_templates and where_str:
-            self._execute_tt_template_triples(tt_templates, where_str)
-        return None
-
-    def _preprocess_data_updates(self, update_str: str) -> str:
-        """Handle INSERT/DELETE DATA blocks containing ground triple terms.
-
-        Each such block is parsed as Turtle 1.2; triples are added or removed
-        via the Python API, and the block is replaced with an empty no-op so the
-        remainder of the query can be passed to the SPARQL rewriter safely.
-        """
-        import re
-        if '<<(' not in update_str:
-            return update_str
-
-        from starlight.query.sparql12_to_11 import _consume_balanced
-        from starlight.parsers.turtle_parser import StarlightTurtleParser, _skolemize_encoding
-
-        turtle_prefixes = self._sparql_prefixes_to_turtle(update_str)
-        _DATA_RE = re.compile(r'\b(INSERT|DELETE)\s+DATA\s*\{', re.IGNORECASE)
-
-        result = []
-        i = 0
-        while i < len(update_str):
-            m = _DATA_RE.search(update_str, i)
-            if m is None:
-                result.append(update_str[i:])
-                break
-            result.append(update_str[i:m.start()])
-            op = m.group(1).upper()
-            brace_start = m.end() - 1  # position of '{'
-            block, j = _consume_balanced(update_str, brace_start, '{', '}')
-            data_content = block[1:-1]
-
-            if '<<(' in data_content:
-                turtle_text = f'{turtle_prefixes}\n{data_content}'
-                raw_g = StarlightTurtleParser().parse(turtle_text)
-                processed = _skolemize_encoding(raw_g)
-                if op == 'INSERT':
-                    for triple in processed:
-                        super().add(triple)
-                    self._build_registry_from_store()
-                else:
-                    for s, p, o in processed:
-                        if not self._is_encoding_triple(s, p, o):
-                            super().remove((s, p, o))
-                result.append(f'{m.group(1)} DATA {{}}')
-            else:
-                result.append(update_str[m.start():j])
-            i = j
-
-        return ''.join(result)
-
-    def _sparql_prefixes_to_turtle(self, query_str: str) -> str:
-        """Convert PREFIX declarations in a SPARQL string to Turtle @prefix lines.
-        Graph's own namespace bindings are included as fallback."""
-        import re
-        prefixes: dict[str, str] = {}
-        for m in re.finditer(r'\bPREFIX\s+(\w*:)\s*(<[^>]+>)', query_str, re.IGNORECASE):
-            prefixes[m.group(1)] = m.group(2)
-        for prefix, ns in self.namespaces():
-            key = f'{prefix}:' if prefix else ':'
-            if key not in prefixes:
-                prefixes[key] = f'<{ns}>'
-        return '\n'.join(f'@prefix {k} {v} .' for k, v in prefixes.items())
-
-    def _extract_tt_template_info(self, update_str: str):
-        """Scan INSERT/DELETE template blocks for <<( )>>-subject triples.
-
-        Returns (tt_templates, where_str).
-        tt_templates: list of (is_insert, tt_s, tt_p, tt_o, pred_tok, obj_tok)
-          where each token is a variable string (``?name``) or a ground term string.
-        where_str: the full ``WHERE { ... }`` block, or None.
-
-        Handles <<( )>> in both subject and object positions of template triples.
-
-        Each record in tt_templates is ``(is_insert, subj, pred_tok, obj)`` where
-        ``subj`` and ``obj`` are either a plain token string or a 3-tuple
-        ``(s_tok, p_tok, o_tok)`` when the position holds a triple term.
-        """
-        import re
-        from starlight.query.sparql12_to_11 import (
-            _consume_balanced, _consume_triple_term, _split_top_level_terms, _T,
-        )
-        if '<<(' not in update_str:
-            return [], None
-
-        _TMPL_RE = re.compile(r'\b(INSERT|DELETE)\s*\{', re.IGNORECASE)
-        _WHERE_RE = re.compile(r'\bWHERE\s*\{', re.IGNORECASE)
-        _TERM_RE  = re.compile(_T)
-
-        def _read_node(text, pos):
-            """Read one term or <<( )>> from text at pos. Returns (node, new_pos)
-            where node is a string token or a (s,p,o) tuple for a triple term."""
-            if text.startswith('<<(', pos):
-                tt_tok, pos = _consume_triple_term(text, pos)
-                parts = _split_top_level_terms(tt_tok[3:-3].strip())
-                return (tuple(parts) if len(parts) == 3 else tt_tok), pos
-            m = _TERM_RE.match(text, pos)
-            if m:
-                return m.group(0), m.end()
-            return None, pos
-
-        tt_templates = []
-        i = 0
-        while i < len(update_str):
-            m = _TMPL_RE.search(update_str, i)
-            if m is None:
-                break
-            is_insert = m.group(1).upper() == 'INSERT'
-            brace_start = m.end() - 1
-            block, j = _consume_balanced(update_str, brace_start, '{', '}')
-            content = block[1:-1]
-
-            if '<<(' in content:
-                k = 0
-                while k < len(content):
-                    while k < len(content) and content[k].isspace():
-                        k += 1
-                    if k >= len(content):
-                        break
-
-                    subj, k = _read_node(content, k)
-                    if subj is None:
-                        k += 1
-                        continue
-
-                    while k < len(content) and content[k].isspace():
-                        k += 1
-
-                    # collect pred-obj pairs, same subject (;-separated)
-                    while k < len(content) and content[k] not in '.}':
-                        while k < len(content) and content[k].isspace():
-                            k += 1
-                        if k >= len(content) or content[k] in '.}':
-                            break
-
-                        pm = _TERM_RE.match(content, k)
-                        if not pm:
-                            break
-                        pred_tok = pm.group(0)
-                        k = pm.end()
-
-                        while k < len(content) and content[k].isspace():
-                            k += 1
-
-                        obj, k = _read_node(content, k)
-                        if obj is None:
-                            break
-
-                        if isinstance(subj, tuple) or isinstance(obj, tuple):
-                            tt_templates.append((is_insert, subj, pred_tok, obj))
-
-                        while k < len(content) and content[k].isspace():
-                            k += 1
-                        if k < len(content) and content[k] == ';':
-                            k += 1
-                            continue
-                        if k < len(content) and content[k] == '.':
-                            k += 1
-                        break
-            i = j
-
-        if not tt_templates:
-            return [], None
-
-        m_w = _WHERE_RE.search(update_str)
-        if m_w is None:
-            return [], None
-        w_block, _ = _consume_balanced(update_str, m_w.end() - 1, '{', '}')
-        return tt_templates, 'WHERE ' + w_block
-
-    def _execute_tt_template_triples(self, tt_templates: list, where_str: str) -> None:
-        """Run WHERE as SELECT; for each binding evaluate TT templates and add/remove."""
-        from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
-
-        def _vars(val):
-            if isinstance(val, tuple):
-                return {t for t in val if isinstance(t, str) and t.startswith('?')}
-            return {val} if isinstance(val, str) and val.startswith('?') else set()
-
-        all_vars: set = set()
-        for _, subj, pred_tok, obj in tt_templates:
-            all_vars |= _vars(subj) | _vars(obj)
-            if pred_tok.startswith('?'):
-                all_vars.add(pred_tok)
-
-        var_list = ' '.join(sorted(all_vars)) if all_vars else '*'
-        prefix_lines = '\n'.join(
-            f'PREFIX {p}: <{ns}>' for p, ns in self.namespaces() if p
-        )
-        select_q = rewrite_sparql12_to_11(
-            f'{prefix_lines}\nSELECT DISTINCT {var_list} {where_str}'
-        )
-
-        raw = Graph(store=self.store, identifier=self.identifier)
-        for p, ns in self.namespaces():
-            raw.bind(p, ns)
-        r = raw.query(select_q)
-
-        def _eval_node(val, row):
-            if isinstance(val, tuple):
-                tt_s, tt_p, tt_o = val
-                sv = self._eval_template_tok(tt_s, row)
-                pv = self._eval_template_tok(tt_p, row)
-                ov = self._eval_template_tok(tt_o, row)
-                return None if None in (sv, pv, ov) else TripleTerm(sv, pv, ov)
-            return self._eval_template_tok(val, row)
-
-        for row in r.bindings:
-            for is_insert, subj, pred_tok, obj in tt_templates:
-                s    = _eval_node(subj, row)
-                pred = self._eval_template_tok(pred_tok, row)
-                o    = _eval_node(obj, row)
-                if None in (s, pred, o):
-                    continue
-                if is_insert:
-                    self.add((s, pred, o))
-                else:
-                    self.remove((s, pred, o))
-
-    def _eval_template_tok(self, tok: str, row: dict):
-        """Evaluate a SPARQL token (variable or ground term) against a binding row."""
-        from rdflib import URIRef, Literal
-        from rdflib.term import Variable
-        tok = tok.strip()
-        if tok.startswith('?'):
-            return row.get(Variable(tok[1:]))
-        if tok.startswith('<') and tok.endswith('>'):
-            return URIRef(tok[1:-1])
-        if tok == 'a':
-            return RDF.type
-        if ':' in tok:
-            colon = tok.index(':')
-            prefix, local = tok[:colon], tok[colon + 1:]
-            for p, ns in self.namespaces():
-                if str(p) == prefix:
-                    return URIRef(str(ns) + local)
-        if (tok.startswith('"') and tok.endswith('"')) or \
-           (tok.startswith("'") and tok.endswith("'")):
-            return Literal(tok[1:-1])
         return None
 
     def serialize(self, destination=None, format='turtle12', **kwargs):

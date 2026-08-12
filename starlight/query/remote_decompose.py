@@ -1,14 +1,14 @@
-"""Decompose a SPARQL-1.1-rewritten query for execution against a genuinely
+"""Decompose a SPARQL-1.1-*shaped* query (as produced by sparql1_2_to_rdf's
+lowering, see starlight.query.query_cache) for execution against a genuinely
 remote store (rdflib's SPARQLStore/SPARQLUpdateStore - real Fuseki-as-1.1 or
 any other HTTP SPARQL 1.1 endpoint).
 
-starlight.query.sparql12_to_11 rewrites SPARQL 1.2 triple-term/dirLangString
-syntax into SPARQL-1.1-*shaped* text, but for TRIPLE()/isTRIPLE(TRIPLE(...))/
-STRLANGDIR() (and SUBJECT()/PREDICATE()/OBJECT() on a value that isn't
-already sitting in the store) that text calls starlight's own custom SPARQL
-extension functions (register_custom_function - see sparql12_to_11.py). Those
-registrations are local-process only: a remote SPARQL engine has never heard
-of the function IRI. Per SPARQL 1.1's own extension-function error semantics,
+For TRIPLE()/isTRIPLE(TRIPLE(...))/STRLANGDIR() (and SUBJECT()/PREDICATE()/
+OBJECT() on a value that isn't already sitting in the store) that lowering
+calls starlight's own custom SPARQL extension functions (register_custom_function
+- see starlight.query.custom_functions). Those registrations are local-process
+only: a remote SPARQL engine has never heard of the function IRI. Per SPARQL
+1.1's own extension-function error semantics,
 an unbound/unknown function call inside a BIND doesn't fail the query - it
 just leaves that BIND's target variable unbound for every row. So the query
 runs, returns rows, and the relevant column is silently empty - no exception,
@@ -36,7 +36,7 @@ from typing import Any
 from rdflib import Variable, URIRef
 from rdflib.plugins.sparql.parserutils import CompValue
 
-from starlight.query.sparql12_to_11 import (
+from starlight.query.custom_functions import (
     DIRLANG_CONSTRUCT_FN,
     TT_HASH_FN,
     _TT_ACCESSOR_FN,
@@ -96,62 +96,97 @@ def contains_custom_function_call(node: Any) -> bool:
     return False
 
 
-def _strip_custom_extends(node: Any, local_vars: set, recipes: list) -> Any:
-    """Recursively strip Extend nodes that (transitively) depend on a
-    starlight custom function, appending (var, expr) recipes for each one
-    removed. Post-order: children are visited (and their own recipes
+def _strip_custom_extends(node: Any, local_vars: set, recipes: list, filters: list) -> Any:
+    """Recursively strip Extend/Filter nodes that (transitively) depend on
+    a starlight custom function.
+
+    Extend nodes get a ``(var, expr)`` recipe appended, same as before.
+    Filter nodes - a shape only the sparql1_2_to_rdf-based pipeline
+    produces, not the old text rewriter this module was originally built
+    against: a non-ground triple-term pattern's own predicate constraint
+    lowers to ``FILTER(PREDICATE(?tt) = :knows)`` rather than an
+    Extend+equality-check - get their whole boolean expression appended to
+    `filters` instead, to be re-evaluated locally per row (SPARQL's own
+    FILTER semantics: exclude the row if the expression is false or
+    raises), since a remote engine sent this expression as-is would raise
+    on the unknown function and silently exclude every row rather than
+    just failing to compute one value the way an unbound BIND target does.
+
+    Post-order: children are visited (and their own recipes/filters
     recorded) before their parent, so `recipes` ends up in dependency
     order - an earlier recipe never references a variable defined by a
     later one, matching how BIND itself would have evaluated them.
+
+    Uses `contains_custom_function_call` (recursive), not
+    `_is_custom_function_call` (direct-node-only): a Filter's own
+    expression is essentially never *itself* the Function call - it's a
+    RelationalExpression/ConditionalExpression *containing* one - so a
+    direct-only check would never match it. Strictly more general for
+    Extend too (still matches the direct-call case, since
+    contains_custom_function_call checks that first), so both use the same
+    condition.
     """
     if not isinstance(node, CompValue):
         return node
 
     for child_key in ('p', 'p1', 'p2'):
         if child_key in node:
-            node[child_key] = _strip_custom_extends(node[child_key], local_vars, recipes)
+            node[child_key] = _strip_custom_extends(node[child_key], local_vars, recipes, filters)
 
     if node.name == 'Extend':
         expr = node.expr
-        if _is_custom_function_call(expr) or (_expr_vars(expr) & local_vars):
+        if contains_custom_function_call(expr) or (_expr_vars(expr) & local_vars):
             local_vars.add(node.var)
             recipes.append((node.var, expr))
             return node.p  # drop the Extend wrapper, keep its inner pattern
 
+    if node.name == 'Filter':
+        expr = node.expr
+        if contains_custom_function_call(expr) or (_expr_vars(expr) & local_vars):
+            filters.append(expr)
+            return node.p  # drop the Filter wrapper, keep its inner pattern
+
     return node
 
 
-def decompose_for_remote(prepared_query: Any) -> list[tuple[Variable, Any]]:
-    """Mutate `prepared_query.algebra` in place, stripping every Extend that
-    (transitively) depends on a starlight custom function, and return the
-    ordered list of (variable, expression) recipes to evaluate locally per
-    result row.
+def decompose_for_remote(prepared_query: Any) -> tuple[list[tuple[Variable, Any]], list[Any]]:
+    """Mutate `prepared_query.algebra` in place, stripping every Extend/
+    Filter that (transitively) depends on a starlight custom function, and
+    return ``(recipes, filters)``: the ordered list of (variable,
+    expression) recipes to evaluate locally per result row (same as
+    before), plus a list of boolean filter expressions to re-check locally
+    per row (new - see `_strip_custom_extends`'s own docstring for why a
+    Filter needs different handling than an Extend).
 
     Only SELECT-shaped queries (``algebra.name == 'SelectQuery'``) are
-    decomposed; anything else is left untouched (empty recipe list) and
-    falls back to the caller's existing plain-text-rewrite behavior - not a
-    regression, since those shapes weren't handled before this either, and
-    no current test exercises a custom function inside CONSTRUCT/ASK/
-    DESCRIBE.
+    decomposed; anything else is left untouched (empty recipes/filters)
+    and falls back to the caller's existing plain-text-rewrite behavior -
+    not a regression, since those shapes weren't handled before this
+    either, and no current test exercises a custom function inside
+    CONSTRUCT/ASK/DESCRIBE.
 
     Any variable a recipe depends on that isn't itself another recipe's
     target (e.g. a triple-term variable bound by an ordinary graph pattern,
     needed as SUBJECT()/PREDICATE()/OBJECT()'s argument) is added to the
     query's own projected-variables list so the remote engine actually
     returns its value - the caller is responsible for trimming the extra
-    columns back out of the final result.
+    columns back out of the final result. Same treatment for a variable a
+    stripped filter depends on.
     """
     algebra = prepared_query.algebra
     if algebra.name != 'SelectQuery':
-        return []
+        return [], []
 
     local_vars: set = set()
     recipes: list = []
+    filters: list = []
     project = algebra.p
-    project['p'] = _strip_custom_extends(project.p, local_vars, recipes)
+    project['p'] = _strip_custom_extends(project.p, local_vars, recipes, filters)
 
     required: set = set()
     for _, expr in recipes:
+        required |= _expr_vars(expr)
+    for expr in filters:
         required |= _expr_vars(expr)
     required -= local_vars
 
@@ -161,7 +196,7 @@ def decompose_for_remote(prepared_query: Any) -> list[tuple[Variable, Any]]:
             pv.append(var)
     project['PV'] = pv
 
-    return recipes
+    return recipes, filters
 
 
 def evaluate_recipes_locally(recipes: list[tuple[Variable, Any]], row: dict, graph: Any) -> dict:
@@ -199,3 +234,31 @@ def evaluate_recipes_locally(recipes: list[tuple[Variable, Any]], row: dict, gra
             continue
         bindings[var] = value
     return bindings
+
+
+def row_passes_filters(filters: list[Any], bindings: dict, graph: Any) -> bool:
+    """Re-check each stripped filter expression (see `decompose_for_remote`)
+    against `bindings` (the row *after* `evaluate_recipes_locally` has
+    merged in every recipe's computed value, so a filter depending on one
+    of those - not just on an ordinary matched variable - sees it too),
+    mirroring SPARQL FILTER's own semantics: the row is excluded if any
+    expression is false or raises, not just if it's literally ``False``
+    (a filter's own "effective boolean value" coercion - `EBV` - already
+    handles truthy non-boolean results the same way a real FILTER would).
+    """
+    from rdflib.plugins.sparql.evaluate import _eval
+    from rdflib.plugins.sparql.operators import EBV
+    from rdflib.plugins.sparql.sparql import FrozenBindings, QueryContext, SPARQLError
+
+    if not filters:
+        return True
+    qctx = QueryContext(graph=graph)
+    fb = FrozenBindings(qctx, bindings)
+    for expr in filters:
+        try:
+            value = _eval(expr, fb)
+            if isinstance(value, SPARQLError) or not EBV(value):
+                return False
+        except SPARQLError:
+            return False
+    return True

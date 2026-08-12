@@ -1,20 +1,20 @@
 """Per-graph/dataset SPARQL query preparation cache.
 
-``StarlightGraph.query()`` and ``StarlightDataset.query()`` both rewrite
-SPARQL 1.2 triple-term syntax to SPARQL 1.1 (``rewrite_sparql12_to_11``) and
-then hand the resulting text to rdflib, which parses it into a fresh SPARQL
-algebra tree on every call. Callers that evaluate the same query text
-repeatedly against an unmutated graph with only ``initBindings`` differing -
-the exact shape of pySHACL's own SHACL-AF rule/constraint evaluation, which
-calls ``.query()`` once per focus node per rule per iteration - redo that
-rewrite+parse work every single time even though its result never changes
-between those calls.
+``StarlightGraph.query()`` and ``StarlightDataset.query()`` both parse
+SPARQL 1.2 query text via ``sparql1_2_to_rdf``'s real grammar/algebra
+pipeline (``prepare_query_12`` -> ``query_to_rdf11`` -> ``rdf11_to_query``)
+on every call. Callers that evaluate the same query text repeatedly against
+an unmutated graph with only ``initBindings`` differing - the exact shape of
+pySHACL's own SHACL-AF rule/constraint evaluation, which calls ``.query()``
+once per focus node per rule per iteration - redo that parse+lower work
+every single time even though its result never changes between those calls.
 
-``prepare_query_cached`` caches the rewritten-and-parsed
+``prepare_query_cached`` caches the parsed-and-lowered
 ``rdflib.plugins.sparql.sparql.Query`` object, keyed on the query text plus
-the *effective* namespace mapping and base IRI - both of which rdflib's own
-``prepareQuery`` bakes into the parsed query at parse time, so they're part
-of what makes two calls equivalent, not just the query text. Passing an
+the *effective* namespace mapping and base IRI - both of which are baked
+into the parsed query at parse time (via ``prepare_query_12``'s own
+``initNs``/``base`` passthrough to ``translateQuery``), so they're part of
+what makes two calls equivalent, not just the query text. Passing an
 already-prepared ``Query`` object instead of a string to ``Graph.query()``
 is a first-class, documented rdflib capability (``Store.query()``'s own
 type signature is ``Union[Query, str]``, and ``SPARQLProcessor.query()``
@@ -24,18 +24,19 @@ store honors that contract: confirmed via real Fuseki testing that
 (used for any remote HTTP SPARQL endpoint, not just Fuseki) hard-require a
 plain string (``assert isinstance(query, str)`` in their own ``query()``),
 raising ``AssertionError`` rather than falling back gracefully. Callers
-must check ``_store_accepts_prepared_query`` before deciding whether to
-use the cached prepared object or fall back to a plain rewritten string.
+must check ``store_accepts_prepared_query`` before deciding whether to use
+the cached prepared object directly, or serialize it back to text first
+(see ``StarlightGraph.query()``'s own generalized remote-store handling).
 """
 
 from __future__ import annotations
 
 from typing import Any, Mapping
 
-from rdflib.plugins.sparql import prepareQuery
 from rdflib.plugins.sparql.sparql import Query
 
-from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
+from sparql1_2_to_rdf.parse12 import prepare_query_12
+from sparql1_2_to_rdf.lower_rdf11 import query_to_rdf11, rdf11_to_query
 
 # Store classes confirmed (via real Fuseki testing, not just code reading)
 # to hard-require a plain query string - their own query() methods assert
@@ -90,7 +91,25 @@ def prepare_query_cached(
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
-    rewritten = rewrite_sparql12_to_11(query_text)
-    prepared = prepareQuery(rewritten, initNs=dict(effective_ns) if effective_ns else {}, base=base)
+    from starlight.query.version_directive import strip_version_directive, contains_triple_term
+    stripped_text, declared_version = strip_version_directive(query_text)
+    prepared_12 = prepare_query_12(
+        stripped_text, base=base, initNs=dict(effective_ns) if effective_ns else None
+    )
+    if declared_version is not None:
+        # A conformance warning fires at most once per distinct (query text,
+        # namespaces, base) tuple, not on every call - a query that misses
+        # the cache the first time and hits it on every repeat evaluation
+        # (this cache's whole reason to exist) only needs to be flagged
+        # once, not once per evaluation.
+        from starlight.model.conformance import check_version_conformance
+        check_version_conformance(
+            declared_version,
+            uses_triple_term=contains_triple_term(prepared_12.algebra),
+            uses_dirlangstring='--' in stripped_text,
+            context='SPARQL query',
+        )
+    rdf_graph, root = query_to_rdf11(prepared_12)
+    prepared = rdf11_to_query(rdf_graph, root)
     cache[cache_key] = prepared
     return prepared

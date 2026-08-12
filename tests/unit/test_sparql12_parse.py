@@ -101,7 +101,21 @@ class TestParseQueryTripleTermObject:
         assert tt['object']['localname']    == 'carol'
 
 
-class TestParseQueryNestedTripleTerm:
+class TestParseQueryNestedTripleTermInSubjectPosition:
+    """A triple term nested in *subject* position - <<( <<(...)>> :p :o )>>
+    - is syntactically parseable SPARQL (the W3C suite even labels this
+    shape a PositiveSyntaxTest: compound-tripleterm-subject/
+    nested-tripleterm-02) but not a legal RDF 1.2 term: per the grammar
+    (https://www.w3.org/TR/rdf12-turtle/#grammar-production-tripleTerm),
+    nesting a triple term is legal only in *object* position. Confirmed via
+    a live Oxigraph instance rejecting exactly this shape (HTTP 500) - see
+    sparql1_2_to_rdf/triple_term.py's own InvalidTripleTermError docstring
+    for the full investigation. Rejecting it here (construction time, not
+    just at the grammar level) is the correct, spec-compliant behavior;
+    this class previously asserted the opposite (silent acceptance), which
+    was itself the bug.
+    """
+
     Q = """
         PREFIX : <http://example.org/>
         SELECT ?x WHERE {
@@ -109,10 +123,27 @@ class TestParseQueryNestedTripleTerm:
         }
     """
 
+    def test_raises_invalid_triple_term_error(self):
+        from sparql1_2_to_rdf.triple_term import InvalidTripleTermError
+        with pytest.raises(InvalidTripleTermError):
+            parseQuery(self.Q)
+
+
+class TestParseQueryNestedTripleTermInObjectPosition:
+    """The legal nesting shape - a triple term inside another's *object*
+    position - still parses and preserves structure correctly."""
+
+    Q = """
+        PREFIX : <http://example.org/>
+        SELECT ?x WHERE {
+          <<( :pred :p <<( :a :b :c )>> )>> ?x :val .
+        }
+    """
+
     def test_does_not_raise(self):
         parseQuery(self.Q)
 
-    def test_outer_subject_is_triple_term(self):
+    def test_outer_object_is_triple_term(self):
         result = parseQuery(self.Q)
         tb = _first_triples_block(result)
         outer = tb['triples'][0][0]
@@ -122,7 +153,7 @@ class TestParseQueryNestedTripleTerm:
         result = parseQuery(self.Q)
         tb = _first_triples_block(result)
         outer = tb['triples'][0][0]
-        inner = outer['subject']
+        inner = outer['object']
         assert _is_triple_term(inner)
         assert inner['subject']['localname']   == 'a'
         assert inner['predicate']['localname'] == 'b'

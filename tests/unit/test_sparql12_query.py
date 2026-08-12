@@ -412,7 +412,7 @@ class TestQ12:
 
 
 # ---------------------------------------------------------------------------
-# Q13 — isTripleTerm and assertion check
+# Q13 — isTRIPLE and assertion check
 # ---------------------------------------------------------------------------
 
 class TestQ13:
@@ -421,7 +421,7 @@ class TestQ13:
             PREFIX :   <http://example.org/>
             SELECT DISTINCT ?tt WHERE {
               { ?s ?p ?tt } UNION { ?tt ?p ?o }
-              FILTER(isTripleTerm(?tt))
+              FILTER(isTRIPLE(?tt))
             }
         """)
         tts = [row[r.vars[0]] for row in r.bindings]
@@ -433,7 +433,7 @@ class TestQ13:
             PREFIX :   <http://example.org/>
             SELECT DISTINCT ?tt ?s ?p ?o WHERE {
               { ?sub ?pred ?tt } UNION { ?tt ?pred ?obj }
-              FILTER(isTripleTerm(?tt))
+              FILTER(isTRIPLE(?tt))
               BIND(SUBJECT(?tt) AS ?s)
               BIND(PREDICATE(?tt) AS ?p)
               BIND(OBJECT(?tt) AS ?o)
@@ -452,7 +452,7 @@ class TestQ13:
             PREFIX :   <http://example.org/>
             SELECT DISTINCT ?tt ?s ?p ?o WHERE {
               { ?sub ?pred ?tt } UNION { ?tt ?pred ?obj }
-              FILTER(isTripleTerm(?tt))
+              FILTER(isTRIPLE(?tt))
               BIND(SUBJECT(?tt) AS ?s)
               BIND(PREDICATE(?tt) AS ?p)
               BIND(OBJECT(?tt) AS ?o)
@@ -654,12 +654,20 @@ class TestQ18:
 
 
 # ---------------------------------------------------------------------------
-# Q19 — isTRIPLE() spec-name alias for isTripleTerm()
+# Q19 — isTRIPLE()
+#
+# Previously also tested equivalence with isTripleTerm(), a starlight-only,
+# pre-spec-stabilization alias for the same function. That alias is not
+# SPARQL syntax at all - only a name the legacy text-based rewriter special-
+# cased before rdflib's real parser ever saw the query - and is gone now
+# that queries go through sparql1_2_to_rdf's real, spec-based grammar
+# instead. isTRIPLE() (the actual spec name, RDF 1.2 17.4.6) is unaffected
+# and already covered by every other isTRIPLE test in this file.
 # ---------------------------------------------------------------------------
 
 class TestQ19:
-    def test_is_triple_alias_matches_is_triple_term(self, g):
-        via_spec_name = g.query("""
+    def test_is_triple(self, g):
+        r = g.query("""
             PREFIX :   <http://example.org/>
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             SELECT DISTINCT ?t WHERE {
@@ -667,17 +675,7 @@ class TestQ19:
               FILTER(isTRIPLE(?t))
             }
         """)
-        via_starlight_name = g.query("""
-            PREFIX :   <http://example.org/>
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            SELECT DISTINCT ?t WHERE {
-              ?sub ?pred ?t .
-              FILTER(isTripleTerm(?t))
-            }
-        """)
-        got = {row[via_spec_name.vars[0]] for row in via_spec_name.bindings}
-        expected = {row[via_starlight_name.vars[0]] for row in via_starlight_name.bindings}
-        assert got == expected
+        got = {row[r.vars[0]] for row in r.bindings}
         assert got == {TripleTerm(URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol'))}
 
 
@@ -703,13 +701,6 @@ class TestQ20:
         r = g.query("""
             PREFIX :   <http://example.org/>
             SELECT (isTRIPLE(TRIPLE(:bob, :knows, :carol)) AS ?v) WHERE {}
-        """)
-        assert r.bindings[0][r.vars[0]] == Literal(True)
-
-    def test_is_triple_term_of_nested_triple_in_select_projection(self, g):
-        r = g.query("""
-            PREFIX :   <http://example.org/>
-            SELECT (isTripleTerm(TRIPLE(:bob, :knows, :carol)) AS ?v) WHERE {}
         """)
         assert r.bindings[0][r.vars[0]] == Literal(True)
 
@@ -853,11 +844,18 @@ class TestQ22:
         assert row[r.vars[0]] == URIRef(EX + 'knows')
         assert row[r.vars[1]] == URIRef(EX + 'carol')
 
-    def test_subject_of_nested_triple_term_literal_restores_correctly(self):
+    def test_object_of_nested_triple_term_literal_restores_correctly(self):
+        # Nesting a triple term is legal only in *object* position (RDF 1.2
+        # grammar: https://www.w3.org/TR/rdf12-turtle/#grammar-production-tripleTerm) -
+        # previously this used <<( <<(...)>> :p :o )>> (nested in *subject*
+        # position), a shape that's syntactically parseable SPARQL but not
+        # a legal RDF 1.2 term (see sparql1_2_to_rdf/triple_term.py's
+        # InvalidTripleTermError docstring for the full investigation,
+        # confirmed via a live Oxigraph rejecting exactly this shape).
         empty = StarlightGraph()
         r = empty.query("""
             PREFIX :   <http://example.org/>
-            SELECT (SUBJECT(<<( <<( :bob :knows :carol )>> :p :o )>>) AS ?s) WHERE {}
+            SELECT (OBJECT(<<( :p :q <<( :bob :knows :carol )>> )>>) AS ?o) WHERE {}
         """)
         assert r.bindings[0][r.vars[0]] == TripleTerm(
             URIRef(EX + 'bob'), URIRef(EX + 'knows'), URIRef(EX + 'carol')

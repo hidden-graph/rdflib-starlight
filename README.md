@@ -127,12 +127,11 @@ g = StarlightGraph(store=store, backend='rdf-1.2')
 ## Testing
 
 ```bash
-pytest tests/ -m "not integration and not algebra_ir" -v   # unit + W3C conformance — no server needed
-pytest tests/ -m "integration and not algebra_ir" -v       # + real backends (Fuseki/Oxigraph/SQLite)
-pytest tests/ -m "algebra_ir" -v                            # opt-in sparql1_2_to_rdf pipeline — run separately, see below
+pytest tests/ -m "not integration" -v   # unit + W3C conformance — no server needed
+pytest tests/ -m "integration" -v       # + real backends (Fuseki/Oxigraph/SQLite)
 ```
 
-See [docs/testing-strategy.md](docs/testing-strategy.md) for the full tier breakdown (including cross-backend parity, performance benchmarks, and why the `algebra_ir` tier needs its own separate invocation) and what each one is actually checking.
+See [docs/testing-strategy.md](docs/testing-strategy.md) for the full tier breakdown (including cross-backend parity and performance benchmarks) and what each one is actually checking.
 
 ## License
 

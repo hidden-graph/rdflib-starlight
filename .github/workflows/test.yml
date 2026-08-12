@@ -37,9 +37,9 @@ jobs:
         with:
           path: rdflib-starlight
 
-      # Sibling checkout: rdflib-starlight now depends on sparql1_2_to_rdf
-      # (see pyproject.toml) for the opt-in sparql_pipeline='algebra_ir'
-      # SPARQL 1.2 engine - installed editable from ../sparql1.2_to_rdf, same
+      # Sibling checkout: rdflib-starlight depends on sparql1_2_to_rdf (see
+      # pyproject.toml) for its SPARQL 1.2 engine (query/update parsing and
+      # lowering) - installed editable from ../sparql1.2_to_rdf, same
       # relative layout local development already uses.
       - uses: actions/checkout@v4
         with:
@@ -65,18 +65,8 @@ jobs:
 
       - name: Run unit and W3C tests
         working-directory: rdflib-starlight
-        run: pytest tests/ -m "not integration and not algebra_ir" -v
+        run: pytest tests/ -m "not integration" -v
 
       - name: Run integration tests (Oxigraph + SQLite; Fuseki-only tests self-skip)
         working-directory: rdflib-starlight
-        run: pytest tests/ -m "integration and not algebra_ir" -v
-
-      # Separate invocation, deliberately: running algebra_ir tests in the
-      # same pytest process as the legacy-pipeline tests above can corrupt
-      # sparql1_2_to_rdf's grammar installation via a pytest assertion-
-      # rewrite interaction - a real, confirmed pytest/pyparsing interaction
-      # bug, not a defect in the pipeline itself (this step passes cleanly
-      # every time run this way). See docs/testing-strategy.md.
-      - name: Run algebra_ir pipeline tests (separate invocation - see above)
-        working-directory: rdflib-starlight
-        run: pytest tests/ -m "algebra_ir" -v
+        run: pytest tests/ -m "integration" -v

@@ -33,7 +33,7 @@ from rdflib import Dataset, Graph, URIRef, BNode
 from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 
 from starlight.graph.starlight_graph import (
-    StarlightGraph, VALID_BACKENDS, VALID_SPARQL_PIPELINES, _raw_triples, _read_source_text,
+    StarlightGraph, VALID_BACKENDS, _raw_triples, _read_source_text,
 )
 from starlight.model.encoding import TT_NS, ENCODING_PREDS as _ENCODING_PREDS, lookup_tt_hash, restore_select_bindings
 from starlight.model.triple import TripleTerm
@@ -64,16 +64,11 @@ class StarlightDataset(Dataset):
                                       TripleTerms restored; encoding triples filtered
     """
 
-    def __init__(self, *args, backend: str = 'rdf-1.1', sparql_pipeline: str = 'legacy', **kwargs):
+    def __init__(self, *args, backend: str = 'rdf-1.1', **kwargs):
         if backend not in VALID_BACKENDS:
             raise ValueError(f"backend must be one of {sorted(VALID_BACKENDS)}, got {backend!r}")
-        if sparql_pipeline not in VALID_SPARQL_PIPELINES:
-            raise ValueError(
-                f"sparql_pipeline must be one of {sorted(VALID_SPARQL_PIPELINES)}, got {sparql_pipeline!r}"
-            )
         super().__init__(*args, **kwargs)
         self._backend = backend
-        self._sparql_pipeline = sparql_pipeline
         self._sg_cache: dict[str, StarlightGraph] = {}
         self._raw_execution_graph: Dataset | None = None
         self._prepared_query_cache: dict = {}  # see starlight.query.query_cache.prepare_query_cached
@@ -465,10 +460,11 @@ class StarlightDataset(Dataset):
               initNs=None, initBindings=None, use_store_provided=True, **kwargs):
         """Execute a SPARQL query across all named graphs with SPARQL-star support.
 
-        Triple-term patterns (``<<( )>>``, ``{| |}``, ``~``, SUBJECT/PREDICATE/
-        OBJECT functions, isTripleTerm) are rewritten to SPARQL 1.1 before
-        execution.  SELECT result rows are post-processed to restore tt:HASH
-        URIRefs back to TripleTerm objects.
+        SPARQL 1.2 syntax (``<<( )>>``, ``{| |}``, ``~``, SUBJECT/PREDICATE/
+        OBJECT/isTRIPLE) is parsed via sparql1_2_to_rdf's real grammar and
+        lowered to plain SPARQL 1.1 (tt:HASH encoding) before execution.
+        SELECT result rows are post-processed to restore tt:HASH URIRefs
+        back to TripleTerm objects.
 
         Rewriting and parsing are cached (``prepare_query_cached``) on
         (query text, effective namespaces, base) - not cleared on
@@ -493,26 +489,17 @@ class StarlightDataset(Dataset):
             )
 
         if isinstance(query_object, str):
-            if self._sparql_pipeline == 'algebra_ir' and not initNs and not kwargs.get('base'):
-                # Opt-in new pipeline (see StarlightGraph.query()'s identical
-                # branch and VALID_SPARQL_PIPELINES's own comment for the
-                # full rationale). No remote-store dispatch complexity
-                # needed here unlike StarlightGraph: _build_raw_execution_graph()
-                # below is *always* a fresh, local, in-memory Dataset copy
-                # (no store= argument) regardless of what this dataset's own
-                # backing store is, so the resulting Query object can always
-                # be handed to it directly.
-                from sparql1_2_to_rdf.parse12 import prepare_query_12
-                from sparql1_2_to_rdf.lower_rdf11 import query_to_rdf11, rdf11_to_query
-                prepared_12 = prepare_query_12(query_object)
-                rdf_graph, root = query_to_rdf11(prepared_12)
-                query_object = rdf11_to_query(rdf_graph, root)
-            else:
-                from starlight.query.query_cache import prepare_query_cached
-                effective_ns = initNs if initNs else dict(self.namespaces())
-                query_object = prepare_query_cached(
-                    self._prepared_query_cache, query_object, effective_ns, kwargs.get('base')
-                )
+            # No remote-store dispatch complexity needed here unlike
+            # StarlightGraph: _build_raw_execution_graph() below is
+            # *always* a fresh, local, in-memory Dataset copy (no store=
+            # argument) regardless of what this dataset's own backing
+            # store is, so the resulting Query object can always be handed
+            # to it directly.
+            from starlight.query.query_cache import prepare_query_cached
+            effective_ns = initNs if initNs else dict(self.namespaces())
+            query_object = prepare_query_cached(
+                self._prepared_query_cache, query_object, effective_ns, kwargs.get('base')
+            )
         raw = self._build_raw_execution_graph()
         r = raw.query(query_object, processor=processor, result=result,
                       initNs=initNs, initBindings=initBindings,
@@ -534,9 +521,6 @@ class StarlightDataset(Dataset):
         are rebuilt after execution so that newly added triple terms are
         immediately visible.
 
-        Limitation: ground ``<<( )>>`` inside ``INSERT DATA { GRAPH <uri> { } }``
-        blocks is not supported — use ``ds.get_context(uri).add(triple)`` instead.
-
         Remote-store (Fuseki/Oxigraph) updates bypass rdflib's own
         ``Dataset(store=...).update()`` and are sent over HTTP directly (see
         ``starlight.backends.native.native_update``) — needed for *both*
@@ -552,31 +536,19 @@ class StarlightDataset(Dataset):
         testing: a plain ``INSERT DATA { GRAPH <uri> {...} }`` with no triple
         terms at all got a 400 from both. For the rdf-1.2 backend the update
         text is sent unmodified (the endpoint understands ``<<( )>>``
-        natively); for rdf-1.1 it is still rewritten to the tt:HASH encoding
-        first, same as before.
+        natively); for rdf-1.1 it is parsed and lowered to the tt:HASH
+        encoding first (native_update itself, via sparql1_2_to_rdf).
         """
         is_remote_http_store = bool(
             getattr(self.store, 'query_endpoint', None) and getattr(self.store, 'update_endpoint', None)
         )
         if not is_remote_http_store:
-            if (
-                self._sparql_pipeline == 'algebra_ir'
-                and isinstance(update_object, str)
-                and not initNs
-                and not kwargs.get('base')
-            ):
-                # Opt-in new pipeline, local-store case only - see query()'s
-                # identical branch above. Not yet extended to a remote HTTP
-                # store (the `else` branch below, native_update) - a known,
-                # documented scope gap, not silently mishandled.
+            if isinstance(update_object, str):
                 from sparql1_2_to_rdf.parse12 import prepare_update_12
                 from sparql1_2_to_rdf.lower_rdf11 import update_to_rdf11, rdf11_to_update
-                prepared_12 = prepare_update_12(update_object)
+                prepared_12 = prepare_update_12(update_object, base=kwargs.get('base'), initNs=initNs)
                 rdf_graph, root = update_to_rdf11(prepared_12)
                 update_object = rdf11_to_update(rdf_graph, root)
-            elif isinstance(update_object, str):
-                from starlight.query.sparql12_to_11 import rewrite_sparql12_to_11
-                update_object = rewrite_sparql12_to_11(update_object)
             # default_union forwarded from self - same rationale as
             # _build_raw_execution_graph(): a GRAPH-less WHERE clause should
             # see the same default-graph-is-the-union semantics self.triples()

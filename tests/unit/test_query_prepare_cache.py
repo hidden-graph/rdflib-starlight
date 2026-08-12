@@ -22,17 +22,30 @@ EX2 = Namespace("http://example2.org/")
 
 @pytest.fixture
 def counting_prepare_query(monkeypatch):
-    """Count real calls to rdflib.plugins.sparql.prepareQuery, patched at
-    every import site that could hold a reference to it."""
+    """Count real calls to the actual parse+prepare entry point, patched at
+    every site that could do the real work: sparql1_2_to_rdf's
+    prepare_query_12 (starlight.query.query_cache's own local-store path,
+    the thing this cache exists to avoid redoing) and plain rdflib's own
+    prepareQuery (still used by StarlightGraph.query()'s remote-store
+    fallback branch, which serializes back to text for a store that can't
+    accept a prepared object - see query_cache.py's own module docstring).
+    """
     calls = {"n": 0}
-    original = _sparql_mod.prepareQuery
+    from sparql1_2_to_rdf import parse12 as _parse12_mod
 
-    def counting(*args, **kwargs):
+    original_prepare_query_12 = _parse12_mod.prepare_query_12
+    original_prepareQuery = _sparql_mod.prepareQuery
+
+    def counting_prepare_query_12(*args, **kwargs):
         calls["n"] += 1
-        return original(*args, **kwargs)
+        return original_prepare_query_12(*args, **kwargs)
 
-    monkeypatch.setattr(_sparql_mod, "prepareQuery", counting)
-    monkeypatch.setattr("starlight.query.query_cache.prepareQuery", counting)
+    def counting_prepareQuery(*args, **kwargs):
+        calls["n"] += 1
+        return original_prepareQuery(*args, **kwargs)
+
+    monkeypatch.setattr("starlight.query.query_cache.prepare_query_12", counting_prepare_query_12)
+    monkeypatch.setattr(_sparql_mod, "prepareQuery", counting_prepareQuery)
     return calls
 
 
